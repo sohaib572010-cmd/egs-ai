@@ -58,19 +58,19 @@ const PLANS = [
     price: 60,
     period: 'لمدة 30 يوماً',
     dailyCoins: '80 عملة ذكاء اصطناعي يومياً',
-    badge: 'الباقة الأكثر طلباً',
-    popular: true,
+    badge: 'الباقة التمهيدية',
+    popular: false,
     perDay: '2 ج.م / يوم فقط'
   },
   {
     id: 'pro_2m',
     name: 'باقة شهرين (2 Months)',
-    price: 100,
+    price: 110,
     period: 'لمدة 60 يوماً',
     dailyCoins: '90 عملة ذكاء اصطناعي يومياً',
-    badge: 'توفير 20 جنيه',
+    badge: 'الباقة المرنة',
     popular: false,
-    perDay: '1.6 ج.م / يوم'
+    perDay: '1.83 ج.م / يوم'
   },
   {
     id: 'pro_3m',
@@ -78,16 +78,16 @@ const PLANS = [
     price: 140,
     period: 'لمدة 90 يوماً كاملة (فصل دراسي)',
     dailyCoins: '120 عملة ذكاء اصطناعي يومياً',
-    badge: 'أعلى قيمة وتوفير',
-    popular: false,
-    perDay: '1.5 ج.م / يوم'
+    badge: 'خيار 85% من الطلاب المتفوقين — باقة الترم الكامل',
+    popular: true,
+    perDay: 'فقط 1.5 ج.م / يوم (أعلى توفير)'
   }
 ];
 
 function SponsorContent() {
   const searchParams = useSearchParams();
   const studentId = searchParams.get('student_id') || searchParams.get('studentId') || '';
-  const initialPlan = searchParams.get('plan') || 'pro_1m';
+  const initialPlan = searchParams.get('plan') || 'pro_3m';
 
   const [student, setStudent] = useState<StudentInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -212,6 +212,26 @@ function SponsorContent() {
         <span>العودة إلى منصة EGS AI</span>
       </Link>
 
+      {/* Payment Result Notification */}
+      {searchParams.get('payment_result') === 'success' && (
+        <div style={{ background: 'rgba(16, 185, 129, 0.12)', border: '1px solid rgba(16, 185, 129, 0.3)', color: 'var(--success-color)', padding: '16px 20px', borderRadius: '14px', marginBottom: '24px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <CheckCircle2 size={24} style={{ flexShrink: 0 }} />
+          <div>
+            <div style={{ fontWeight: 800, fontSize: '0.96rem' }}>تم تأكيد عملية الدفع بنجاح!</div>
+            <div style={{ fontSize: '0.84rem', marginTop: '2px', opacity: 0.9 }}>تم تفعيل باقة اشتراك الطالب فوراً وأصبحت ميزات Pro والعملات اليومية متاحة في حسابه الآن.</div>
+          </div>
+        </div>
+      )}
+      {searchParams.get('payment_result') === 'failed' && (
+        <div style={{ background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.25)', color: '#ef4444', padding: '16px 20px', borderRadius: '14px', marginBottom: '24px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <HelpCircle size={24} style={{ flexShrink: 0 }} />
+          <div>
+            <div style={{ fontWeight: 800, fontSize: '0.96rem' }}>تعذرت عملية الدفع أو تم إلغاؤها</div>
+            <div style={{ fontSize: '0.84rem', marginTop: '2px', opacity: 0.9 }}>يمكنك المحاولة مرة أخرى باستخدام بطاقة بنكية أخرى أو محفظة إلكترونية.</div>
+          </div>
+        </div>
+      )}
+
       {/* Header Banner */}
       <div style={{ textAlign: 'center', marginBottom: '28px' }}>
         <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 16px', borderRadius: '24px', fontSize: '0.84rem', fontWeight: 800, marginBottom: '12px' }}>
@@ -259,15 +279,34 @@ function SponsorContent() {
       </div>
 
       {/* Value Comparison vs Private Lessons */}
-      <div style={{ background: 'linear-gradient(135deg, rgba(0, 180, 216, 0.08) 0%, rgba(114, 9, 183, 0.06) 100%)', borderRadius: '16px', border: '1px solid rgba(0, 180, 216, 0.25)', padding: '18px 22px', marginBottom: '32px' }}>
-        <div style={{ fontSize: '0.98rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-          <Sparkles size={18} color="var(--primary-color)" />
-          <span>لماذا يختار أولياء الأمور منصة EGS AI؟</span>
+      <div style={{ background: 'linear-gradient(135deg, rgba(0, 180, 216, 0.08) 0%, rgba(114, 9, 183, 0.06) 100%)', borderRadius: '16px', border: '1px solid rgba(0, 180, 216, 0.25)', padding: '20px 24px', marginBottom: '32px' }}>
+        <div style={{ fontSize: '1.05rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Sparkles size={20} color="var(--primary-color)" />
+          <span>استثمارك الأفضل في تفوق ابنك الأكاديمي (مقارنة واقعية لولي الأمر)</span>
         </div>
+        
+        {/* Parent Cost Comparison Box */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px', margin: '14px 0', background: 'var(--card-bg)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+          <div style={{ borderLeft: '1px solid var(--border-color)', paddingLeft: '12px' }}>
+            <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', fontWeight: 700 }}>تكلفة الدروس الخصوصية للترم:</span>
+            <div style={{ fontSize: '1.15rem', fontWeight: 900, color: 'var(--danger-color)', marginTop: '4px' }}>
+              ~2,400 إلى 4,500 ج.م
+            </div>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>حصة أسبوعية محدودة مع مشقة الانتقال</span>
+          </div>
+          <div>
+            <span style={{ fontSize: '0.76rem', color: 'var(--primary-color)', fontWeight: 700 }}>باقة الترم الكامل في EGS AI:</span>
+            <div style={{ fontSize: '1.15rem', fontWeight: 900, color: 'var(--success-color)', marginTop: '4px' }}>
+              140 ج.م فقط (توفير 94%+)
+            </div>
+            <span style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>معلم خصوصي ذكي مرافق لابنك 24/7 طوال الترم</span>
+          </div>
+        </div>
+
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px', marginTop: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
             <CheckCircle2 size={16} color="var(--success-color)" style={{ flexShrink: 0, marginTop: '2px' }} />
-            <span>تغطية معتمدة لكل كتب ودروس المنهج المصري الرسمي لمرحلته الدراسية.</span>
+            <span>تغطية معتمدة لكل كتب ودروس المنهج المصري الرسمي لعام 2026.</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
             <CheckCircle2 size={16} color="var(--success-color)" style={{ flexShrink: 0, marginTop: '2px' }} />
@@ -279,7 +318,7 @@ function SponsorContent() {
           </div>
           <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
             <CheckCircle2 size={16} color="var(--success-color)" style={{ flexShrink: 0, marginTop: '2px' }} />
-            <span>أقل من 2 جنيه يومياً — يوفر آلاف الجنيهات الشهرية على الدروس الخصوصية.</span>
+            <span>ضمان استرجاع كامل المبلغ خلال 72 ساعة في حال لم ترتقِ نتائج ابنك.</span>
           </div>
         </div>
       </div>
@@ -396,33 +435,49 @@ function SponsorContent() {
         </div>
       )}
 
-      {/* Primary Payment Action: Kashier Online Checkout */}
-      <button
-        type="button"
-        onClick={handleCheckout}
-        disabled={subscribing}
-        className="btn-primary"
-        style={{
-          width: '100%',
-          padding: '16px 24px',
-          fontSize: '1.05rem',
-          fontWeight: 900,
-          borderRadius: '14px',
-          border: 'none',
-          cursor: subscribing ? 'not-allowed' : 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: '10px',
-          boxShadow: 'var(--shadow-glow-strong)',
-          marginBottom: '24px'
-        }}
-      >
-        <CreditCard size={20} />
-        <span>
-          {subscribing ? 'جاري تجهيز بوابة الدفع...' : `تأكيد ودفع ${activePlanObj.price} ج.م لتفعيل اشتراك الطالب فوراً`}
-        </span>
-      </button>
+      {/* Primary Payment Action or Active Subscription Card */}
+      {student.subscription_status === 'active' || (student.plan_type && student.plan_type !== 'free') ? (
+        <div style={{ background: 'rgba(16, 185, 129, 0.12)', border: '1px solid rgba(16, 185, 129, 0.3)', borderRadius: '14px', padding: '20px', textAlign: 'center', marginBottom: '24px' }}>
+          <CheckCircle2 size={36} color="var(--success-color)" style={{ margin: '0 auto 10px' }} />
+          <div style={{ fontWeight: 900, fontSize: '1.1rem', color: 'var(--text-main)', marginBottom: '6px' }}>
+            الطالب لديه باقة اشتراك نشطة وسارية بالفعل
+          </div>
+          <div style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+            حساب الطالب مفعّل حالياً ويتمتع بكافة مزايا باقة Pro والعملات اليومية المتجددة.
+          </div>
+          <Link href="/" className="btn-primary" style={{ textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '10px 24px', borderRadius: '10px', fontWeight: 800 }}>
+            <span>الذهاب للمنصة الرئيسية</span>
+            <ArrowRight size={16} />
+          </Link>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={handleCheckout}
+          disabled={subscribing}
+          className="btn-primary"
+          style={{
+            width: '100%',
+            padding: '16px 24px',
+            fontSize: '1.05rem',
+            fontWeight: 900,
+            borderRadius: '14px',
+            border: 'none',
+            cursor: subscribing ? 'not-allowed' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '10px',
+            boxShadow: 'var(--shadow-glow-strong)',
+            marginBottom: '24px'
+          }}
+        >
+          <CreditCard size={20} />
+          <span>
+            {subscribing ? 'جاري تجهيز بوابة الدفع...' : `تأكيد ودفع ${activePlanObj.price} ج.م لتفعيل اشتراك الطالب فوراً`}
+          </span>
+        </button>
+      )}
 
       {/* Supported Payment Badges */}
       <div style={{ textAlign: 'center', marginBottom: '32px' }}>

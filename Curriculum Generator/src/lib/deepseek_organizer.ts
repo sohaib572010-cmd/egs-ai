@@ -26,51 +26,60 @@ export const DEEPSEEK_RAG_SYSTEM_PROMPT = [
   "   - If this page is a CONTINUATION of an ongoing lesson or standard explanation page, start DIRECTLY with '### [عنوان الفقرة]' or paragraph text.",
   "   - NEVER output '# الوحدة' on continuation pages or standard explanation pages.",
   "",
-  "2. UNIT COVER / TITLE PAGES — UNIT HEADER ONLY (صفحة غلاف الوحدة يكتب فيها عنوان ورقم الوحدة فقط دون أي زيادة):",
-  "   - When a page is a Unit Cover (which introduces a new Unit and contains the Unit title, a list of unit lessons, and learning outcomes 'نواتج التعلم' / 'أهداف الوحدة'):",
-  "     * Extract the overarching UNIT NAME (e.g. 'المادة والطاقة', 'المادة والتفاعلات الكيميائية', 'العمليات الجيولوجية').",
-  "     * NEVER use a lesson name from the lesson index as the unit name (e.g. NOT 'حالات المادة', NOT 'التفاعلات الكيميائية').",
-  "     * Ensure the unit number is a valid sequential integer (1, 2, 3, 4, 5). If the OCR text merged a page/grade number (e.g. 'الوحدة 13'), correct it to the proper unit number (e.g. 'الوحدة 1').",
-  "     * Output EXACTLY ONE SINGLE LINE for the entire page: '# الوحدة [رقم الوحدة]: [عنوان الوحدة كما في الكتاب]'.",
-  "     * STRICTLY DO NOT output anything else on a unit cover page: NO '## الدرس' headers, NO lesson index list, NO 'نواتج التعلم' (Learning Outcomes), NO 'أهداف الوحدة', and NO intro text. The entire page output must be only that one '# الوحدة ...' line.",
+  "2. UNIT & CHAPTER DECLARATIONS (إعلان الفصول والوحدات بدقة ومنع ضياع الفصول):",
+  "   - If a page introduces a brand-new Unit or Chapter (either as a standalone cover page OR in the top header/banner of the first lesson of that chapter, e.g. 'الفصل الأول: البراهين الجبرية', 'الفصل الثاني: المتتابعات', 'الفصل الثالث: الأعداد المركبة والمعادلات', 'الفصل الرابع: الهندسة والمعادلات'):",
+  "     * You MUST declare the Level 1 header at the very top of the output: '# الوحدة [رقم]: [عنوان الوحدة كما في الكتاب]' or '# الفصل [رقم]: [عنوان الفصل كما في الكتاب]'.",
+  "     * If the same page also begins the first lesson of that chapter, immediately follow the Level 1 header with '## الدرس 1: [عنوان الدرس]'.",
+  "   - On continuation pages or subsequent lessons of the same chapter/unit, NEVER repeat '# الوحدة' or '# الفصل'.",
   "",
-  "3. LESSON & CHAPTER OPENING PAGES (بداية الدرس أو الفصل أو الموضوع):",
-  "   - On the opening page of a brand-new Lesson, Chapter, or Topic, you MUST declare the full Level 2 header:",
-  "     * Arabic Lessons: '## الدرس [رقم الدرس]: [عنوان الدرس كما في الكتاب]' (e.g. '## الدرس 1: مصادر دراسة الحضارات', '## الدرس الأول: أنواع التفاعلات الكيميائية').",
-  "     * Arabic Chapters/Topics: '## الفصل [رقم الفصل]: [عنوان الفصل]' (e.g. '## الفصل الأول: التفكير الإنساني') or '## الموضوع [رقم]: [عنوان الموضوع]'.",
-  "     * English Lessons: '## Lessons [X & Y]: [Title]' or '## Lesson [X]: [Title]' or '## Chapter [X]: [Title]'.",
-  "   - NEVER replace the lesson/chapter title with a subtitle '###'. The lesson/chapter opening header MUST ALWAYS be '##'.",
-  "   - If the opening page contains phrases like 'في هذا الدرس سندرس :' or learning goals, the '## الدرس ...' header MUST come first at the top of the page, and the instructional content follows under '### [عنوان المفهوم]'.",
+  "3. LESSON OPENING PAGES — OVERARCHING LESSON TITLES ONLY (استخراج عنوان الدرس الرئيسي وليس عنواناً فرعياً):",
+  "   - On the opening page of a brand-new Lesson, you MUST declare the full Level 2 header: '## الدرس [رقم الدرس]: [عنوان الدرس الكامل كما في الكتاب]'.",
+  "   - CRITICAL: Extract the MAIN OVERARCHING LESSON TITLE, NEVER an internal subtitle, topic, or experiment!",
+  "     * Example: If the page introduces 'الخواص الفيزيائية للماء' and lists subtopics like 'الكثافة', the lesson title MUST be '## الدرس 3: الخواص الفيزيائية للماء', NEVER '## الدرس 3: الكثافة'!",
+  "   - EGYPTIAN TEXTBOOK OCR PATTERNS: Egyptian textbooks often layout the lesson number and unit in graphic badges that OCR scans with mixed tokens. You MUST parse them accurately:",
+  "     * '1 الدرس الوحدة الأولى الغلاف المائي...' -> '## الدرس 1: الغلاف المائي على كوكب الأرض'",
+  "     * 'الدرس 1-3: حركة المقذوفات بزاوية' -> '## الدرس 3: حركة المقذوفات بزاوية' (NEVER merge 1-3 into 13!)",
+  "     * 'الدرس 1-4: عزم القوة' -> '## الدرس 4: عزم القوة' (NEVER merge 1-4 into 14!)",
+  "     * 'الدرس 6-2: انكسار الموجات' -> '## الدرس 6: انكسار الموجات'",
+  "     * 'الدرس 11-1: الحركة الدائرية...' -> '## الدرس 11: الحركة الدائرية: الأفقية والرأسية'",
+  "     * 'الدرس 8-2: تأثير دوبلر' -> '## الدرس 8: تأثير دوبلر'",
+  "     * '1-2 المتتابعات والحدود العامة' (الفصل الثاني) -> '## الدرس 1: المتتابعات والحدود العامة'",
+  "     * '1-3 الأعداد المركبة' (الفصل الثالث) -> '## الدرس 1: الأعداد المركبة'",
+  "     * '1-4 التقسيم الداخلي والخارجي' (الفصل الرابع) -> '## الدرس 1: أساسيات الهندسة الإحداثية'",
+  "   - ALWAYS output sequential lesson numbers (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12...). NEVER omit the lesson number; do NOT output '## الدرس: ...' without a number.",
+  "   - If a lesson starts without the word 'الدرس' (e.g. 'القدرة والكفاءة' with 'سؤال الدرس' below it), you MUST prepend '## الدرس [الرقم]: [الاسم]'.",
   "   - NEVER declare '## الدرس' on continuation pages of the same lesson.",
-  "   - NEVER convert internal explanation subtopics into '## الدرس'. All subtopics within a lesson must be '### [عنوان المفهوم]'.",
-  "   - NEVER confuse numbered points (1, 2, 3, أولاً, ثانياً) with Unit or Lesson numbers.",
   "",
   "4. COMPLETE EXPLANATION TEXT WITHOUT OMISSION (إلزام كتابة الشرح كاملاً دون نقصان):",
   "   - You are STRICTLY OBLIGATED to write the complete explanation text of the lesson without any omission, skipping, summarizing, or shortening.",
-  "   - Retain 100% of the instructional content, definitions, scientific reasoning (علل / بما تفسر / ماذا يحدث عند), experiments, observation notes (ملحوظة هامة / تذكر أن / انتبه), rules, mathematical/scientific derivations, and step-by-step educational explanations exactly as written in the textbook.",
-  "   - Write the entire text under every title in full detail without abbreviation.",
+  "   - Retain 100% of the instructional content, definitions, scientific reasoning (علل / بما تفسر / ماذا يحدث عند), experiments, observation notes, rules, and mathematical derivations exactly as written in the textbook.",
   "",
   "5. ACCURATE AND DISTINCT HEADING HIERARCHY (عناوين دقيقة ومميزة حرفياً كما في الكتاب):",
   "   - Write all headings accurately and verbatim as they appear in the original textbook word-for-word:",
-  "     * Level 1 (#): Unit Header ONLY -> '# الوحدة [رقم الوحدة]: [عنوان الوحدة كما في الكتاب]' (Unit cover page only) OR Major Divisions (e.g. '# قسم النحو والصرف', '# القصة المقررة: [اسم القصة]').",
-  "     * Level 2 (##): Lesson / Chapter Header ONLY -> '## الدرس [رقم]: [عنوان الدرس]' / '## الفصل [رقم]: [عنوان الفصل]' / '## Lessons [X & Y]: [Title]' / '## Chapter [X]: [Title]' (Opening page only).",
+  "     * Level 1 (#): Primary Unit / Chapter Header ONLY -> '# الوحدة [رقم]: [عنوان الوحدة]' OR '# الفصل [رقم]: [عنوان الفصل]' (Chapter start only) OR Major Divisions (e.g. '# قسم النحو والصرف').",
+  "     * Level 2 (##): Lesson Header ONLY -> '## الدرس [رقم]: [عنوان الدرس]' (Opening page only).",
   "     * Level 3 (###): Major explanation topics/sections within the lesson -> '### [عنوان الفقرة أو المفهوم بالضبط كما في الكتاب]'",
   "     * Level 4 (####): Minor sub-sections inside the explanation -> '#### [عنوان فرعي داخلي بالشرح]'",
-  "   - Keep headings distinct, clear, well-spaced, and faithful to the textbook.",
   "",
-  "6. COMPLETE EXCLUSION OF QUESTIONS & EXERCISES (تجاهل جميع الأسئلة والاكتفاء بالشرح فقط):",
-  "   - If there are questions, exercises, tests, drills, problem sets, or quizzes on the lesson (e.g. 'أسئلة على الدرس', 'تدريبات', 'تمارين', 'اختبر نفسك', 'أسئلة تقويمية', 'الواجب المنزلي', multiple-choice questions, fill-in-the-blanks), you MUST COMPLETELY IGNORE AND EXCLUDE THEM.",
+  "6. COMPLETE EXCLUSION OF FRONT & BACK MATTER (تجاهل صفحات الغلاف والمقدمات والفهرس والمؤلفين والأغلفة الخلفية):",
+  "   - If a page contains only book covers, copyright notices, pedagogical introductions (مقدمة / مقدمة الكتاب), student guide (كيف تستخدم هذا الكتاب / كيف يسير التعلم هنا), table of contents (فهرس المحتويات), author/reviewer credits (المؤلفون / المراجعون / فريق الإعداد والاعتماد), publisher marks (SPRIX, CACD), or student fields (class, name), output an EMPTY string.",
+  "   - STRICTLY FORBIDDEN to invent or hallucinate educational lessons (e.g. real numbers or general introductions) for non-content or back-cover pages.",
+  "",
+  "7. STRICT PROHIBITION OF EMOJIS (حظر تام لاستخدام الرموز التعبيرية):",
+  "   - STRICTLY PROHIBITED to output emojis anywhere in headings, titles, or body text (no ⚠️, ⭐, 💡, 🤔, 🔎, 👆, etc.).",
+  "",
+  "8. COMPLETE EXCLUSION OF QUESTIONS & EXERCISES (تجاهل جميع الأسئلة والاكتفاء بالشرح فقط):",
+  "   - If there are questions, exercises, tests, drills, problem sets, or quizzes on the lesson, you MUST COMPLETELY IGNORE AND EXCLUDE THEM.",
   "   - Output ONLY the educational explanation, rules, facts, and concepts.",
   "",
-  "7. STRICT PROHIBITION OF META-LABELS & CONTENT CLASSIFICATION NOTES (حظر تام لملاحظات التصنيف والتمهيد):",
-  "   - STRICTLY FORBIDDEN to write any meta-notes, editorial labels, content type tags, or commentary such as: '[نوع المحتوى: تمهيدي]', '[نوع المحتوى: شرح مفصل]', 'هذا محتوى تمهيدي', 'ملاحظة: هذا شرح', 'هذا تمهيد', 'محتوى تأسيسي', or any remarks describing whether content is introductory or explanatory.",
-  "   - Do NOT label or categorize the content. Output the textbook content directly under its headings with ZERO meta-tags and ZERO AI commentary.",
+  "9. STRICT PROHIBITION OF META-LABELS & CONTENT CLASSIFICATION NOTES (حظر تام لملاحظات التصنيف والتمهيد):",
+  "   - STRICTLY FORBIDDEN to write any meta-notes, editorial labels, content type tags, or commentary.",
   "",
-  "8. LANGUAGE FIDELITY & LATEX FORMULAS:",
+  "10. LANGUAGE FIDELITY & LATEX FORMULAS:",
   "   - Preserve the exact language of the original curriculum text.",
   "   - Format all mathematical, physical, and chemical equations in standard LaTeX ($$ block, $ inline).",
   "",
-  "9. PURE OUTPUT FORMAT:",
+  "11. PURE OUTPUT FORMAT:",
   "   - Output pure, clean Markdown directly with NO markdown code block fences (no ```markdown), NO conversational remarks, NO meta-notes, and NO introductory or concluding greetings."
 ].join("\n");
 
@@ -102,37 +111,72 @@ export async function organizeTextWithDeepSeek(
         "",
         "Structure this textbook page into pure Markdown following all system rules:",
         "1. IGNORE decorative margin footers/headers (e.g. '14 | الوحدة 1...', '286 الوحدة 4...'). On continuation pages and standard explanation pages, start directly with '### [عنوان الفقرة]' or text. NEVER output '# الوحدة' or '## الدرس' from margin footers.",
-        "2. On Unit cover pages, write ONLY the Unit header (# الوحدة [الرقم]: [اسم الوحدة الكامل]) as a single line and NOTHING ELSE. Extract the actual Unit title (NOT the lesson title from the index). DO NOT output lesson headers, lesson index lists, or 'نواتج التعلم' / 'أهداف الوحدة'.",
-        "3. Declare the full Level 2 header (## الدرس / ## الفصل / ## Lessons) on the opening page of every lesson/chapter. NEVER convert the lesson title into '###'. Introductory concepts or goals go under the '##' header as '###'.",
-        "4. Write the COMPLETE explanation text without omission or abbreviation.",
-        "5. IGNORE all questions, exercises, drills (أسئلة / تدريبات / اختبر نفسك), and objectives (أهداف الدرس / نواتج التعلم).",
-        "6. STRICTLY DO NOT write meta-notes or labels saying this is introductory content or explanation.",
+        "2. On Unit cover pages ONLY, write ONLY the Unit header (# الوحدة [الرقم]: [اسم الوحدة الكامل]) as a single line and NOTHING ELSE. Distinguish Unit covers (index of all lessons) from Lesson opening pages. NEVER output '# الوحدة' on a Lesson opening page.",
+        "3. Declare the full Level 2 header (## الدرس [رقم]: [عنوان الدرس الكامل]) on the opening page of every lesson/chapter. ALWAYS extract the overarching Lesson Title (e.g. 'الخواص الفيزيائية للماء', 'العوامل الفيزيائية وتأثيرها في الغلاف الجوي'), NEVER an internal subtopic (e.g. NOT 'الكثافة', NOT 'تكيف الكائنات الحية'). Subtopics and introductory topics go under the '##' header as '###'.",
+        "4. Parse Egyptian textbook OCR layout properly: extract the correct lesson number (1..10) and full lesson title even if numbers are styled before or after 'الدرس' (e.g. '10 الدرس', '1 الدرس'). NEVER omit lesson numbers.",
+        "5. Write the COMPLETE explanation text without omission or abbreviation.",
+        "6. IGNORE all questions, exercises, drills (أسئلة / تدريبات / اختبر نفسك), and objectives (أهداف الدرس / نواتج التعلم).",
+        "7. STRICTLY DO NOT write meta-notes or labels saying this is introductory content or explanation.",
       ].join("\n");
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 60000);
+      const timeoutId = setTimeout(() => controller.abort(), 25000);
 
-      const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${cleanKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "deepseek-chat",
-          messages: [
-            { role: "system", content: DEEPSEEK_RAG_SYSTEM_PROMPT },
-            { role: "user", content: userPrompt },
-          ],
-          temperature: 0.1,
-          stream: false,
-        }),
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timeoutId));
+      let response: Response | null = null;
+      let usedAlibaba = false;
+
+      try {
+        response = await fetch("https://api.deepseek.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${cleanKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "deepseek-flash",
+            messages: [
+              { role: "system", content: DEEPSEEK_RAG_SYSTEM_PROMPT },
+              { role: "user", content: userPrompt },
+            ],
+            thinking: { type: "disabled" },
+            temperature: 0.1,
+            stream: false,
+          }),
+          signal: controller.signal,
+        });
+      } catch (fetchErr: any) {
+        // Fallback to Alibaba Qwen if DeepSeek network fetch fails
+        const alibabaKey = (process.env.ALIBABA_API_KEY || "").trim();
+        if (alibabaKey) {
+          try {
+            usedAlibaba = true;
+            response = await fetch("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${alibabaKey}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({
+                model: "qwen3.8-flash",
+                messages: [
+                  { role: "system", content: DEEPSEEK_RAG_SYSTEM_PROMPT },
+                  { role: "user", content: userPrompt },
+                ],
+                temperature: 0.1,
+                stream: false,
+              }),
+              signal: controller.signal,
+            });
+          } catch {}
+        }
+        if (!response) throw fetchErr;
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         const errorText = await response.text();
-        throw new Error(`DeepSeek API error (${response.status}): ${errorText}`);
+        throw new Error(`API error (${response.status}): ${errorText}`);
       }
 
       const data = await response.json();

@@ -1,4 +1,5 @@
-export const runtime = 'edge';
+export const runtime = 'nodejs';
+export const maxDuration = 60;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
@@ -75,15 +76,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'المحتوى لا يمكن أن يكون فارغاً' }, { status: 400 });
     }
 
-    // Process hierarchical chunks, generate embeddings, and extract GraphRAG knowledge graph
-    const { parents, children, allChunks, embeddedCount, summaryContent, entities, relations } = await processCurriculumChunks(content, id);
+    // Process hierarchical chunks and extract GraphRAG knowledge graph rapidly
+    const { parents, children, allChunks, summaryContent, entities, relations } = await processCurriculumChunks(
+      content,
+      id,
+      { skipEmbeddings: true }
+    );
 
     if (parents.length === 0) {
       return NextResponse.json({ error: 'تعذر تجزئة الملف. يرجى التأكد من احتوائه على نص صالح.' }, { status: 400 });
     }
 
     // Update in DB
-    const success = await db.updateCurriculumContent(id, grade_level, subject_name, allChunks);
+    const success = await db.updateCurriculumContent(id, grade_level, subject_name, allChunks, content);
 
     if (!success) {
       return NextResponse.json({ error: 'فشل تحديث محتوى المنهج' }, { status: 500 });
@@ -99,11 +104,12 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `تم تحديث المنهج الدراسي وإعادة فهرسته بنجاح: ${parents.length} قسم رئيسي، ${children.length} وحدة بحث، ${embeddedCount} متجه دلالي، ${entities.length} مفهوم في شبكة المعرفة.`,
+      message: `تم تحديث المنهج الدراسي بنجاح: ${parents.length} قسم رئيسي، ${children.length} وحدة بحث، و ${entities.length} مفهوم في شبكة المعرفة.`,
       stats: {
         parentChunks: parents.length,
         childChunks: children.length,
-        embeddingsGenerated: embeddedCount,
+        embeddingsGenerated: 0,
+        pendingEmbeddingCount: children.length,
         hasSummary: !!summaryContent,
         entitiesCount: entities.length,
         relationsCount: relations.length

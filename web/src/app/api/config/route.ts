@@ -1,4 +1,5 @@
 export const runtime = 'edge';
+export const revalidate = 300;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
@@ -9,45 +10,20 @@ const DEFAULT_TRACKS = ['medicine_life_sciences', 'engineering_cs', 'business', 
 // GET public system settings
 export async function GET(req: NextRequest) {
   try {
-    const websiteLink = await db.getSystemSetting('website_link');
-    
-    let activeGradesRaw = await db.getSystemSetting('active_grade_levels');
-    let activeGradeLevels = DEFAULT_GRADE_LEVELS;
-    if (activeGradesRaw) {
-      try {
-        const parsed = JSON.parse(activeGradesRaw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          activeGradeLevels = parsed.filter(g => g !== '3_high');
-        }
-      } catch (e) {}
-    }
-    
-    let activeTracksRaw = await db.getSystemSetting('active_tracks');
-    let activeTracks = DEFAULT_TRACKS;
-    if (activeTracksRaw) {
-      try {
-        const parsed = JSON.parse(activeTracksRaw);
-        if (Array.isArray(parsed)) {
-          activeTracks = parsed;
-        }
-      } catch (e) {}
-    }
-
-    let activeCurrsRaw = await db.getSystemSetting('active_curriculum_ids');
-    let activeCurriculumIds: string[] = [];
-    if (activeCurrsRaw) {
-      try {
-        activeCurriculumIds = JSON.parse(activeCurrsRaw);
-      } catch (e) {}
-    }
-    
-    const allCurriculums = await db.getCurriculums();
+    const {
+      websiteLink,
+      activeGradeLevels,
+      activeTracks,
+      activeCurriculumIds,
+      allCurriculums
+    } = await db.getPublicConfig();
 
     // Check for authenticated user to return current coins and profile
     const authHeader = req.headers.get('Authorization');
     let profile = null;
     let authAttempted = false;
     let authValid = false;
+    let dailyQuests = null;
     if (authHeader && authHeader.startsWith('Bearer ')) {
       authAttempted = true;
       const token = authHeader.substring(7);
@@ -57,21 +33,29 @@ export async function GET(req: NextRequest) {
           profile = await db.getProfile(userId);
           if (profile) {
             authValid = true;
+            try {
+              dailyQuests = await db.getDailyQuests(userId);
+            } catch (e) {}
           }
         }
       } catch (e) {}
     }
 
-    const deviceId = req.headers.get('x-device-id');
-    let guestMessagesCount = 0;
-    let guestCoins = 5.0;
-    if (deviceId) {
-      const guest = await db.getDeviceGuest(deviceId);
-      guestMessagesCount = guest ? guest.free_message_count : 0;
-      guestCoins = guest && guest.coins !== undefined ? guest.coins : 5.0;
-    }
+    const guestMessagesCount = 0;
+    const guestCoins = 0.0;
     
     const userNotFound = authAttempted && !authValid;
+
+    const cacheHeaders: Record<string, string> = authAttempted
+      ? {
+          'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+          'Vary': 'Authorization'
+        }
+      : {
+          'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600',
+          'CDN-Cache-Control': 'max-age=300',
+          'Vary': 'Authorization, Accept-Encoding'
+        };
 
     return NextResponse.json({
       website_link: websiteLink || 'http://localhost:3000',
@@ -102,12 +86,19 @@ export async function GET(req: NextRequest) {
           subscription_end_date: profile.subscription_end_date,
           subscription_plan_id: profile.subscription_plan_id,
           role: profile.role,
-          coins: profile.coins === undefined ? 15.0 : profile.coins,
+          coins: profile.coins === undefined ? 20.0 : profile.coins,
           points: profile.points || 0,
-          study_streak: profile.study_streak || 1
-        }
+          study_streak: profile.study_streak || 1,
+          welcome_reward_claimed: !!profile.welcome_reward_claimed,
+          free_plan_claimed: !!profile.free_plan_claimed,
+          apology_compensation_claimed: !!profile.apology_compensation_claimed,
+          apology_dismissed: !!profile.apology_dismissed,
+          created_at: profile.created_at,
+          improve_ai_opt_in: profile.improve_ai_opt_in !== undefined ? profile.improve_ai_opt_in : true
+        },
+        daily_quests: dailyQuests
       } : {})
-    });
+    }, { headers: cacheHeaders });
   } catch (error) {
     return NextResponse.json({
       website_link: 'http://localhost:3000',

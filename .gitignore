@@ -40,3 +40,6 @@ Curriculum Generator/debug_page_*.jpg
 Curriculum Generator/debug_pymupdf_*.jpg
 Curriculum Generator/page_images_cache/
 
+# Test benchmarks and stray root test database
+/db_data.json
+*load_test_results.json

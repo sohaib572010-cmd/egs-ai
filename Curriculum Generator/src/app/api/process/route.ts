@@ -18,10 +18,10 @@ function getProcessor(settings?: ProcessingSettings): QueueProcessor {
       geminiApiKey: process.env.GEMINI_API_KEY || DEFAULT_GEMINI_KEY,
       edenAiApiKey: process.env.EDENAI_API_KEY || DEFAULT_EDENAI_KEY,
       deepSeekApiKey: process.env.DEEPSEEK_API_KEY || DEFAULT_DEEPSEEK_KEY,
-      batchSize: 3,
+      batchSize: 6,
       maxConcurrentFiles: 2,
-      maxRetries: 6,
-      delayBetweenBatchesMs: 300,
+      maxRetries: 3,
+      delayBetweenBatchesMs: 50,
       autoResumeOnStartup: true,
     };
     globalThis.globalQueueProcessor = new QueueProcessor(defaultSettings);

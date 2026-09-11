@@ -56,6 +56,12 @@ function chunkMarkdownHierarchical(markdownText) {
   let currentHeading = 'مقدمة المنهج';
   let currentLines = [];
 
+  const buildBreadcrumb = (unit, lesson, heading) => {
+    const raw = [unit, lesson, heading].map(s => (s || '').trim()).filter(Boolean);
+    const parts = raw.filter((v, i, a) => i === 0 || v !== a[i - 1]);
+    return parts.join(' > ') || heading || 'مقدمة المنهج';
+  };
+
   for (const line of lines) {
     const unitMatch = line.match(/^#\s+(.+)$/);
     const lessonMatch = line.match(/^##\s+(.+)$/);
@@ -64,8 +70,7 @@ function chunkMarkdownHierarchical(markdownText) {
 
     if (unitMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentUnit = unitMatch[1].trim();
       currentLesson = '';
@@ -73,23 +78,20 @@ function chunkMarkdownHierarchical(markdownText) {
       currentLines = [];
     } else if (lessonMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentLesson = lessonMatch[1].trim();
       currentHeading = currentLesson;
       currentLines = [];
     } else if (subMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentHeading = subMatch[1].trim();
       currentLines = [];
     } else if (genericHeadingMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentHeading = genericHeadingMatch[2].trim();
       currentLines = [];
@@ -98,8 +100,7 @@ function chunkMarkdownHierarchical(markdownText) {
     }
   }
   if (currentLines.join('\n').trim().length > 10) {
-    const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-    rawSections.push({ heading: fullBreadcrumb, contentLines: currentLines });
+    rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: currentLines });
   }
 
   const parents = [];
@@ -2216,6 +2217,7 @@ async function main() {
       grade_level: currDef.grade_level,
       subject_name: currDef.subject_name,
       file_name: currDef.file_name,
+      content: fileContent,
       units: currDef.units,
       created_at: new Date().toISOString()
     };

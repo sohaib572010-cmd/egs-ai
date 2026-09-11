@@ -39,6 +39,12 @@ export function chunkMarkdownHierarchical(markdownText: string): {
   let currentHeading = 'مقدمة المنهج';
   let currentLines: string[] = [];
 
+  const buildBreadcrumb = (unit: string, lesson: string, heading: string) => {
+    const raw = [unit, lesson, heading].map(s => (s || '').trim()).filter(Boolean);
+    const parts = raw.filter((v, i, a) => i === 0 || v !== a[i - 1]);
+    return parts.join(' > ') || heading || 'مقدمة المنهج';
+  };
+
   for (const line of lines) {
     const unitMatch = line.match(/^#\s+(.+)$/);
     const lessonMatch = line.match(/^##\s+(.+)$/);
@@ -47,8 +53,7 @@ export function chunkMarkdownHierarchical(markdownText: string): {
 
     if (unitMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentUnit = unitMatch[1].trim();
       currentLesson = '';
@@ -56,23 +61,20 @@ export function chunkMarkdownHierarchical(markdownText: string): {
       currentLines = [];
     } else if (lessonMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentLesson = lessonMatch[1].trim();
       currentHeading = currentLesson;
       currentLines = [];
     } else if (subMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentHeading = subMatch[1].trim();
       currentLines = [];
     } else if (genericHeadingMatch) {
       if (currentLines.join('\n').trim().length > 10) {
-        const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-        rawSections.push({ heading: fullBreadcrumb, contentLines: [...currentLines] });
+        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
       }
       currentHeading = genericHeadingMatch[2].trim();
       currentLines = [];
@@ -81,8 +83,7 @@ export function chunkMarkdownHierarchical(markdownText: string): {
     }
   }
   if (currentLines.join('\n').trim().length > 10) {
-    const fullBreadcrumb = [currentUnit, currentLesson, currentHeading].filter(Boolean).join(' > ') || currentHeading;
-    rawSections.push({ heading: fullBreadcrumb, contentLines: currentLines });
+    rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: currentLines });
   }
 
   const parents: ParentChunk[] = [];
@@ -207,7 +208,8 @@ function createSlidingWindowChunks(
 
 export async function processCurriculumChunks(
   fileContent: string,
-  curriculumId: string = 'curriculum_pending'
+  curriculumId: string = 'curriculum_pending',
+  options: { skipEmbeddings?: boolean } = {}
 ): Promise<{
   parents: ParentChunk[];
   children: ChildChunk[];
@@ -220,11 +222,15 @@ export async function processCurriculumChunks(
   const { parents, children } = chunkMarkdownHierarchical(fileContent);
 
   let embeddings: number[][] = [];
-  try {
-    const childTexts = children.map(c => `${c.heading}\n${c.content}`);
-    embeddings = await generateEmbeddingBatch(childTexts);
-  } catch (embErr) {
-    console.error('Embedding generation failed:', embErr);
+  if (!options.skipEmbeddings) {
+    try {
+      const childTexts = children.map(c => `${c.heading}\n${c.content}`);
+      embeddings = await generateEmbeddingBatch(childTexts);
+    } catch (embErr) {
+      console.error('Embedding generation failed:', embErr);
+      embeddings = children.map(() => []);
+    }
+  } else {
     embeddings = children.map(() => []);
   }
 
@@ -278,6 +284,18 @@ export async function processCurriculumChunks(
       chunk_level: 'parent',
       parent_id: null,
       position_index: -1,
+      embedding: null
+    });
+  }
+
+  if (fileContent && fileContent.trim().length > 0) {
+    allChunks.push({
+      id: crypto.randomUUID(),
+      content: fileContent,
+      heading: '__RAW_MARKDOWN__',
+      chunk_level: 'parent',
+      parent_id: null,
+      position_index: -99,
       embedding: null
     });
   }

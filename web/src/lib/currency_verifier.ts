@@ -116,12 +116,27 @@ export function verifyUserCurrencyState(profile: Profile, dailyCaps: Record<stri
   let remainingMinutes = 0;
   let remainingSecs = 0;
 
+  let computedEndMs: number | null = null;
+  const planDurationDays = (planType === 'pro_3m' || planType === 'max') ? 90 : (planType === 'pro_2m' ? 60 : 30);
+  const startMs = profile.subscription_start_date ? new Date(profile.subscription_start_date).getTime() : (profile.created_at ? new Date(profile.created_at).getTime() : nowMs);
+
   if (profile.subscription_end_date) {
-    const endMs = new Date(profile.subscription_end_date).getTime();
-    if (endMs <= nowMs) {
+    const rawEndMs = new Date(profile.subscription_end_date).getTime();
+    const spanDays = startMs > 0 ? Math.round((rawEndMs - startMs) / (24 * 60 * 60 * 1000)) : 0;
+    if (planDurationDays > 30 && spanDays > 0 && spanDays <= 35) {
+      computedEndMs = startMs + planDurationDays * 24 * 60 * 60 * 1000;
+    } else {
+      computedEndMs = rawEndMs;
+    }
+  } else if (planType !== 'free') {
+    computedEndMs = startMs + planDurationDays * 24 * 60 * 60 * 1000;
+  }
+
+  if (computedEndMs) {
+    if (computedEndMs <= nowMs) {
       isExpired = true;
     } else {
-      totalRemainingSeconds = Math.max(0, Math.floor((endMs - nowMs) / 1000));
+      totalRemainingSeconds = Math.max(0, Math.floor((computedEndMs - nowMs) / 1000));
       remainingDays = Math.floor(totalRemainingSeconds / (3600 * 24));
       remainingHours = Math.floor((totalRemainingSeconds % (3600 * 24)) / 3600);
       remainingMinutes = Math.floor((totalRemainingSeconds % 3600) / 60);
@@ -129,7 +144,8 @@ export function verifyUserCurrencyState(profile: Profile, dailyCaps: Record<stri
     }
   }
 
-  const isSubscribed = !isExpired && planType !== 'free' && profile.subscription_status === 'active';
+  const effectiveStatus = isExpired ? 'expired' : (profile.subscription_status || (planType !== 'free' ? 'active' : 'inactive'));
+  const isSubscribed = !isExpired && planType !== 'free' && effectiveStatus === 'active';
   const isRenewedToday = profile.last_active_date === cairoDate;
 
   const signature = signCurrencyPayload(profile.id, preciseCoins, planType, nowMs);
@@ -140,10 +156,10 @@ export function verifyUserCurrencyState(profile: Profile, dailyCaps: Record<stri
     dailyCap,
     planType,
     isSubscribed,
-    subscriptionStatus: isExpired ? 'expired' : (profile.subscription_status || (isSubscribed ? 'active' : 'inactive')),
-    subscriptionPlanId: profile.subscription_plan_id || null,
-    subscriptionStartDate: profile.subscription_start_date || null,
-    subscriptionEndDate: profile.subscription_end_date || null,
+    subscriptionStatus: effectiveStatus,
+    subscriptionPlanId: profile.subscription_plan_id || (planType !== 'free' ? planType : null),
+    subscriptionStartDate: profile.subscription_start_date || (planType !== 'free' ? (profile.created_at || now.toISOString()) : null),
+    subscriptionEndDate: profile.subscription_end_date || (computedEndMs && planType !== 'free' ? new Date(computedEndMs).toISOString() : null),
     isExpired,
     remainingDuration: {
       totalSeconds: totalRemainingSeconds,

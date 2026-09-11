@@ -55,6 +55,16 @@ export default function DownloadPage() {
     const handleAppInstalled = () => {
       setInstallSuccess(true);
       setDeferredPrompt(null);
+      localStorage.setItem('egs_pwa_installed', 'true');
+      localStorage.setItem('egs_pwa_platform', platform);
+      const token = localStorage.getItem('egs_token');
+      if (token) {
+        fetch('/api/pwa/install', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ platform })
+        }).catch(() => {});
+      }
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -64,7 +74,7 @@ export default function DownloadPage() {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
       window.removeEventListener('appinstalled', handleAppInstalled);
     };
-  }, []);
+  }, [platform]);
 
   const handleInstallClick = async () => {
     if (deferredPrompt) {
@@ -72,6 +82,16 @@ export default function DownloadPage() {
       const { outcome } = await deferredPrompt.userChoice;
       if (outcome === 'accepted') {
         setInstallSuccess(true);
+        localStorage.setItem('egs_pwa_installed', 'true');
+        localStorage.setItem('egs_pwa_platform', platform);
+        const token = localStorage.getItem('egs_token');
+        if (token) {
+          fetch('/api/pwa/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ platform })
+          }).catch(() => {});
+        }
       }
       setDeferredPrompt(null);
     }

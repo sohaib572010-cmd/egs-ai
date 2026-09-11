@@ -27,6 +27,8 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const EDENAI_API_KEY = process.env.EDENAI_API_KEY;
 const EDENAI_BASE = 'https://api.edenai.run/v2';
+const ALIBABA_API_KEY = process.env.ALIBABA_API_KEY || process.env.DASHSCOPE_API_KEY;
+const ALIBABA_API_BASE = process.env.ALIBABA_API_BASE || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('Missing Supabase credentials in .env.local');
@@ -187,8 +189,82 @@ function createSlidingWindowChunks(text, parentHeading, maxTokens, overlapTokens
 
 // ─── EdenAI Embeddings ───────────────────────────────────────────────────────
 
+// ─── Vector Embeddings (Alibaba text-embedding-v4 with EdenAI Fallback) ───────
+
+async function requestAlibabaBatch(batch) {
+  const endpoint = `${ALIBABA_API_BASE}/embeddings`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${ALIBABA_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'text-embedding-v4',
+      input: batch,
+      dimensions: 768
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Alibaba API status ${res.status}: ${errText.slice(0, 150)}`);
+  }
+
+  const data = await res.json();
+  const items = data.data || [];
+  items.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  return items.map(it => it.embedding || []);
+}
+
 async function generateEmbeddingBatch(texts) {
-  if (!EDENAI_API_KEY || texts.length === 0) return texts.map(() => []);
+  if (texts.length === 0) return [];
+
+  // Primary: Alibaba text-embedding-v4 (max 10 items per batch)
+  if (ALIBABA_API_KEY) {
+    const BATCH_SIZE = 10;
+    const batches = [];
+    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+      batches.push(texts.slice(i, i + BATCH_SIZE).map(t => (t || '').slice(0, 8000)));
+    }
+
+    const allEmbeddings = [];
+    let allSucceeded = true;
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      let retries = 3;
+      let success = false;
+
+      while (retries > 0 && !success) {
+        try {
+          const embeddings = await requestAlibabaBatch(batch);
+          for (let j = 0; j < batch.length; j++) {
+            allEmbeddings.push(embeddings[j] || []);
+          }
+          success = true;
+        } catch (err) {
+          retries--;
+          console.warn(`Retry ${3 - retries}/3 for Alibaba batch ${i + 1}/${batches.length}:`, err.message);
+          if (retries > 0) await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+
+      if (!success) {
+        allSucceeded = false;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    if (allSucceeded && allEmbeddings.length === texts.length) {
+      return allEmbeddings;
+    }
+    console.warn('Alibaba batch embedding encountered errors, falling back to EdenAI...');
+  }
+
+  // Fallback: EdenAI Google text-embedding-004
+  if (!EDENAI_API_KEY) return texts.map(() => []);
 
   const BATCH_SIZE = 20;
   const batches = [];
@@ -245,6 +321,7 @@ async function generateEmbeddingBatch(texts) {
 
   return allEmbeddings;
 }
+
 
 // ─── 1_high Curriculum Definitions ───────────────────────────────────────────
 
@@ -907,6 +984,197 @@ export const HIGH_1_DEFINITIONS = [
         ]
       }
     ]
+  },
+
+  // ─── 1_high العلوم (العلوم المتكاملة) ───────────────────────────────────────────
+  {
+    grade_level: '1_high',
+    subject_name: 'العلوم',
+    file_name: 'العلوم.md',
+    units: [
+      {
+        id: '1_high_sci_u1',
+        title: 'الوحدة 1: النظام البيئي المائي',
+        unitNumber: 1,
+        lessons: [
+          {
+            id: '1_high_sci_u1_l1',
+            title: 'الدرس 1: الغلاف المائي على كوكب الأرض',
+            lessonNumber: 1,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'مفهوم النظام البيئي ومكوناته الحيوية وغير الحيوية',
+              'أغلفة البيئة الطبيعية وتوزيع المياه على كوكب الأرض (المالحة والعذبة والجليدية)',
+              'دورة الماء في الطبيعة (التبخر، التكثف، الترسيب، تسرب المياه، النتح)'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l2',
+            title: 'الدرس 2: الخواص الكيميائية للماء',
+            lessonNumber: 2,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'التركيب الكيميائي للماء والروابط التساهمية الأحادية والزاوية 104.5°',
+              'قطبية جزيء الماء والسالبية الكهربية وخواص الماء كمذيب عام',
+              'الاتزان الأيوني والتأين الذاتي للماء والرقم الهيدروجيني (pH)'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l3',
+            title: 'الدرس 3: الخواص الفيزيائية للماء',
+            lessonNumber: 3,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'شذوذ كثافة الماء وتناقصها بين 4°C و 0°C وأهميته للحياة المائية',
+              'الحرارة النوعية المرتفعة للماء وتأثيرها في تنظيم المناخ',
+              'الحرارة الكامنة للانصهار والتصعيد والتوتر السطحي للماء'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l4',
+            title: 'الدرس 4: المحاليل المائية وخواصها',
+            lessonNumber: 4,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'مفهوم المحلول وأنواعه وطرق التعبير عن التركيز (المولارية والمولالية والنسبة المئوية)',
+              'الخواص الجمعية للمحاليل (انخفاض الضغط البخاري، ارتفاع درجة الغليان، انخفاض درجة التجمد)',
+              'الضغط الأسموزي وتطبيقاته في البيئة المائية'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l5',
+            title: 'الدرس 5: الأهمية البيولوجية للماء',
+            lessonNumber: 5,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'دور الماء في الحفاظ على التركيب والوظائف الخلوية',
+              'الماء كوسيط للتفاعلات الكيميائية الحيوية والنقل داخل الكائنات الحية',
+              'نسبة الماء في أنسجة وأجسام الكائنات الحية والتوازن المائي'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l6',
+            title: 'الدرس 6: التكيفات البيولوجية للكائنات الحية في البيئة المائية',
+            lessonNumber: 6,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'التكيفات التركيبية والتشريحية للأسماك والكائنات المائية (الشكل الانسيابي، الزعانف، الخياشيم)',
+              'التكيفات الفسيولوجية والوظيفة الأسموزية في المياه العذبة والمالحة',
+              'التكيفات السلوكية للهجرة والتغذية والحماية'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l7',
+            title: 'الدرس 7: تأثير غازات الهواء الجوي على البيئات المائية',
+            lessonNumber: 7,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'ذوبانية غازي الأكسجين (O2) وثاني أكسيد الكربون (CO2) في الماء وعواملها',
+              'أهمية الأكسجين المذاب لتنفس الكائنات البحرية ومخاطر نقصه',
+              'دور ثاني أكسيد الكربون المذاب في البناء الضوئي وحمضية المحيطات'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l8',
+            title: 'الدرس 8: تأثير الضوء والإشعاع الشمسي على البيئات المائية',
+            lessonNumber: 8,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'اختراق الضوء لطبقات المياه وتكون المناطق الضوئية (السطحية والعميقة)',
+              'دور الإشعاع الشمسي في عملية البناء الضوئي للعوالق النباتية والشعاب المرجانية',
+              'تأثير الإشعاع الشمسي على التيارات المحيطية والمناخ'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l9',
+            title: 'الدرس 9: تأثير الضغط المائي على الكائنات الحية',
+            lessonNumber: 9,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'قانون الضغط عند نقطة في باطن سائل (P = ρ g h) والعوامل المؤثرة',
+              'تدرج الضغط مع العمق في المحيطات',
+              'التكيفات التشريحية والفسيولوجية لكائنات الأعماق لتحمل الضغط العالي'
+            ]
+          },
+          {
+            id: '1_high_sci_u1_l10',
+            title: 'الدرس 10: التوازن البيئي ودور الإنسان في استدامة الحياة المائية',
+            lessonNumber: 10,
+            unitId: '1_high_sci_u1',
+            unitTitle: 'الوحدة 1: النظام البيئي المائي',
+            subtopics: [
+              'مفهوم التوازن البيئي في النظم المائية ودورات العناصر الغذائية',
+              'الآثار السلبية للأنشطة البشرية (التلوث المائي، الصيد الجائر، تغير المناخ)',
+              'استراتيجيات الحفاظ على الموارد المائية واستدامة النظم البيئية'
+            ]
+          }
+        ]
+      },
+      {
+        id: '1_high_sci_u2',
+        title: 'الوحدة 2: الغلاف الجوي',
+        unitNumber: 2,
+        lessons: [
+          {
+            id: '1_high_sci_u2_l1',
+            title: 'الدرس 1: مكونات وطبقات الغلاف الجوي',
+            lessonNumber: 1,
+            unitId: '1_high_sci_u2',
+            unitTitle: 'الوحدة 2: الغلاف الجوي',
+            subtopics: [
+              'المكونات الغازية للغلاف الجوي ونسب الغازات (النيتروجين، الأكسجين، ثاني أكسيد الكربون)',
+              'طبقات الغلاف الجوي (التروبوسفير، الستراتوسفير، الميزوسفير، الثرموسفير، الأكسوسفير)',
+              'المناطق الانتقالية (التروبوبوز، الستراتوبوز، الميزوبوز) وسرعة الإفلات'
+            ]
+          },
+          {
+            id: '1_high_sci_u2_l2',
+            title: 'الدرس 2: التفاعلات الكيميائية في الغلاف الجوي',
+            lessonNumber: 2,
+            unitId: '1_high_sci_u2',
+            unitTitle: 'الوحدة 2: الغلاف الجوي',
+            subtopics: [
+              'تكون طبقة الأوزون في الستراتوسفير بتأثير الأشعة فوق البنفسجية',
+              'أسباب وآليات تآكل طبقة الأوزون (مركبات CFCs والهالونات)',
+              'الأمطار الحمضية وتفاعلات أكاسيد النيتروجين والكبريت في الهواء'
+            ]
+          },
+          {
+            id: '1_high_sci_u2_l3',
+            title: 'الدرس 3: العوامل الفيزيائية وتأثيرها في الغلاف الجوي',
+            lessonNumber: 3,
+            unitId: '1_high_sci_u2',
+            unitTitle: 'الوحدة 2: الغلاف الجوي',
+            subtopics: [
+              'درجة الحرارة ومقاييسها وتأثير الإشعاع الشمسي على طبقات الجو',
+              'الضغط الجوي وتغيره مع الارتفاع وأجهزة قياسه',
+              'الرياح والرطوبة وتكيف الكائنات الحية مع العوامل الفيزيائية الجوية'
+            ]
+          },
+          {
+            id: '1_high_sci_u2_l4',
+            title: 'الدرس 4: الغلاف الجوي ودور العلم في استدامته',
+            lessonNumber: 4,
+            unitId: '1_high_sci_u2',
+            unitTitle: 'الوحدة 2: الغلاف الجوي',
+            subtopics: [
+              'ظاهرة الاحتباس الحراري والغازات الدفيئة وتغير المناخ العالمي',
+              'ملوثات الهواء الصناعية وأثرها على الصحة والبيئة',
+              'دور التكنولوجيا والاتفاقيات الدولية (بروتوكول مونتريال) في حماية الغلاف الجوي'
+            ]
+          }
+        ]
+      }
+    ]
   }
 ];
 
@@ -914,7 +1182,7 @@ export const HIGH_1_DEFINITIONS = [
 
 async function main() {
   console.log('🚀 Starting 1_high Curricula Upload & Indexing Pipeline...');
-  console.log(`Target: 5 Curricula for 1_high`);
+  console.log(`Target: 6 Curricula for 1_high`);
 
   const outputBase = path.resolve(__dirname, '../../Curriculum Generator/output/1_high');
   const uploaded1HighIds = [];

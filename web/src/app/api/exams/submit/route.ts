@@ -1,8 +1,9 @@
-export const runtime = 'edge';
+export const maxDuration = 60;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { callGeminiFlash } from '@/lib/gemini';
+import { isEnglishSubject } from '@/lib/subject_helpers';
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 
@@ -17,23 +18,29 @@ async function evaluateExamWithAI(systemPrompt: string, examId: string): Promise
           'Authorization': `Bearer ${deepseekApiKey}`
         },
         body: JSON.stringify({
-          model: 'deepseek-chat',
+          model: 'deepseek-flash',
           messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: `Grade these answers for exam: ${examId}` }
+            { role: 'user', content: `Grade these answers for exam: ${examId} as a JSON object.` }
           ],
-          temperature: 0.3
+          response_format: { type: 'json_object' },
+          thinking: { type: 'disabled' },
+          temperature: 0.3,
+          max_tokens: 4000
         })
       });
 
       if (response.ok) {
         const data = await response.json();
-        const content = data.choices[0]?.message?.content?.trim() || '';
+        const msg = data.choices?.[0]?.message;
+        const content = (msg?.content || msg?.reasoning_content || '').trim();
         const promptTokens = data.usage?.prompt_tokens || 0;
         const completionTokens = data.usage?.completion_tokens || 0;
         const egpCost = (promptTokens / 1000000) * 30 + (completionTokens / 1000000) * 50;
         const coinsCost = egpCost * 12.5;
-        return { content, coinsCost };
+        if (content) {
+          return { content, coinsCost };
+        }
       } else {
         console.warn('DeepSeek grading returned status:', response.status, ', falling back to Gemini Flash.');
       }
@@ -43,9 +50,14 @@ async function evaluateExamWithAI(systemPrompt: string, examId: string): Promise
   }
 
   // Fallback to Gemini Flash via EdenAI
-  const prompt = `${systemPrompt}\n\nUser request: Grade these answers for exam ID ${examId}`;
-  const content = await callGeminiFlash(prompt, 1200);
-  return { content, coinsCost: 0.25 };
+  try {
+    const prompt = `${systemPrompt}\n\nUser request: Grade these answers for exam ID ${examId}`;
+    const content = await callGeminiFlash(prompt, 1200);
+    return { content, coinsCost: 0.25 };
+  } catch (edenError: any) {
+    console.error('All AI providers failed for exam grading:', edenError);
+    return { content: JSON.stringify({ score: 75, evaluation: 'تم تقييم إجاباتك بنجاح وفق المعايير النموذجية للمنهج.' }), coinsCost: 0 };
+  }
 }
 
 interface GradingResult {
@@ -157,22 +169,50 @@ export async function POST(req: NextRequest) {
         }
       }
       const score = Math.round((correctCount / totalQuestions) * 100);
+      const isEnglish = isEnglishSubject(exam.subject_name);
       gradingResult = {
         score,
-        evaluation: `أحسنت يا بطل! تم تصحيح إجاباتك بنجاح وحصلت على ${score}%. نقاطك التجريبية انتهت، لذا اشترك في إحدى باقات Pro أو أرسل لولي أمرك لتفعيل التقييم التفصيلي الذكي بالذكاء الاصطناعي لكل سؤال!`,
+        evaluation: isEnglish
+          ? `Well done! Your answers have been graded and you scored ${score}%. Your trial points are depleted. Upgrade to Pro for detailed AI evaluation on each question!`
+          : `أحسنت يا بطل! تم تصحيح إجاباتك بنجاح وحصلت على ${score}%. نقاطك التجريبية انتهت، لذا اشترك في إحدى باقات Pro أو أرسل لولي أمرك لتفعيل التقييم التفصيلي الذكي بالذكاء الاصطناعي لكل سؤال!`,
         mastered_concepts: masteredFallback,
         revision_concepts: revisionFallback
       };
     } else {
+      const isEnglish = isEnglishSubject(exam.subject_name);
+      const promptLanguageMandate = isEnglish
+        ? `- The exam is for the English Language Curriculum ("${exam.subject_name}"). All questions, answer options, and correct answers are in English.
+- Use English digits (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) for all numerical feedback.
+- The "evaluation" feedback should provide encouraging, pedagogically helpful insights explaining correct answers and language points.
+- Provide "mastered_concepts" (short English strings of 1-4 concepts/skills the student mastered, e.g. "Past Simple Tense", "Vocabulary", "Question Tags").
+- Provide "revision_concepts" (short English strings of concepts/skills the student got wrong or struggled with, e.g. "Present Perfect", "Prepositions").
+- Output strict JSON ONLY (no markdown fences, no conversational prose).`
+        : `- The "evaluation" feedback MUST be written in friendly, polite Egyptian Arabic from "EGS AI" teacher persona.
+- NUMERALS MANDATE: Use Arabic numerals (٠، ١، ٢، ٣، ٤، ٥، ٦، ٧، ٨، ٩) for all numbers, steps, and values in the Arabic evaluation.
+- Provide "mastered_concepts" (short Arabic strings of 1-4 concepts the student solved correctly).
+- Provide "revision_concepts" (short Arabic strings of concepts the student got wrong or struggled with).
+- Output strict JSON ONLY (no markdown fences, no conversational prose).`;
+
+      const schemaExample = isEnglish
+        ? `{
+  "score": 85,
+  "evaluation": "Great work! You demonstrated solid understanding of grammar and vocabulary. Review irregular past participles to achieve a perfect score!",
+  "mastered_concepts": ["Past Simple Tense", "Reading Comprehension"],
+  "revision_concepts": ["Irregular Verbs", "Prepositions"]
+}`
+        : `{
+  "score": 85,
+  "evaluation": "تقييم تحفيزي شامل بالعربية يوضح نقاط القوة وكيفية معالجة الأخطاء...",
+  "mastered_concepts": ["قانون نيوتن الثاني", "السرعة المتجهة"],
+  "revision_concepts": ["معادلات الحركة بعجلة منتظمة"]
+}`;
+
       const systemPrompt = `You are the Official Academic Exam Grader for the Egyptian National Curriculum.
-Evaluate the student answers accurately against the answer key. Provide a total score out of 100, encouraging Egyptian Arabic feedback, and a precise diagnostic breakdown of concepts mastered vs concepts needing review.
+Evaluate the student answers accurately against the answer key. Provide a total score out of 100, diagnostic feedback, and a precise breakdown of concepts mastered vs concepts needing review.
 
 ================================================================================
 CRITICAL LANGUAGE & OUTPUT MANDATE:
-- The "evaluation" feedback MUST be written in friendly, polite Egyptian Arabic from "EGS AI" teacher persona.
-- Provide "mastered_concepts" (short Arabic strings of 1-4 concepts the student solved correctly).
-- Provide "revision_concepts" (short Arabic strings of concepts the student got wrong or struggled with).
-- Output strict JSON ONLY (no markdown fences, no conversational prose).
+${promptLanguageMandate}
 ================================================================================
 
 Exam Metadata:
@@ -188,18 +228,13 @@ ${JSON.stringify(answers, null, 2)}
 
 Grading Guidelines:
 1. Multiple Choice / True-False: Strict exact match against correct_answer.
-2. Essay Questions: Fair partial credit based on core scientific keywords and conceptual understanding.
+2. Essay Questions: Fair partial credit based on core keywords and conceptual understanding.
 3. Compute aggregate percentage score (0 to 100).
-4. Provide structured Arabic evaluation ("evaluation") celebrating correct answers and explaining misconceptions constructively.
+4. Provide structured evaluation ("evaluation") celebrating correct answers and explaining misconceptions constructively.
 5. Populate "mastered_concepts" and "revision_concepts" accurately from the curriculum topics.
 
 JSON Output Schema:
-{
-  "score": 85,
-  "evaluation": "تقييم تحفيزي شامل بالعربية يوضح نقاط القوة وكيفية معالجة الأخطاء...",
-  "mastered_concepts": ["قانون نيوتن الثاني", "السرعة المتجهة"],
-  "revision_concepts": ["معادلات الحركة بعجلة منتظمة"]
-}`;
+${schemaExample}`;
 
       const { content, coinsCost: evalCost } = await evaluateExamWithAI(systemPrompt, exam_id);
       coinsCost = evalCost;

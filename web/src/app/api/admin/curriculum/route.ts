@@ -1,4 +1,5 @@
-export const runtime = 'edge';
+export const runtime = 'nodejs';
+export const maxDuration = 60;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
@@ -98,21 +99,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'ملف المنهج فارغ!' }, { status: 400 });
     }
 
-    console.log(`[Curriculum Upload] Starting hierarchical chunking for ${subjectName || curriculumId}...`);
+    console.log(`[Curriculum Upload] Starting fast hierarchical chunking for ${subjectName || curriculumId}...`);
 
-    // Process hierarchical parent-child chunks, embeddings, and GraphRAG knowledge graph
-    const { parents, children, allChunks, embeddedCount, summaryContent, entities, relations } = await processCurriculumChunks(fileContent);
+    // Process hierarchical parent-child chunks and GraphRAG knowledge graph rapidly
+    const { parents, children, allChunks, summaryContent, entities, relations } = await processCurriculumChunks(
+      fileContent,
+      curriculumId || 'curriculum_pending',
+      { skipEmbeddings: true }
+    );
 
     if (parents.length === 0) {
       return NextResponse.json({ error: 'تعذر تجزئة الملف. يرجى التأكد من احتوائه على نص صالح.' }, { status: 400 });
     }
 
-    console.log(`[Curriculum Upload] Created ${parents.length} parent chunks, ${children.length} child chunks, ${embeddedCount} embeddings, ${entities.length} graph entities`);
+    console.log(`[Curriculum Upload] Created ${parents.length} parent chunks, ${children.length} child chunks, ${entities.length} graph entities`);
 
     let curriculum;
     if (curriculumId) {
       // Attach file to existing placeholder curriculum
-      curriculum = await db.attachFileToCurriculum(curriculumId, file.name, allChunks);
+      curriculum = await db.attachFileToCurriculum(curriculumId, file.name, allChunks, [], fileContent);
       if (!curriculum) {
         return NextResponse.json({ error: 'لم يتم العثور على المنهج المطلوب لتحديثه' }, { status: 404 });
       }
@@ -121,7 +126,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'السنة الدراسية واسم المادة مطلوبان' }, { status: 400 });
       }
       // Save new full curriculum
-      curriculum = await db.createCurriculum(gradeLevel, subjectName, file.name, allChunks, [], trackId, isElective);
+      curriculum = await db.createCurriculum(gradeLevel, subjectName, file.name, allChunks, [], trackId, isElective, fileContent);
     }
 
     if (curriculum && curriculum.id && entities.length > 0) {
@@ -134,12 +139,13 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      message: `تم معالجة ورفع المنهج بنجاح: ${parents.length} قسم رئيسي، ${children.length} وحدة بحث، ${embeddedCount} متجه دلالي، ${entities.length} مفهوم في شبكة المعرفة.`,
+      message: `تم رفع ومعالجة فصول المنهج بنجاح: ${parents.length} قسماً رئيسياً، ${children.length} وحدة بحث، و ${entities.length} مفهوماً في شبكة المعرفة.`,
       curriculum,
       stats: {
         parentChunks: parents.length,
         childChunks: children.length,
-        embeddingsGenerated: embeddedCount,
+        embeddingsGenerated: 0,
+        pendingEmbeddingCount: children.length,
         hasSummary: !!summaryContent,
         entitiesCount: entities.length,
         relationsCount: relations.length

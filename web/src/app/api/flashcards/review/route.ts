@@ -1,4 +1,3 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
@@ -61,8 +60,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'معرف الكارت والتقييم (من 1 إلى 5) مطلوبان' }, { status: 400 });
     }
 
-    const updatedCard = await db.reviewFlashcard(card_id, rating, userId);
-    return NextResponse.json({ success: true, card: updatedCard });
+    try {
+      const updatedCard = await db.reviewFlashcard(card_id, rating, userId);
+      return NextResponse.json({ success: true, card: updatedCard });
+    } catch (dbError: any) {
+      if (dbError.message === 'Flashcard not found') {
+        return NextResponse.json({ error: 'لم يتم العثور على الكارت التعليمي' }, { status: 404 });
+      }
+      if (dbError.message === 'Unauthorized access to flashcard') {
+        return NextResponse.json({ error: 'غير مصرح لك بمراجعة هذا الكارت' }, { status: 403 });
+      }
+      throw dbError;
+    }
   } catch (error: any) {
     console.error('Review Flashcard Error:', error);
     return NextResponse.json({ error: 'حدث خطأ أثناء حفظ مراجعة الكارت التعليمي' }, { status: 500 });

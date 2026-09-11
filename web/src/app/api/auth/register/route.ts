@@ -3,22 +3,34 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { hashPasswordSecure, generateOtp, OTP_TTL_MS } from '@/lib/auth_helpers';
 import { sendOtpEmail } from '@/lib/email';
-import { checkRateLimit, getClientIp } from '@/lib/rate_limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate_limiter';
 
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req);
-    const rateLimit = checkRateLimit(`register_${ip}`, 5, 600);
-    if (!rateLimit.allowed) {
-      return NextResponse.json(
-        { error: 'تم تجاوز الحد المسموح لطلبات التسجيل. يرجى الانتظار قليلاً قبل المحاولة مجدداً.' },
-        { status: 429 }
-      );
-    }
-
     const { email, password, terms_accepted, name, grade_level, track_id, elective_subject } = await req.json();
 
     const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+
+    // 1. Per-Email rate limit: Max 5 registration attempts per 10 minutes per email
+    if (cleanEmail) {
+      const emailRateLimit = await checkRateLimitAsync(`register_email_${cleanEmail}`, 5, 600);
+      if (!emailRateLimit.allowed) {
+        return NextResponse.json(
+          { error: 'تم تجاوز الحد المسموح لطلبات التسجيل لهذا البريد. يرجى الانتظار قليلاً قبل المحاولة مجدداً.' },
+          { status: 429 }
+        );
+      }
+    }
+
+    // 2. Network IP rate limit: Max 60 registration attempts per 10 minutes per IP (allowing classroom NATs & concurrent loads)
+    const ipRateLimit = await checkRateLimitAsync(`register_ip_${ip}`, 60, 600);
+    if (!ipRateLimit.allowed) {
+      return NextResponse.json(
+        { error: 'تم تجاوز الحد المسموح لطلبات التسجيل من هذه الشبكة. يرجى الانتظار قليلاً قبل المحاولة مجدداً.' },
+        { status: 429 }
+      );
+    }
 
     if (!cleanEmail || !password) {
       return NextResponse.json(

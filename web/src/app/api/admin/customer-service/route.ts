@@ -39,7 +39,23 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({ error: 'الطالب غير موجود' }, { status: 404 });
       }
 
-      const devices = await db.getUserActiveDevices(userId);
+      const [
+        devices,
+        messagesSentCount,
+        activeChatDaysCount,
+        examsCreatedCount,
+        examsCompletedCount,
+        flashcardDecksCount,
+        flashcardsCreatedCount
+      ] = await Promise.all([
+        db.getUserActiveDevices(userId),
+        db.getUserSentMessagesCount(userId),
+        db.getUserActiveChatDaysCount(userId),
+        db.getUserExamsCount(userId),
+        db.getUserExamSubmissionsCount(userId),
+        db.getUserFlashcardDecksCount(userId),
+        db.getUserFlashcardsCount(userId)
+      ]);
       
       // Calculate subscription eligibility metrics
       let isCancellationEligible = false;
@@ -70,6 +86,12 @@ export async function GET(req: NextRequest) {
         student: {
           ...profile,
           password_hash: undefined,
+          messages_sent_count: messagesSentCount,
+          active_chat_days_count: activeChatDaysCount,
+          exams_created_count: examsCreatedCount,
+          exams_completed_count: examsCompletedCount,
+          flashcard_decks_count: flashcardDecksCount,
+          flashcards_created_count: flashcardsCreatedCount,
           active_devices_count: devices.length,
           devices: devices.map(d => ({
             id: d.id,
@@ -190,6 +212,71 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         message: 'تم تسجيل وتوثيق الإجراء المتخذ للبلاغ بنجاح.'
+      });
+    }
+
+    // 6. Action 4: Grant manual subscription
+    if (action === 'grant_subscription') {
+      const { plan_id, duration_days, note } = body;
+      if (!userId || !plan_id) {
+        return NextResponse.json({ error: 'معرف المستخدم ومعرف الباقة مطلوبان.' }, { status: 400 });
+      }
+      const result = await db.grantUserSubscription(userId, plan_id, duration_days, note);
+      if (!result.success) {
+        return NextResponse.json({ error: result.error || 'فشل تفعيل الاشتراك.' }, { status: 400 });
+      }
+      return NextResponse.json({ success: true, message: result.message, profile: result.profile });
+    }
+
+    // 7. Action 5: Update student academic profile
+    if (action === 'update_student_profile') {
+      const { name, phone, grade_level, email, track_id } = body;
+      if (!userId) {
+        return NextResponse.json({ error: 'معرف المستخدم مطلوب.' }, { status: 400 });
+      }
+      const result = await db.updateStudentProfile(userId, { name, phone, grade_level, email, track_id });
+      if (!result.success) {
+        return NextResponse.json({ error: result.error || 'فشل تحديث بيانات الطالب.' }, { status: 400 });
+      }
+      return NextResponse.json({ success: true, message: 'تم تحديث بيانات الطالب بنجاح.', profile: result.profile });
+    }
+
+    // 8. Action 6: Toggle account ban / suspension
+    if (action === 'toggle_account_status') {
+      const { is_banned, reason } = body;
+      if (!userId || typeof is_banned !== 'boolean') {
+        return NextResponse.json({ error: 'معرف المستخدم وحالة التجميد مطلوبان.' }, { status: 400 });
+      }
+      const result = await db.toggleUserBan(userId, is_banned, reason);
+      if (!result.success) {
+        return NextResponse.json({ error: result.error || 'فشل تعديل حالة الحساب.' }, { status: 400 });
+      }
+      return NextResponse.json({ success: true, message: result.message });
+    }
+
+    // 9. Action 7: Send direct targeted notification
+    if (action === 'send_direct_notification') {
+      const { title, body: notifBody, type } = body;
+      if (!userId || !title || !notifBody) {
+        return NextResponse.json({ error: 'معرف المستخدم وعنوان الإشعار ومحتواه مطلوبون.' }, { status: 400 });
+      }
+      const result = await db.sendTargetedNotification(userId, title, notifBody, type || 'info');
+      if (!result.success) {
+        return NextResponse.json({ error: result.error || 'فشل إرسال الإشعار للطالب.' }, { status: 400 });
+      }
+      return NextResponse.json({ success: true, message: 'تم إرسال الإشعار المباشر للطالب بنجاح.' });
+    }
+
+    // 10. Action 8: Deduct coins
+    if (action === 'deduct_coins') {
+      if (!userId || typeof amount !== 'number' || isNaN(amount) || amount <= 0) {
+        return NextResponse.json({ error: 'معرف المستخدم وقيمة نقاط صالحة موجبة مطلوبان.' }, { status: 400 });
+      }
+      const updatedCoins = await db.deductCoins(userId, null, amount);
+      return NextResponse.json({
+        success: true,
+        coins: updatedCoins,
+        message: `تم خصم ${amount} نقطة بنجاح من رصيد الطالب. الرصيد المتبقي: ${updatedCoins} نقطة.`
       });
     }
 

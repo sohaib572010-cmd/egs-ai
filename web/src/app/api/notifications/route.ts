@@ -1,4 +1,5 @@
 export const runtime = 'edge';
+export const revalidate = 180;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
@@ -17,7 +18,19 @@ export async function GET(req: NextRequest) {
     }
 
     const notifications = await db.getActiveNotifications(target, userId);
-    return NextResponse.json({ success: true, notifications });
+
+    const cacheHeaders: Record<string, string> = userId
+      ? {
+          'Cache-Control': 'private, no-cache, no-store, must-revalidate',
+          'Vary': 'Authorization'
+        }
+      : {
+          'Cache-Control': 'public, max-age=30, s-maxage=180, stale-while-revalidate=300',
+          'CDN-Cache-Control': 'max-age=180',
+          'Vary': 'Authorization, Accept-Encoding'
+        };
+
+    return NextResponse.json({ success: true, notifications }, { headers: cacheHeaders });
   } catch (error: any) {
     console.error('Notifications API Error:', error);
     return NextResponse.json({ success: false, notifications: [] });

@@ -373,38 +373,53 @@ export class QueueProcessor {
         file.id
       );
 
-      const batchSize = Math.max(1, this.settings.batchSize || 3);
+      const concurrency = Math.max(1, this.settings.batchSize || 6);
       const startTime = Date.now();
       let processedInThisRun = 0;
 
-      // 4. Batch Page Processing
-      for (let i = 0; i < pagesToProcess.length; i += batchSize) {
-        const currentStatus = file.status as FileStatus;
-        if (this.isPaused || currentStatus === "paused") {
-          file.status = "paused";
-          this.persistState();
+      // 4. Continuous Sliding-Window Dynamic Concurrency Pool
+      let queueIndex = 0;
+      const activePages = new Set<number>();
+
+      const worker = async () => {
+        while (queueIndex < pagesToProcess.length) {
+          const currentStatus = file.status as FileStatus;
+          if (this.isPaused || currentStatus === "paused") {
+            break;
+          }
+
+          const pNo = pagesToProcess[queueIndex++];
+          activePages.add(pNo);
+          file.currentOperation = `معالجة الصفحات [${Array.from(activePages).sort((a, b) => a - b).join(", ")}]`;
           this.notifyProgress();
-          await docHandler.destroy();
-          return;
-        }
 
-        const currentBatch = pagesToProcess.slice(i, i + batchSize);
-        file.currentOperation = `معالجة الصفحات [${currentBatch.join(", ")}]`;
+          try {
+            await this.processSinglePageWithSafetyTimeout(file, docHandler, pNo, startTime);
+          } finally {
+            activePages.delete(pNo);
+            processedInThisRun++;
+            this.syncFileProgress(file, startTime, processedInThisRun);
+          }
+
+          if (this.settings.delayBetweenBatchesMs > 0) {
+            await new Promise((res) => setTimeout(res, this.settings.delayBetweenBatchesMs));
+          }
+        }
+      };
+
+      const numWorkers = Math.min(concurrency, pagesToProcess.length);
+      const workers: Promise<void>[] = [];
+      for (let w = 0; w < numWorkers; w++) {
+        workers.push(worker());
+      }
+      await Promise.all(workers);
+
+      if (this.isPaused || (file.status as FileStatus) === "paused") {
+        file.status = "paused";
+        this.persistState();
         this.notifyProgress();
-
-        // Process batch concurrently with safety timeout and allSettled
-        const batchPromises = currentBatch.map((pNo) =>
-          this.processSinglePageWithSafetyTimeout(file, docHandler, pNo, startTime)
-        );
-
-        await Promise.allSettled(batchPromises);
-
-        processedInThisRun += currentBatch.length;
-        this.syncFileProgress(file, startTime, processedInThisRun);
-
-        if (this.settings.delayBetweenBatchesMs > 0) {
-          await new Promise((res) => setTimeout(res, this.settings.delayBetweenBatchesMs));
-        }
+        await docHandler.destroy();
+        return;
       }
 
       // 5. Final Assembly & Markdown Export
@@ -414,15 +429,21 @@ export class QueueProcessor {
         const safeSubjectName = file.subjectName.replace(/[\\/:*?"<>|]/g, "_");
         const outputPath = path.join(stageDir, `${safeSubjectName}.md`);
 
-        const sortedPageNumbers = Object.keys(finalCheckpoint.completedPages)
-          .map(Number)
-          .sort((a, b) => a - b);
+        const totalPages = file.totalPages || Object.keys(finalCheckpoint.completedPages).length;
+        const missingPages: number[] = [];
+        const failedPagesList: number[] = [];
 
         let fullMarkdown = `# منهج ${file.subjectName}\n\n`;
 
-        for (const pNo of sortedPageNumbers) {
+        for (let pNo = 1; pNo <= totalPages; pNo++) {
           const pageRes = finalCheckpoint.completedPages[pNo];
-          if (pageRes && pageRes.processedMarkdown && pageRes.processedMarkdown.trim().length > 0) {
+          if (!pageRes) {
+            missingPages.push(pNo);
+            fullMarkdown += `\n\n<!-- بداية الصفحة ${pNo} -->\n<!-- لم يتم استخراج الصفحة ${pNo} -->\n`;
+          } else if (pageRes.status === "failed") {
+            failedPagesList.push(pNo);
+            fullMarkdown += `\n\n<!-- بداية الصفحة ${pNo} -->\n` + (pageRes.processedMarkdown || `<!-- تعثر استخراج الصفحة ${pNo} -->\n`);
+          } else if (pageRes.processedMarkdown && pageRes.processedMarkdown.trim().length > 0) {
             fullMarkdown += `\n\n<!-- بداية الصفحة ${pNo} -->\n` + pageRes.processedMarkdown;
           }
         }
@@ -430,11 +451,21 @@ export class QueueProcessor {
         const sanitizedMarkdown = cleanAndDeduplicateCurriculumMarkdown(fullMarkdown);
         fs.writeFileSync(outputPath, sanitizedMarkdown, "utf-8");
 
-        file.status = "completed";
+        const ungeneratedCount = missingPages.length + failedPagesList.length;
+        if (ungeneratedCount > 0) {
+          file.status = "failed";
+          file.failedPages = ungeneratedCount;
+          file.errorMessage = `تعثر توليد ${ungeneratedCount} صفحة: [${[...missingPages, ...failedPagesList].slice(0, 10).join(", ")}${ungeneratedCount > 10 ? "..." : ""}]`;
+          this.log("warn", `تم تصدير المنهج مع وجود ${ungeneratedCount} صفحة غير مكتملة: ${file.errorMessage}`, file.id);
+        } else {
+          file.status = "completed";
+          file.failedPages = 0;
+          file.currentOperation = "اكتمل بنجاح";
+          this.log("success", `اكتمل استخراج وتنظيم المنهج بالكامل (${totalPages} صفحة): ${outputPath}`, file.id);
+        }
+
         file.outputFilePath = outputPath;
         file.completedAt = new Date().toISOString();
-        file.currentOperation = "اكتمل بنجاح";
-        this.log("success", `اكتمل استخراج وتنظيم المنهج بالكامل: ${outputPath}`, file.id);
       }
     } catch (error: any) {
       console.error(`Error processing file ${file.filename}:`, error);
@@ -484,14 +515,14 @@ export class QueueProcessor {
     pageNumber: number,
     startTime?: number
   ): Promise<PageExtractionResult> {
-    const pageTimeoutMs = 90000;
+    const pageTimeoutMs = 60000;
     let timer: NodeJS.Timeout | null = null;
 
     const timeoutPromise = new Promise<PageExtractionResult>((resolve) => {
       timer = setTimeout(() => {
         this.log(
           "warn",
-          `تجاوزت الصفحة ${pageNumber} مهلة المعالجة القصوى (90 ثانية)، سيتم الانتقال للصفحة التالية`,
+          `تجاوزت الصفحة ${pageNumber} مهلة المعالجة القصوى (60 ثانية)، سيتم الانتقال للصفحة التالية`,
           file.id,
           pageNumber
         );
@@ -527,7 +558,7 @@ export class QueueProcessor {
     startTime?: number
   ): Promise<PageExtractionResult> {
     let attempts = 0;
-    const maxRetries = Math.max(1, this.settings.maxRetries || 6);
+    const maxRetries = Math.max(1, this.settings.maxRetries || 3);
 
     while (attempts < maxRetries) {
       attempts++;
@@ -623,7 +654,7 @@ export class QueueProcessor {
           return failedResult;
         }
 
-        const waitMs = Math.min(2000 * Math.pow(1.5, attempts - 1), 15000);
+        const waitMs = Math.min(1000 * Math.pow(1.5, attempts - 1), 5000);
         await new Promise((res) => setTimeout(res, waitMs));
       }
     }

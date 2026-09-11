@@ -1,0 +1,66 @@
+-- EGS AI — Seed Script for Content Creator Testing Account
+-- Email: creator@egsaiedu.com
+-- Password: EgsCreator2026
+-- Run this in Supabase SQL Editor if you ever need to restore or reset the account.
+
+INSERT INTO public.profiles (
+  id,
+  email,
+  phone,
+  name,
+  grade_level,
+  plan_type,
+  subscription_status,
+  subscription_start_date,
+  subscription_end_date,
+  subscription_plan_id,
+  role,
+  password_hash,
+  coins,
+  points,
+  study_streak,
+  last_active_date,
+  unlimited_credit,
+  welcome_reward_claimed,
+  free_plan_claimed,
+  apology_compensation_claimed,
+  apology_dismissed,
+  created_at,
+  terms_accepted_at
+) VALUES (
+  'c0000000-0000-4000-a000-000000000002',
+  'creator@egsaiedu.com',
+  '01000000088',
+  'صانع محتوى (حساب تجريبي)',
+  '1_high',
+  'pro_3m',
+  'active',
+  NOW(),
+  NOW() + INTERVAL '1 year',
+  'pro_3m',
+  'student',
+  'pbkdf2$100000$I3VuDAqnAST35W8ChLMwjg==$T9qjykFyc0q6417P2x5Mkfd9P96I2gGs+GEBBhB+Fqc=',
+  10000,
+  50,
+  5,
+  CURRENT_DATE,
+  true,
+  true,
+  true,
+  true,
+  true,
+  NOW(),
+  NOW()
+)
+ON CONFLICT (email) DO UPDATE SET
+  name = 'صانع محتوى (حساب تجريبي)',
+  role = 'student',
+  plan_type = 'pro_3m',
+  subscription_status = 'active',
+  subscription_end_date = NOW() + INTERVAL '1 year',
+  subscription_plan_id = 'pro_3m',
+  unlimited_credit = true,
+  coins = 10000,
+  points = 50,
+  study_streak = 5,
+  password_hash = EXCLUDED.password_hash;

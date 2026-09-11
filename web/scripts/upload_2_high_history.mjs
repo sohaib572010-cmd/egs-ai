@@ -34,6 +34,8 @@ const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const EDENAI_API_KEY = process.env.EDENAI_API_KEY;
 const EDENAI_BASE = 'https://api.edenai.run/v2';
+const ALIBABA_API_KEY = process.env.ALIBABA_API_KEY || process.env.DASHSCOPE_API_KEY;
+const ALIBABA_API_BASE = process.env.ALIBABA_API_BASE || 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   console.error('Missing Supabase credentials in .env.local');
@@ -192,7 +194,33 @@ function createSlidingWindowChunks(text, parentHeading, maxTokens, overlapTokens
   }];
 }
 
-// ─── EdenAI Embeddings ───────────────────────────────────────────────────────
+// ─── Vector Embeddings (Alibaba text-embedding-v4 with EdenAI Fallback) ───────
+
+async function requestAlibabaBatch(batch) {
+  const endpoint = `${ALIBABA_API_BASE}/embeddings`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${ALIBABA_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'text-embedding-v4',
+      input: batch,
+      dimensions: 768
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Alibaba API status ${res.status}: ${errText.slice(0, 150)}`);
+  }
+
+  const data = await res.json();
+  const items = data.data || [];
+  items.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+  return items.map(it => it.embedding || []);
+}
 
 async function requestEmbedding(batch) {
   const https = await import('https');
@@ -245,7 +273,53 @@ async function requestEmbedding(batch) {
 }
 
 async function generateEmbeddingBatch(texts) {
-  if (!EDENAI_API_KEY || texts.length === 0) return texts.map(() => []);
+  if (texts.length === 0) return [];
+
+  // Primary: Alibaba text-embedding-v4 (max 10 items per batch)
+  if (ALIBABA_API_KEY) {
+    const BATCH_SIZE = 10;
+    const batches = [];
+    for (let i = 0; i < texts.length; i += BATCH_SIZE) {
+      batches.push(texts.slice(i, i + BATCH_SIZE).map(t => (t || '').slice(0, 8000)));
+    }
+
+    const allEmbeddings = [];
+    let allSucceeded = true;
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      let retries = 3;
+      let success = false;
+
+      while (retries > 0 && !success) {
+        try {
+          const embeddings = await requestAlibabaBatch(batch);
+          for (let j = 0; j < batch.length; j++) {
+            allEmbeddings.push(embeddings[j] || []);
+          }
+          success = true;
+        } catch (err) {
+          retries--;
+          console.warn(`Retry ${3 - retries}/3 for Alibaba batch ${i + 1}/${batches.length}:`, err.message);
+          if (retries > 0) await new Promise(r => setTimeout(r, 1000));
+        }
+      }
+
+      if (!success) {
+        allSucceeded = false;
+        break;
+      }
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    if (allSucceeded && allEmbeddings.length === texts.length) {
+      return allEmbeddings;
+    }
+    console.warn('Alibaba batch embedding encountered errors, falling back to EdenAI...');
+  }
+
+  // Fallback: EdenAI Google text-embedding-004
+  if (!EDENAI_API_KEY) return texts.map(() => []);
 
   const BATCH_SIZE = 15;
   const batches = [];

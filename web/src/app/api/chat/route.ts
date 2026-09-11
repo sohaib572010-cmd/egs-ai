@@ -2,15 +2,16 @@ export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db, CurriculumChunk, ChatMode, applyRRF } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
-import { generateChatResponseStream } from '@/lib/deepseek';
+import { generateChatResponseStream, LessonMode } from '@/lib/deepseek';
 import {
   analyzeQueryIntelligence,
   generateEmbedding,
-  assessContextGap,
   classifyEngagement,
+  callDeepSeekVision,
   QueryIntelligence
 } from '@/lib/gemini';
 import { runHybridTriFusionRetrieval } from '@/lib/hybrid_retriever';
+import { getExhaustiveLessonContext, findMatchingLessonInCurriculum } from '@/lib/curriculum_structure';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -69,9 +70,50 @@ function isConversationalGreeting(text: string): boolean {
   return greetingPrefixes.some(p => clean.startsWith(p) && clean.length < 30);
 }
 
+function isImageCapabilityInquiry(text: string): boolean {
+  if (!text) return false;
+  const clean = text
+    .replace(/[؟?!.،,;:~`!@#$%^&*()_+\-=\[\]{}'"]/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!clean || clean.length > 150) return false;
+
+  // Never match physics optics curriculum questions about mirrors/lenses and image formations
+  if (/(?:مرآة|مرايا|عدسة|عدسات|تكون الصور|صفات الصورة|خواص الصورة|مسار الأشعة|بؤرة|خيالية|حقيقية|مقلوبة|معتدلة)/i.test(clean)) {
+    return false;
+  }
+
+  // Check direct query about text-only model or camera/image capabilities
+  const directTextOnlyCheck = /(?:نصي فقط|نصوص بس|كلام بس|text[- ]?only)/i.test(clean);
+
+  const cameraOrImagePattern = /(?:صورة|صور|صوره|كاميرا|كاميره|تصوير|أصور|اصور|صورة بالكاميرا|صور بالكاميرا|رفع صورة|ارفق صورة|ارفاق صورة|image|images|picture|pictures|photo|photos|camera)/i;
+  const capabilityQuestionPattern = /(?:هل|أقدر|اقدر|تقدر|بتقدر|ينفع|ممكن|عايز|عاوز|كيف|ازاي|طريقة|تدعم|بتدعم|تقبل|بيقبل|بتقبل|تفهم|بيفهم|بتفهم|تشوف|بيشوف|بتشوف|تقرأ|بتقرأ|تستقبل|بتستقبل|يمكنك|تستطيع|بتعرف|تعرف|أبعت|ابعت|ارفع|أرفع|اصور|أصور|can i|do you (?:support|accept|see|read|take)|are you (?:text|multimodal))/i;
+
+  return directTextOnlyCheck || (cameraOrImagePattern.test(clean) && capabilityQuestionPattern.test(clean));
+}
+
 async function analyzeImageWithEdenAI(base64: string, mimeType: string): Promise<string> {
+  if (!base64) return '';
+
+  // Step 1: DeepSeek Flash (deepseek-flash, Primary Vision Model with native multimodal)
+  if (process.env.DEEPSEEK_API_KEY) {
+    try {
+      const desc = await callDeepSeekVision(
+        base64,
+        mimeType || 'image/jpeg',
+        'اقرأ هذه الصورة بالتفصيل واكتب وصفاً شاملاً ومفصلاً لها باللغة العربية، بما في ذلك أي نصوص أو أسئلة أو مسائل أو معادلات رياضية أو فيزيائية أو كيميائية أو جداول أو رسوم توضيحية بداخلها بدقة بالغة واكتب النصوص والمسائل كما هي حرفياً.'
+      );
+      if (desc && desc.trim().length > 0) {
+        return desc.trim();
+      }
+    } catch (deepseekVisionErr) {
+      console.warn('DeepSeek Vision in chat failed, falling back to EdenAI:', deepseekVisionErr);
+    }
+  }
+
+  // Step 2: EdenAI VQA Fallback (Google / OpenAI)
   const EDENAI_API_KEY = process.env.EDENAI_API_KEY || '';
-  if (!EDENAI_API_KEY || !base64) return '';
+  if (!EDENAI_API_KEY) return '';
 
   try {
     const binaryString = atob(base64);
@@ -114,17 +156,18 @@ async function analyzeImageWithEdenAI(base64: string, mimeType: string): Promise
            data?.openai?.answer || 
            '';
   } catch (err) {
-    console.error('Error analyzing image in chat:', err);
+    console.error('Error analyzing image in chat via EdenAI fallback:', err);
     return '';
   }
 }
 
 function buildPromptText(cleanText: string, imageDesc?: string): string {
-  let text = cleanText;
+  const trimmed = (cleanText || '').trim();
   if (imageDesc) {
-    text = `[وصف الصورة المرفقة من الطالب: ${imageDesc}]\n\nالسؤال: ${text}`;
+    const questionPart = trimmed || 'قم بقراءة وحل وشرح المسألة أو المحتوى الظاهر في الصورة بالتفصيل وفق المنهج المصري المعتمد.';
+    return `[صورة ملتقطة بالكاميرا / مرفقة من الطالب: ${imageDesc}]\n\nطلب أو سؤال الطالب حول الصورة: ${questionPart}`;
   }
-  return text;
+  return trimmed;
 }
 
 function buildHierarchicalContextString(parentChunks: CurriculumChunk[], childChunks: CurriculumChunk[] = []): string {
@@ -141,11 +184,10 @@ function buildHierarchicalContextString(parentChunks: CurriculumChunk[], childCh
 // ─── Main POST Handler ────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
-    let { message, grade_level, subject_name, session_id, history, model, thinking, mode } = await req.json();
+    let { message, grade_level, subject_name, session_id, history, thinking, mode } = await req.json();
     if (grade_level) grade_level = grade_level.trim();
     if (subject_name) subject_name = subject_name.trim();
 
-    const selectedModel = model === 'pro' ? 'pro' : 'flash';
     const isThinkingEnabled = !!thinking;
     const chatMode: ChatMode = VALID_MODES.includes(mode) ? mode : 'detailed';
 
@@ -186,7 +228,11 @@ export async function POST(req: NextRequest) {
 
     if (!userId) {
       return NextResponse.json(
-        { error: 'login_required', message: 'تسجيل الدخول مطلوب لاستخدام EGS AI.' },
+        {
+          error: 'login_required',
+          code: 'login_required',
+          message: 'يجب تسجيل الدخول أو إنشاء حساب جديد لتجربة EGS AI وبدء المذاكرة.'
+        },
         { status: 401 }
       );
     }
@@ -205,7 +251,6 @@ export async function POST(req: NextRequest) {
 
     const isSubscribed = plan && plan !== 'free' && profile.subscription_status === 'active';
     const hasUnlimitedCredit = profile.role === 'admin' || !!profile.unlimited_credit;
-    const activeModel = (isSubscribed || hasUnlimitedCredit) ? selectedModel : 'flash';
     const activeThinking = (isSubscribed || hasUnlimitedCredit) ? isThinkingEnabled : false;
 
     if (!hasUnlimitedCredit && coins <= 0) {
@@ -214,7 +259,7 @@ export async function POST(req: NextRequest) {
         plan: plan,
         message: isSubscribed
           ? 'لقد استنفدت رصيد النقاط المتاح لك لهذا اليوم. سيتجدد رصيدك تلقائياً غداً.'
-          : 'أنت بطل المذاكرة اليوم! لقد استنفدت رصيدك اليومي المجاني (5 عملات). سيتجدد رصيدك تلقائياً غداً، أو اشترك الآن في باقة Pro لمتابعة المذاكرة ونموذج التفكير المعمق!'
+          : 'لقد استنفدت رصيدك اليومي المجاني. سيتجدد رصيدك تلقائياً غداً، أو اشترك الآن في باقة Pro لمتابعة المذاكرة ونموذج التفكير المعمق!'
       }, { status: 429 });
     }
 
@@ -237,19 +282,15 @@ export async function POST(req: NextRequest) {
 
     // Resolve or auto-create Chat Session
     let activeSessionId = session_id;
-    if (userId) {
-      if (!activeSessionId) {
-        const title = message.length > 35 ? message.substring(0, 35) + '...' : message;
-        const newSession = await db.createChatSession(title, subject_name, targetGrade, userId, undefined, chatMode);
-        activeSessionId = newSession.id;
-      } else {
-        const existingSession = await db.getChatSession(activeSessionId);
-        if (existingSession && (existingSession.mode || 'detailed') !== chatMode) {
-          await db.updateChatSessionMode(activeSessionId, chatMode);
-        }
-      }
+    if (!activeSessionId) {
+      const title = message.length > 35 ? message.substring(0, 35) + '...' : message;
+      const newSession = await db.createChatSession(title, subject_name, targetGrade, userId, undefined, chatMode);
+      activeSessionId = newSession.id;
     } else {
-      activeSessionId = session_id || 'guest-session';
+      const existingSession = await db.getChatSession(activeSessionId);
+      if (existingSession && (existingSession.mode || 'detailed') !== chatMode) {
+        await db.updateChatSessionMode(activeSessionId, chatMode);
+      }
     }
 
     let isCurriculumActive = false;
@@ -269,29 +310,44 @@ export async function POST(req: NextRequest) {
     let promptText = buildPromptText(cleanText, initialImageDesc);
 
     // Save user message before streaming
-    if (userId) {
-      await db.addChatMessage('user', message, userId, undefined, activeSessionId);
-    }
-    if (!userId && deviceId) {
-      await db.incrementDeviceGuestCount(deviceId);
-    }
+    await db.addChatMessage('user', message, userId, undefined, activeSessionId);
 
-    // Fetch recent message history
+    // Fetch recent message history (prior to the current turn)
     let recentHistory: any[] = [];
-    if (userId) {
-      const rawHistory = await db.getChatHistory(undefined, undefined, activeSessionId);
-      recentHistory = rawHistory
-        .slice(-6)
-        .map(h => {
-          const { cleanText: hText, imageDesc: histDesc } = parseMessage(h.message);
-          return {
-            sender: h.sender,
-            message: buildPromptText(hText, histDesc)
-          };
-        });
-    } else if (history) {
-      recentHistory = history.map((h: any) => {
-        const { cleanText: hText, imageDesc: histDesc } = parseMessage(h.message || '');
+    let ongoingLessonTitle: string | null = null;
+    let roadmapMsg: any = null;
+
+    const rawHistory = await db.getChatHistory(undefined, undefined, activeSessionId);
+    const priorHistory = (rawHistory && rawHistory.length > 0)
+      ? rawHistory.slice(0, -1)
+      : (history && Array.isArray(history) ? history : []);
+
+    if (priorHistory && priorHistory.length > 0) {
+      // Check if session has an active lesson explanation roadmap that is not yet completed
+      roadmapMsg = [...priorHistory].reverse().find((m: any) =>
+        m.sender === 'ai' && (m.message.includes('مقسم إلى') || m.message.includes('نقاط أساسية'))
+      );
+      if (roadmapMsg) {
+        const lastNavMsg = [...priorHistory].reverse().find((m: any) =>
+          m.sender === 'ai' && m.message.includes('[LESSON_NAV]')
+        );
+        const isLessonAlreadyCompleted = !!lastNavMsg && /"is_completed"\s*:\s*true/.test(lastNavMsg.message);
+
+        if (!isLessonAlreadyCompleted) {
+          const match1 = roadmapMsg.message.match(/درسنا اليوم هو\s+([^\n،,]+?)(?:\s+يا بطل|\s*،|\s*والدرس)/);
+          const match2 = roadmapMsg.message.match(/درس\s+([^\n،,]+?)\s+مقسم إلى/);
+          ongoingLessonTitle = (match1 && match1[1]?.trim()) || (match2 && match2[1]?.trim()) || null;
+        }
+      }
+
+      // Preserve up to 14 prior messages; anchor the roadmap message at the front if evicted
+      let selectedHistory = priorHistory.slice(-14);
+      if (roadmapMsg && !selectedHistory.some((m: any) => m.id && m.id === roadmapMsg.id)) {
+        selectedHistory = [roadmapMsg, ...selectedHistory];
+      }
+
+      recentHistory = selectedHistory.map((h: any) => {
+        const { cleanText: hText, imageDesc: histDesc } = parseMessage(h.message);
         return {
           sender: h.sender,
           message: buildPromptText(hText, histDesc)
@@ -331,15 +387,29 @@ export async function POST(req: NextRequest) {
 
           // ─── PHASE 1: Build RAG Context ─────────────────────────────────
           let ragContext = '';
+          let isLessonExplanationActive = false;
+          let lessonMode: LessonMode = 'none';
+          let activeSubject = subject_name;
+          let activeGrade = targetGrade;
 
-          if (!imageBase64 && isConversationalGreeting(cleanText)) {
-            emitSearchStep('greeting', '✨', 'أهلاً بك يا بطل...');
-            const studentGreetingName = profile?.name && profile.name !== 'طالب جديد' ? profile.name : 'يا بطل';
-            ragContext = `أنت في محادثة ترحيبية افتتاحية مع الطالب (${studentGreetingName}).
-1. رحب بالطالب بلهجة مصرية تعليمية ودودة ومهذبة للغاية وبطاقة إيجابية عالية ("يا بطل" أو "يا دكتورة").
+          if (!imageBase64 && isImageCapabilityInquiry(cleanText)) {
+            emitSearchStep('capabilities', '📷', 'التعرف على إمكانيات الكاميرا والصور...');
+            ragContext = `[توجيه استفسار عن إمكانيات الكاميرا والصور والمرفقات]:
+الطالب يستفسر عن إمكانية إرسال أو التقاط أو رفع الصور أو استخدام الكاميرا لحل الأسئلة والمسائل أو هل الذكاء الاصطناعي يدعم الصور.
+أجب الطالب بأسلوب هادئ وواثق وذكي ومهذب بالعامية المصرية التعليمية الراقية دون مبالغة:
+1. أكد له بكل وضوح واطمئنان أنك تدعم استقبال وقراءة وتحليل صور الكاميرا والمرفقات كمدخل أساسي واعتيادي (لست نموذجاً نصياً فقط أبداً).
+2. وضّح له أنه يستطيع تصوير أي مسألة أو معادلة أو رسم بياني أو صفحة في كتابه أو كشكوله مباشرة عبر زر الكاميرا (أيقونة الكاميرا بجانب خانة الكتابة)، أو رفع صورة جاهزة من جهازه عبر زر إرفاق الصور.
+3. أكد له أنك ستقرأ كل تفاصيل الصورة والمسائل والرسومات بدقة تامة وستشرحها وتحلها خطوة بخطوة وفق المنهج المصري لمادة "${subject_name}".
+4. ادعه بهدوء وثقة لتجربة تصوير أي مسألة أو سؤال أمامه الآن والضغط على إرسال لتبدأ في تحليلها وشرحها معه.
+استثناء حاسم: يمنع منعاً باتاً إصدار أي تنبيه بأن المعلومة خارج المنهج أو أنك نموذج نصي فقط.`;
+          } else if (!imageBase64 && isConversationalGreeting(cleanText)) {
+            emitSearchStep('greeting', '✨', 'أهلاً بك...');
+            const studentGreetingName = profile?.name && profile.name !== 'طالب جديد' ? profile.name : '';
+            ragContext = `أنت في محادثة ترحيبية افتتاحية مع الطالب${studentGreetingName ? ` (${studentGreetingName})` : ''}.
+1. رحب بالطالب بلهجة مصرية تعليمية مهذبة وذكية وراقية، دون أي مدح مصطنع أو مجاملات مبالغ فيها، ودون استخدام ألقاب متكررة مثل "يا بطل" أو "يا دكتور".
 2. عرف بنفسك باختصار شديد بأنك معلمه ومساعده الذكي في مادة "${subject_name}".
-3. وضّح له أنك جاهز لمساعدته في: شرح أي درس بالتفصيل، حل أصعب المسائل والتدريبات خطوة بخطوة، أو توليد اختبارات تدريبية سريعة.
-4. اقترح عليه البدء فوراً بسؤال محدد أو مسألة يواجه صعوبة فيها، أو مراجعة أول درس في المنهج.
+3. وضّح له باحترافية أنك جاهز لمساعدته في: شرح أي درس بالتفصيل، إيضاح أي نقطة غير مفهومة، حل المسائل والتدريبات خطوة بخطوة (سواء كتابة أو بتصوير المسألة بالكاميرا مباشرة أو إرفاق صورتها)، أو توليد اختبارات تدريبية سريعة.
+4. اقترح عليه البدء بسؤال محدد أو تحديد النقطة التي يريد استيعابها أو مراجعة أي موضوع في المنهج، بأسلوب واثق وذكي ومباشر.
 5. استثناء حاسم: يمنع منعاً باتاً إصدار أي تنبيه بأن المعلومة خارج المنهج للتحيات والترحيب.`;
           } else if (isCurriculumActive) {
             emitSearchStep('analyzing', '🧠', 'أحلل سؤالك...');
@@ -358,113 +428,189 @@ export async function POST(req: NextRequest) {
               console.error('Query intelligence failed, using fallback:', intellErr);
             }
 
-            let activeGrade = targetGrade;
-            let activeSubject = subject_name;
+            const normalizeSubj = (s?: string) => (s || '').trim().toLowerCase().replace(/^(ال)/, '');
+            const rawDetectedSubj = intelligence.detectedSubject || intelligence.metadata?.subject;
+            const rawDetectedGrade = intelligence.detectedGrade || intelligence.metadata?.gradeLevel;
 
-            if (intelligence.metadata?.gradeLevel || intelligence.metadata?.subject) {
-              const routerGrade = intelligence.metadata.gradeLevel || targetGrade;
-              const routerSubject = intelligence.metadata.subject || subject_name;
-              
-              const routerCurr = allCurriculums.find(c => c.grade_level === routerGrade && c.subject_name === routerSubject);
-              if (routerCurr) {
-                activeGrade = routerGrade;
-                activeSubject = routerSubject;
-                emitSearchStep('routing', '🗺️', `تم توجيه البحث تلقائياً إلى منهج: ${activeSubject}`);
+            const isSubjectMismatch = !!(
+              intelligence.isDifferentSubject ||
+              (rawDetectedSubj && normalizeSubj(rawDetectedSubj) !== normalizeSubj(subject_name) && !rawDetectedSubj.includes(subject_name) && !subject_name.includes(rawDetectedSubj))
+            );
+
+            const isGradeMismatch = !!(
+              intelligence.isDifferentGrade ||
+              (rawDetectedGrade && rawDetectedGrade.trim() !== targetGrade.trim())
+            );
+
+            if (isSubjectMismatch || isGradeMismatch) {
+              emitSearchStep('checking', '🔍', 'التحقق من المادة والصف الدراسي...');
+              ragContext = `[تنبيه نظام: استفسار الطالب يخص ${isSubjectMismatch ? 'مادة أخرى غير ' + subject_name : ''}${isSubjectMismatch && isGradeMismatch ? ' و' : ''}${isGradeMismatch ? 'صفاً دراسياً آخر غير ' + targetGrade : ''}. يُلزم تطبيق توجيهات الحدود المحددة دون محاولة الشرح من مناهج أخرى].`;
+            } else {
+
+            // Differentiate between a specific point/doubt and an explicit full lesson request
+            const isSinglePointDoubt = /(?:مش فاهم|مش مستوعب|مش واضحة|وضحلي|اشرحلي نقطة|نقطة|جزئية|مفهوم|معنى|ما هو|ما هي|ماهو|ماهي|ما المقصود|ليه|لماذا|علل|ازاي|كيف|ما الفرق|قارن|سؤال|مسألة|احسب|عرف|متى|أين|هل)/i.test(cleanText) &&
+              !/(?:شرح كامل|شرح شامل|الدرس كامل|كل نقاط الدرس|اشرح لي الدرس من البداية|ذاكر معايا الدرس|بالتفصيل|شرح مفصل|كامل)/i.test(cleanText);
+
+            // Check if user specifically requested interactive step-by-step mode
+            const isExplicitStepByStep = /(?:خطوة بخطوة|نقطة بنقطة|خطوة خطوة|نقطة نقطة|تفاعلي|جزئية بجزئية|امشي معايا)/i.test(cleanText);
+
+            // Check if current user turn is an explicit lesson navigation action or check question response
+            const hasLessonNavAction = /(?:الانتقال إلى النقطة التالية|النقطة التالية|النقطة التانية|انقل للنقطة|النقطة اللي بعدها|كمل النقطة|فهمت كمل|استمر في الشرح وتفصيل هذه النقطة|لم أفهم، وضح بمثال إضافي|وضح بمثال إضافي)/i.test(cleanText) ||
+              /^(?:الخيار\s+)?[أابجد](?:\s*|\.)$/i.test(cleanText.trim()) ||
+              /^(?:صح|خطأ)$/i.test(cleanText.trim());
+
+            const isContinuityAnswer = !!ongoingLessonTitle && !isSinglePointDoubt && hasLessonNavAction;
+
+            // Lesson explanation request (either explicitly saying 'كامل' or asking to explain a lesson/chapter)
+            const isLessonRequest = !isSinglePointDoubt && (
+              intelligence.isLessonExplanation ||
+              /(?:شرح كامل|شرح شامل|الدرس كامل|كل نقاط الدرس|ذاكر معايا الدرس|من البداية بالكامل|شرح الدرس|اشرح الدرس|اشرح لي الدرس|اشرحلي الدرس)/i.test(cleanText) ||
+              /(?:اشرح|شرح|ذاكر|ابدأ|عايز شرح|عاوز شرح|ممكن شرح|ممكن تشرح|فهمني)\s+(?:لي\s+)?(?:معايا\s+)?(?:الدرس|درس)\s+([^؟?!.\n]+)/i.test(cleanText) ||
+              /(?:الدرس|درس)\s+([^؟?!.\n]+?)\s+(?:شرح كامل|كامل|بالكامل|شامل|من البداية|شرح|بالتفصيل)/i.test(cleanText)
+            );
+
+            lessonMode = 'none';
+            if (isContinuityAnswer || (isExplicitStepByStep && isLessonRequest)) {
+              lessonMode = 'step_by_step';
+            } else if (isLessonRequest) {
+              lessonMode = 'full_lesson';
+            }
+
+            const targetLessonCandidate = (isContinuityAnswer ? ongoingLessonTitle : null) ||
+              (isLessonRequest ? (intelligence.lessonTitle || cleanText) : null);
+
+            if (targetLessonCandidate) {
+              emitSearchStep('lesson_search', '📖', `أجمع جميع نقاط ومحاور الدرس من المنهج المعتمد...`);
+              const exhaustiveLesson = await getExhaustiveLessonContext(activeGrade, activeSubject, targetLessonCandidate);
+
+              if (exhaustiveLesson.success && exhaustiveLesson.contextText.length > 80) {
+                isLessonExplanationActive = true;
+                ragContext = exhaustiveLesson.contextText;
+                emitSearchStep(
+                  'lesson_ready',
+                  '✅',
+                  lessonMode === 'full_lesson'
+                    ? `تم تحضير الشرح الكامل والشامل لدرس "${exhaustiveLesson.lessonTitle}" من المنهج المعتمد`
+                    : `تم حصر جميع محاور وتفاصيل درس "${exhaustiveLesson.lessonTitle}" بالكامل دون إغفال أي جزئية`
+                );
+              } else {
+                lessonMode = 'none';
               }
             }
 
-            emitSearchStep('searching', '🔍', intelligence.searchAnnouncement);
-            emitSearchStep('graph_traversal', '🕸️', 'استكشاف شبكة المفاهيم والعلاقات الأكاديمية (GraphRAG)...');
+            // If not a full lesson explanation flow, perform standard Tri-Fusion retrieval
+            if (!isLessonExplanationActive) {
+              emitSearchStep('searching', '🔍', intelligence.searchAnnouncement);
+              emitSearchStep('graph_traversal', '🕸️', 'استكشاف شبكة المفاهيم والعلاقات الأكاديمية (GraphRAG)...');
 
-            const hydeEmbedding = await generateEmbedding(intelligence.hydePassage).catch(e => {
-              console.error('HyDE embedding failed:', e);
-              return [] as number[];
-            });
+              const hydeEmbedding = await generateEmbedding(intelligence.hydePassage).catch(e => {
+                console.error('HyDE embedding failed:', e);
+                return [] as number[];
+              });
 
-            emitSearchStep('fusion', '⚡', 'دمج وتصنيف أفضل نتائج البحث (Tri-Fusion RRF)...');
+              emitSearchStep('fusion', '⚡', 'دمج وتصنيف أفضل نتائج البحث (Tri-Fusion RRF)...');
 
-            const retrievalResult = await runHybridTriFusionRetrieval(
-              activeGrade,
-              activeSubject,
-              promptText,
-              hydeEmbedding,
-              [...intelligence.arabicKeywords, ...intelligence.englishKeywords],
-              {
-                topK: 8,
-                rrfK: 60,
-                weightVector: 1.0,
-                weightBM25: 1.0,
-                weightGraph: 0.85
+              const retrievalResult = await runHybridTriFusionRetrieval(
+                activeGrade,
+                activeSubject,
+                promptText,
+                hydeEmbedding,
+                [...intelligence.arabicKeywords, ...intelligence.englishKeywords],
+                {
+                  topK: 8,
+                  rrfK: 60,
+                  weightVector: 1.0,
+                  weightBM25: 1.0,
+                  weightGraph: 0.85
+                },
+                intelligence.hydePassage
+              );
+
+              let contextChunks = retrievalResult.parentChunks;
+              let fusedChildChunks = retrievalResult.childChunks;
+              ragContext = retrievalResult.formattedContext;
+
+              if (intelligence.queryType === 'overview') {
+                emitSearchStep('summary', '📚', 'سأستعرض محتوى المنهج الشامل...');
+                const [summary, outline] = await Promise.all([
+                  db.getCurriculumSummary(activeGrade, activeSubject),
+                  db.getFullCurriculumOutline(activeGrade, activeSubject)
+                ]);
+                let overviewPrefix = '';
+                if (summary) {
+                  overviewPrefix += `ملخص المنهج الشامل:\n${summary}\n\n`;
+                }
+                if (outline.length > 0) {
+                  overviewPrefix += `محاور المنهج الدراسي:\n${outline.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n\n`;
+                }
+                ragContext = overviewPrefix + ragContext;
               }
-            );
 
-            let contextChunks = retrievalResult.parentChunks;
-            let fusedChildChunks = retrievalResult.childChunks;
-            ragContext = retrievalResult.formattedContext;
+              // Multi-Tier Guaranteed Curriculum Delivery Fallback:
+              // If retrieved chunks are sparse (< 2 chunks) or context is brief (< 150 chars),
+              // directly scan and extract relevant textbook sections from curriculum detail markdown
+              if (contextChunks.length < 2 || ragContext.trim().length < 150) {
+                try {
+                  const detail = await db.getCurriculumDetail(targetCurr.id);
+                  if (detail && detail.content) {
+                    const rawSections = detail.content.split(/\n(?=#+\s)/);
+                    const queryTerms = [...new Set([
+                      ...cleanText.replace(/[؟?!.،,;:\-_\/]/g, ' ').split(/\s+/).filter(w => w.length > 2),
+                      ...(intelligence.arabicKeywords || [])
+                    ])].filter(w => w.length > 2);
 
-            if (intelligence.queryType === 'overview') {
-              emitSearchStep('summary', '📚', 'سأستعرض محتوى المنهج الشامل...');
-              const [summary, outline] = await Promise.all([
-                db.getCurriculumSummary(activeGrade, activeSubject),
-                db.getFullCurriculumOutline(activeGrade, activeSubject)
-              ]);
-              let overviewPrefix = '';
-              if (summary) {
-                overviewPrefix += `ملخص المنهج الشامل:\n${summary}\n\n`;
-              }
-              if (outline.length > 0) {
-                overviewPrefix += `محاور المنهج الدراسي:\n${outline.map((h, i) => `${i + 1}. ${h}`).join('\n')}\n\n`;
-              }
-              ragContext = overviewPrefix + ragContext;
-            } else if (contextChunks.length < 3) {
-              emitSearchStep('assessing', '📊', 'أتحقق من كفاية المعلومات المسترجعة...');
-              try {
-                const gap = await assessContextGap(promptText, ragContext);
-                if (!gap.sufficient && gap.missingTopics.length > 0) {
-                  for (const topic of gap.missingTopics.slice(0, 2)) {
-                    emitSearchStep('followup', '🔍', `سأبحث أيضاً عن: ${topic}`);
-                    try {
-                      const extraResult = await runHybridTriFusionRetrieval(
-                        activeGrade,
-                        activeSubject,
-                        topic,
-                        [],
-                        [topic],
-                        { topK: 3 }
-                      );
-                      const existingIds = new Set(contextChunks.map(c => c.id));
-                      const newChunks = extraResult.parentChunks.filter(c => !existingIds.has(c.id));
-                      if (newChunks.length > 0) {
-                        contextChunks.push(...newChunks);
-                        fusedChildChunks.push(...extraResult.childChunks);
-                        ragContext += `\n\n` + extraResult.formattedContext;
+                    const scoredSections = rawSections.map(sec => {
+                      const firstLine = (sec.split('\n')[0] || '').toLowerCase();
+                      const body = sec.toLowerCase();
+                      let score = 0;
+                      for (const term of queryTerms) {
+                        const t = term.toLowerCase();
+                        if (firstLine.includes(t)) score += 15;
+                        else if (body.includes(t)) score += 3;
                       }
-                    } catch (extraErr) {
-                      console.error(`Round 2 search for "${topic}" failed:`, extraErr);
+                      return { section: sec, score };
+                    }).filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+
+                    if (scoredSections.length > 0) {
+                      const topFallback = scoredSections.slice(0, 4).map(s => s.section).join('\n\n');
+                      ragContext = ragContext ? `${ragContext}\n\n=== نصوص المنهج المدرسي المعتمد ذات الصلة ===\n${topFallback}` : topFallback;
+                    } else if (!ragContext.trim()) {
+                      ragContext = `=== محتوى المنهج المدرسي المعتمد لمادة ${subject_name} (${activeGrade}) ===\n` +
+                        detail.content.slice(0, 6000);
                     }
                   }
+                } catch (fallbackErr) {
+                  console.warn('Direct curriculum detail fallback notice:', fallbackErr);
                 }
-              } catch (gapErr) {
-                console.error('Gap analysis notice:', gapErr);
               }
+
+              const foundCount = contextChunks.length;
+              const entityCount = retrievalResult.subgraph.entities.length;
+              emitSearchStep(
+                'found',
+                '✅',
+                entityCount > 0
+                  ? `وجدت ${foundCount} ${foundCount === 1 ? 'قسماً' : 'أقسام'} و ${entityCount} ${entityCount === 1 ? 'مفهوماً مرتبطاً' : 'مفاهيم مرتبطة'}`
+                  : `وجدت ${foundCount} ${foundCount === 1 ? 'قسماً' : 'أقسام'} ذات صلة من المنهج`
+              );
             }
 
-            const foundCount = contextChunks.length;
-            const entityCount = retrievalResult.subgraph.entities.length;
-            emitSearchStep(
-              'found',
-              '✅',
-              entityCount > 0
-                ? `وجدت ${foundCount} ${foundCount === 1 ? 'قسماً' : 'أقسام'} و ${entityCount} ${entityCount === 1 ? 'مفهوماً مرتبطاً' : 'مفاهيم مرتبطة'}`
-                : `وجدت ${foundCount} ${foundCount === 1 ? 'قسماً' : 'أقسام'} ذات صلة من المنهج`
-            );
-
             if (!ragContext.trim()) {
-              ragContext = 'لا يوجد ملف منهج دراسي مرفوع حالياً لهذه المادة والسنة الدراسية. يجب عليك تنبيه الطالب بأن هذه المعلومة خارج المنهج المقرر في بداية إجابتك.';
+              try {
+                const detail = await db.getCurriculumDetail(targetCurr.id);
+                if (detail && detail.content) {
+                  ragContext = `=== نصوص المنهج المدرسي المعتمد لمادة ${subject_name} (${activeGrade}) ===\n` + detail.content.slice(0, 10000);
+                }
+              } catch (fallbackErr) {
+                console.warn('Failed to load raw markdown fallback:', fallbackErr);
+              }
+            }
             }
           }
 
-          const finalContext = ragContext || 'لا يوجد ملف منهج دراسي مرفوع حالياً لهذه المادة والسنة الدراسية. يجب عليك تنبيه الطالب بأن هذه المعلومة خارج المنهج المقرر في بداية إجابتك.';
+          const finalContext = ragContext || `=== المنهج الدراسي المعتمد لمادة ${subject_name} (${targetGrade}) ===
+هذا المنهج معتمد رسمياً ومقرر لوزارة التربية والتعليم المصرية.
+أجب دائماً باستفاضة وبمنتهى الثقة وفق المعايير التعليمية المصرية المعتمدة واشرح المطلوب بدقة وبالعامية المصرية التعليمية الراقية.`;
           const finalPromptText = promptText;
 
           // ─── PHASE 2: Real-time Streaming Generation with DeepSeek ─────────
@@ -472,9 +618,11 @@ export async function POST(req: NextRequest) {
             finalPromptText,
             finalContext,
             recentHistory,
-            activeModel === 'pro' ? 'deepseek-v4-pro' : 'deepseek-v4-flash',
             activeThinking,
-            chatMode
+            chatMode,
+            lessonMode,
+            activeSubject,
+            activeGrade
           );
 
           if (!deepseekRes.ok) {
@@ -549,23 +697,20 @@ export async function POST(req: NextRequest) {
 
           // Compute usage & coins
           let egpCost = 0;
-          if (activeModel === 'pro') {
+          if (activeThinking) {
             egpCost = (promptTokens / 1000000) * 150 + (completionTokens / 1000000) * 200;
           } else {
             egpCost = (promptTokens / 1000000) * 30 + (completionTokens / 1000000) * 50;
           }
           const coinsCost = egpCost * 10.0;
 
-          const remainingCoins = await db.deductCoins(userId, deviceId, coinsCost);
-
-          if (userId) {
-            await db.addChatMessage('ai', combinedMessage, userId, undefined, activeSessionId, coinsCost);
-          }
+          const remainingCoins = await db.deductCoins(userId, null, coinsCost);
+          const savedAiMsg = await db.addChatMessage('ai', combinedMessage, userId, undefined, activeSessionId, coinsCost);
 
           let pointsAwarded = 0;
           let totalPoints: number | undefined = undefined;
 
-          if (userId && activeSessionId) {
+          if (activeSessionId) {
             try {
               const session = await db.getChatSession(activeSessionId);
               if (session && !session.engagement_points_awarded) {
@@ -585,6 +730,7 @@ export async function POST(req: NextRequest) {
             `data: ${JSON.stringify({
               type: 'done',
               session_id: activeSessionId,
+              message_id: savedAiMsg?.id || undefined,
               duration: finalDuration,
               coins_used: coinsCost,
               remaining_coins: remainingCoins,

@@ -28,12 +28,16 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     role TEXT NOT NULL DEFAULT 'student', -- 'student', 'admin'
     password_hash TEXT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    coins NUMERIC NOT NULL DEFAULT 15.0,
+    coins NUMERIC NOT NULL DEFAULT 20.0,
     points NUMERIC NOT NULL DEFAULT 0,
     study_streak INT NOT NULL DEFAULT 1,
     last_active_date DATE NOT NULL DEFAULT CURRENT_DATE,
     unlimited_credit BOOLEAN NOT NULL DEFAULT false,
-    terms_accepted_at TIMESTAMP WITH TIME ZONE
+    terms_accepted_at TIMESTAMP WITH TIME ZONE,
+    pwa_installed BOOLEAN NOT NULL DEFAULT false,
+    pwa_installed_at TIMESTAMP WITH TIME ZONE,
+    pwa_platform TEXT,
+    improve_ai_opt_in BOOLEAN NOT NULL DEFAULT true
 );
 
 -- 2. Pending Registrations Table
@@ -61,6 +65,7 @@ CREATE TABLE IF NOT EXISTS public.curriculums (
     grade_level TEXT NOT NULL,
     subject_name TEXT NOT NULL,
     file_name TEXT NOT NULL,
+    content TEXT,
     units JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(grade_level, subject_name)
@@ -387,7 +392,7 @@ CREATE TABLE IF NOT EXISTS public.free_trial_grants (
     browser_fingerprint TEXT,
     device_id TEXT,
     platform TEXT NOT NULL DEFAULT 'web', -- 'web' | 'mobile'
-    coins_granted NUMERIC NOT NULL DEFAULT 15.0,
+    coins_granted NUMERIC NOT NULL DEFAULT 20.0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 

@@ -55,7 +55,7 @@ export async function POST(req: NextRequest) {
         subscription_end_date: updatedProfile.subscription_end_date,
         subscription_plan_id: updatedProfile.subscription_plan_id,
         role: updatedProfile.role,
-        coins: updatedProfile.coins === undefined ? 15.0 : updatedProfile.coins,
+        coins: updatedProfile.coins === undefined ? 20.0 : updatedProfile.coins,
         points: updatedProfile.points || 0,
         study_streak: updatedProfile.study_streak || 1
       }

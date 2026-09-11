@@ -59,6 +59,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       history: cappedHistory.map(h => ({
+        id: h.id,
+        session_id: h.session_id,
         sender: h.sender,
         message: h.message,
         created_at: h.created_at

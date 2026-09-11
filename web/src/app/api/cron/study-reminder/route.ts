@@ -65,7 +65,7 @@ async function handleReminder(req: NextRequest) {
     }
 
     const todayCairo = getCairoDate();
-    const allUsers = await db.getUsers();
+    const { users: allUsers } = await db.getUsers();
 
     const now = Date.now();
     const twelveHoursAgo = now - 12 * 60 * 60 * 1000;

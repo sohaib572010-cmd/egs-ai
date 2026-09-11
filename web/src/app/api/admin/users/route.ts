@@ -31,10 +31,14 @@ export async function GET(req: NextRequest) {
 
   try {
     const search = req.nextUrl.searchParams.get('search') || undefined;
-    const users = await db.getUsers(search);
+    const tier = (req.nextUrl.searchParams.get('tier') as any) || 'all';
+    const grade_level = req.nextUrl.searchParams.get('grade_level') || undefined;
+
+    const result = await db.getUsers(search, { tier, grade_level });
+    const rawUsers = result.users || [];
 
     const usersWithDevices = await Promise.all(
-      users.map(async (u) => {
+      rawUsers.map(async (u) => {
         const devices = await db.getUserActiveDevices(u.id);
         return {
           ...u,
@@ -50,7 +54,11 @@ export async function GET(req: NextRequest) {
       })
     );
 
-    return NextResponse.json({ success: true, users: usersWithDevices });
+    return NextResponse.json({
+      success: true,
+      users: usersWithDevices,
+      counts: result.counts
+    });
   } catch (error: any) {
     console.error('Get users error:', error);
     return NextResponse.json({ error: 'حدث خطأ أثناء تحميل قائمة المستخدمين.' }, { status: 500 });

@@ -3,14 +3,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken, generateOtp, OTP_TTL_MS } from '@/lib/auth_helpers';
 import { sendOtpEmail } from '@/lib/email';
-import { checkRateLimit, getClientIp } from '@/lib/rate_limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate_limiter';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req);
-    const rateLimit = checkRateLimit(`delete_account_${ip}`, 5, 600);
+    const rateLimit = await checkRateLimitAsync(`delete_account_${ip}`, 5, 600);
     if (!rateLimit.allowed) {
       return NextResponse.json(
         { error: 'تم تجاوز الحد المسموح لطلبات حذف الحساب. يرجى الانتظار والمحاولة لاحقاً.' },

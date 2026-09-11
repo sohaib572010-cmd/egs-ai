@@ -1,4 +1,5 @@
 export const runtime = 'edge';
+export const revalidate = 3600;
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurriculumStructure } from '@/lib/curriculum_structure';
 
@@ -17,10 +18,19 @@ export async function GET(req: NextRequest) {
 
     const structure = await getCurriculumStructure(gradeLevel, subjectName);
 
-    return NextResponse.json({
-      success: true,
-      ...structure
-    });
+    return NextResponse.json(
+      {
+        success: true,
+        ...structure
+      },
+      {
+        headers: {
+          'Cache-Control': 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400',
+          'CDN-Cache-Control': 'max-age=3600',
+          'Vary': 'Accept-Encoding'
+        }
+      }
+    );
   } catch (error: any) {
     console.error('Curriculum structure API error:', error);
     return NextResponse.json(

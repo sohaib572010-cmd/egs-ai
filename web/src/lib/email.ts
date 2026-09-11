@@ -26,6 +26,10 @@ export async function sendOtpEmail(
 ): Promise<{ ok: boolean; error?: string }> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`[DEV OTP EMAIL to ${to} for ${purpose}]: ${otp}`);
+      return { ok: true };
+    }
     return { ok: false, error: 'خدمة البريد الإلكتروني غير مهيأة' };
   }
   const from = process.env.RESEND_FROM_EMAIL || 'no-reply@egsaiedu.com';

@@ -5,6 +5,16 @@ import { BM25Index } from './bm25';
 
 export type { CurriculumEntity, CurriculumRelation } from './graph_rag';
 
+// Cutoff timestamp for existing accounts eligible for apology & compensation:
+// Accounts created on or before this cutoff are existing accounts; accounts created after are new accounts.
+export const APOLOGY_CUTOFF_DATE = '2026-09-10T16:00:00.000Z';
+
+export function isExistingAccountForApology(profile: { created_at?: string; terms_accepted_at?: string | null }): boolean {
+  const timestamp = profile.created_at || profile.terms_accepted_at;
+  if (!timestamp) return true; // Legacy profiles without timestamp are existing accounts
+  return new Date(timestamp).getTime() <= new Date(APOLOGY_CUTOFF_DATE).getTime();
+}
+
 // Types
 export interface Profile {
   id: string;
@@ -28,6 +38,22 @@ export interface Profile {
   unlimited_credit?: boolean;
   terms_accepted_at?: string | null;
   study_streak?: number;
+  is_banned?: boolean;
+  ban_reason?: string;
+  messages_sent_count?: number;
+  active_chat_days_count?: number;
+  exams_created_count?: number;
+  exams_completed_count?: number;
+  flashcard_decks_count?: number;
+  flashcards_created_count?: number;
+  welcome_reward_claimed?: boolean;
+  free_plan_claimed?: boolean;
+  apology_compensation_claimed?: boolean;
+  apology_dismissed?: boolean;
+  pwa_installed?: boolean;
+  pwa_installed_at?: string | null;
+  pwa_platform?: 'android' | 'ios' | 'desktop' | 'unknown' | null;
+  improve_ai_opt_in?: boolean;
 }
 
 export interface PendingRegistration {
@@ -151,6 +177,7 @@ export interface Curriculum {
   grade_level: string;
   subject_name: string;
   file_name: string;
+  content?: string | null;
   units?: CurriculumUnit[];
   is_placeholder?: boolean;
   track_id?: string | null;
@@ -299,6 +326,8 @@ export interface StudyNotebookItem {
   title: string;
   content: string;
   note_type: 'formula' | 'definition' | 'solution' | 'law' | 'general';
+  session_id?: string | null;
+  message_id?: string | null;
   created_at: string;
 }
 
@@ -324,6 +353,7 @@ export interface DailyQuestProgress {
 // Initialize local DB file if missing
 function initLocalDB() {
   if (process.env.NEXT_RUNTIME === 'edge') return;
+  cleanupOrphanedTmpFiles();
   const fs = require('fs');
   const DB_FILE = './db_data.json';
   if (!fs.existsSync(DB_FILE)) {
@@ -444,10 +474,135 @@ function getMemoryDB(): any {
   return globalThis.__egs_memory_db;
 }
 
-// Read local DB
+// Startup sweep: clean up any orphaned .tmp files left by unexpected crashes or restarts
+export function cleanupOrphanedTmpFiles() {
+  if (process.env.NEXT_RUNTIME === 'edge') return;
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = '.';
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+      if (file.startsWith('db_data.json.tmp')) {
+        try {
+          fs.unlinkSync(path.join(dir, file));
+        } catch {
+          // Ignore unlink errors on locked files
+        }
+      }
+    }
+  } catch {
+    // Ignore directory read errors
+  }
+}
+
+// Local DB in-memory master store and atomic asynchronous disk flusher
+let localDbMemoryStore: any = null;
+let flushTimer: any = null;
+let flushQueuePromise: Promise<void> = Promise.resolve();
+
+export function flushDiskSync() {
+  if (process.env.NEXT_RUNTIME === 'edge' || !localDbMemoryStore) return;
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  const fs = require('fs');
+  const DB_FILE = './db_data.json';
+  const TMP_FILE = './db_data.json.tmp.sync';
+  try {
+    const dataToWrite = localDbMemoryStore;
+    fs.writeFileSync(TMP_FILE, JSON.stringify(dataToWrite, null, 2), 'utf8');
+    fs.renameSync(TMP_FILE, DB_FILE);
+  } catch (err) {
+    console.error('Error in synchronous disk flush:', err);
+    try {
+      if (fs.existsSync(TMP_FILE)) fs.unlinkSync(TMP_FILE);
+    } catch {}
+  }
+}
+
+export async function flushDiskAsync(): Promise<void> {
+  if (process.env.NEXT_RUNTIME === 'edge') return;
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  return executeAsyncDiskFlush();
+}
+
+async function executeAsyncDiskFlush(): Promise<void> {
+  if (process.env.NEXT_RUNTIME === 'edge' || !localDbMemoryStore) return;
+
+  // Chain write task to queue promise to guarantee sequential execution without race conditions
+  flushQueuePromise = flushQueuePromise.then(async () => {
+    const fs = require('fs');
+    const DB_FILE = './db_data.json';
+    const uniqueTmp = './db_data.json.tmp.' + Date.now() + '.' + Math.random().toString(36).slice(2, 9);
+    // Read the most recent memory store state at execution time
+    const dataToWrite = localDbMemoryStore;
+    if (!dataToWrite) return;
+
+    let renamed = false;
+    try {
+      const serialized = JSON.stringify(dataToWrite, null, 2);
+      await fs.promises.writeFile(uniqueTmp, serialized, 'utf8');
+      await fs.promises.rename(uniqueTmp, DB_FILE);
+      renamed = true;
+    } catch (err) {
+      console.error('Error in asynchronous disk flush:', err);
+    } finally {
+      if (!renamed) {
+        try {
+          if (fs.existsSync(uniqueTmp)) {
+            await fs.promises.unlink(uniqueTmp);
+          }
+        } catch (cleanupErr) {
+          // Suppress secondary cleanup errors
+        }
+      }
+    }
+  }).catch(err => {
+    console.error('Unhandled error in disk flush queue:', err);
+  });
+
+  await flushQueuePromise;
+}
+
+function scheduleDiskFlush(data?: any) {
+  if (process.env.NEXT_RUNTIME === 'edge') return;
+  if (data) {
+    localDbMemoryStore = data;
+  }
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    executeAsyncDiskFlush().catch(err => {
+      console.error('Unhandled error in executeAsyncDiskFlush:', err);
+    });
+  }, 25);
+}
+
+// Initial sweep on module load
+if (typeof process !== 'undefined' && process.env?.NEXT_RUNTIME !== 'edge') {
+  cleanupOrphanedTmpFiles();
+  const proc = process as unknown as { on?: (event: string, cb: () => void) => void };
+  if (typeof proc?.on === 'function') {
+    proc.on('beforeExit', () => flushDiskSync());
+    proc.on('exit', () => {
+      flushDiskSync();
+      cleanupOrphanedTmpFiles();
+    });
+  }
+}
+
+// Read local DB with in-memory master cache
 function readLocalDB() {
   if (process.env.NEXT_RUNTIME === 'edge') {
     return getMemoryDB();
+  }
+  if (localDbMemoryStore) {
+    return localDbMemoryStore;
   }
   const fs = require('fs');
   const DB_FILE = './db_data.json';
@@ -457,22 +612,20 @@ function readLocalDB() {
     const parsed = JSON.parse(raw);
     let changed = false;
 
-    if (!parsed.contact_messages) {
-      parsed.contact_messages = [];
-      changed = true;
+    const tables = [
+      'contact_messages', 'payment_transactions', 'chat_sessions',
+      'exams', 'exam_submissions', 'reports', 'notifications',
+      'app_versions', 'password_resets', 'curriculum_entities',
+      'curriculum_relations', 'free_trial_grants', 'user_devices',
+      'user_lesson_progress', 'study_notebook', 'claimed_daily_quests'
+    ];
+    for (const table of tables) {
+      if (!parsed[table]) {
+        parsed[table] = [];
+        changed = true;
+      }
     }
 
-    if (!parsed.payment_transactions) {
-      parsed.payment_transactions = [];
-      changed = true;
-    }
-    
-    if (!parsed.chat_sessions) {
-      parsed.chat_sessions = [];
-      changed = true;
-    }
-    
-    // Migrate local profiles if coins, points, study_streak, or last_active_date are missing
     if (parsed.profiles) {
       parsed.profiles.forEach((p: any) => {
         if (p.coins === undefined) {
@@ -498,7 +651,6 @@ function readLocalDB() {
       });
     }
 
-    // Migrate local device guests if coins are missing
     if (parsed.device_guests) {
       parsed.device_guests.forEach((dg: any) => {
         if (dg.coins === undefined) {
@@ -508,7 +660,6 @@ function readLocalDB() {
       });
     }
 
-    // Migrate local chat history if coins_cost is missing
     if (parsed.chat_history) {
       parsed.chat_history.forEach((ch: any) => {
         if (ch.coins_cost === undefined) {
@@ -518,100 +669,27 @@ function readLocalDB() {
       });
     }
 
-    if (!parsed.exams) {
-      parsed.exams = [];
-      changed = true;
-    }
-
-    if (!parsed.exam_submissions) {
-      parsed.exam_submissions = [];
-      changed = true;
-    }
-
-    if (!parsed.reports) {
-      parsed.reports = [];
-      changed = true;
-    }
-
-    if (!parsed.notifications) {
-      parsed.notifications = [];
-      changed = true;
-    }
-
-    if (!parsed.app_versions) {
-      parsed.app_versions = [];
-      changed = true;
-    }
-
-    if (!parsed.password_resets) {
-      parsed.password_resets = [];
-      changed = true;
-    }
-
-    if (!parsed.curriculum_entities) {
-      parsed.curriculum_entities = [];
-      changed = true;
-    }
-
-    if (!parsed.curriculum_relations) {
-      parsed.curriculum_relations = [];
-      changed = true;
-    }
-
+    localDbMemoryStore = parsed;
     if (changed) {
-      fs.writeFileSync(DB_FILE, JSON.stringify(parsed, null, 2), 'utf8');
+      scheduleDiskFlush(localDbMemoryStore);
     }
-    
-    return parsed;
+    return localDbMemoryStore;
   } catch (e) {
-    console.error("Error reading local DB, resetting file", e);
-    const initialData = {
-      profiles: [
-        {
-          id: 'admin-id-1234567890',
-          phone: '01147814652',
-          email: 'admin@egsaiedu.com',
-          name: 'مدير النظام',
-          grade_level: '1_high',
-          plan_type: 'max',
-          role: 'admin',
-          password_hash: '343f7ea65b1d1ed5b5980d214808c2e06379a8b97586db4d6c97874d4440c174',
-          created_at: new Date().toISOString(),
-          coins: 1000.0,
-          last_active_date: new Date().toISOString().split('T')[0],
-          unlimited_credit: true
-        }
-      ],
-      pending_registrations: [],
-      password_resets: [],
-      device_guests: [],
-      curriculums: [],
-      curriculum_chunks: [],
-      chat_history: [],
-      chat_sessions: [],
-      system_settings: [
-        { key: 'website_link', value: 'http://localhost:3000' }
-      ],
-      exams: [],
-      exam_submissions: [],
-      reports: [],
-      notifications: [],
-      app_versions: []
-    };
-    fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), 'utf8');
-    return initialData;
+    console.error("Error reading local DB, falling back to memory store without resetting file:", e);
+    if (localDbMemoryStore) return localDbMemoryStore;
+    localDbMemoryStore = getMemoryDB();
+    return localDbMemoryStore;
   }
 }
 
-// Write local DB
+// Write local DB (synchronous memory update + atomic scheduled disk flush)
 function writeLocalDB(data: any) {
   if (process.env.NEXT_RUNTIME === 'edge') {
     globalThis.__egs_memory_db = data;
     return;
   }
-  const fs = require('fs');
-  const DB_FILE = './db_data.json';
-  fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), 'utf8');
+  localDbMemoryStore = data;
+  scheduleDiskFlush(data);
 }
 
 // Supabase client setup (optional)
@@ -627,6 +705,55 @@ if (isSupabaseEnabled) {
   console.log("Database Mode: Local JSON File Database Enabled.");
 }
 
+export function normalizePlanId(rawPlanId?: string | null): {
+  planType: 'pro_1m' | 'pro_2m' | 'pro_3m';
+  durationDays: number;
+  dailyCap: number;
+  planTitle: string;
+} {
+  const clean = (rawPlanId || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  if (
+    clean === 'pro_3m' ||
+    clean === 'pro_3' ||
+    clean === '3_months' ||
+    clean === '3_month' ||
+    clean === '3months' ||
+    clean === '3month' ||
+    clean === '3m' ||
+    clean === 'term' ||
+    clean === 'max'
+  ) {
+    return {
+      planType: 'pro_3m',
+      durationDays: 90,
+      dailyCap: 120.0,
+      planTitle: 'باقة 3 أشهر (120 نقطة يومياً متجددة)'
+    };
+  }
+  if (
+    clean === 'pro_2m' ||
+    clean === 'pro_2' ||
+    clean === '2_months' ||
+    clean === '2_month' ||
+    clean === '2months' ||
+    clean === '2month' ||
+    clean === '2m'
+  ) {
+    return {
+      planType: 'pro_2m',
+      durationDays: 60,
+      dailyCap: 90.0,
+      planTitle: 'باقة شهرين (90 نقطة يومياً متجددة)'
+    };
+  }
+  return {
+    planType: 'pro_1m',
+    durationDays: 30,
+    dailyCap: 80.0,
+    planTitle: 'باقة شهر (80 نقطة يومياً متجددة)'
+  };
+}
+
 // Daily coin caps per plan. Replenishment tops the balance UP TO the cap on the
 // first request of a new day — it never reduces a balance already above the cap.
 // Note: free accounts receive a trial grant, plus a daily freemium lifeline of 5.0 coins.
@@ -639,30 +766,166 @@ export const DAILY_COIN_CAPS: Record<string, number> = {
   max: 120.0
 };
 
+// In-memory dashboard stats caching (30s TTL)
+let cachedDashboardStats: any = null;
+let lastDashboardStatsTime = 0;
+const DASHBOARD_CACHE_TTL_MS = 30000; // 30 seconds
+
+export function invalidateDashboardStatsCache() {
+  cachedDashboardStats = null;
+  lastDashboardStatsTime = 0;
+}
+
+// In-memory public system configuration caching (60s TTL)
+let cachedPublicConfig: {
+  websiteLink: string;
+  activeGradeLevels: string[];
+  activeTracks: string[];
+  activeCurriculumIds: string[];
+  allCurriculums: Curriculum[];
+} | null = null;
+let lastPublicConfigTime = 0;
+const PUBLIC_CONFIG_CACHE_TTL_MS = 60000; // 60 seconds
+
+export function invalidatePublicConfigCache() {
+  cachedPublicConfig = null;
+  lastPublicConfigTime = 0;
+}
+
+// In-memory broadcast notifications caching (30s TTL)
+let cachedBroadcastNotifications: { target: string; data: AppNotification[]; time: number } | null = null;
+const BROADCAST_NOTIF_CACHE_TTL_MS = 30000;
+
+export function invalidateNotificationsCache() {
+  cachedBroadcastNotifications = null;
+}
+
+// In-memory leaderboard caching (15s TTL)
+const cachedLeaderboardMap = new Map<string, { data: any[]; time: number }>();
+const LEADERBOARD_CACHE_TTL_MS = 15000;
+
+export function invalidateLeaderboardCache() {
+  cachedLeaderboardMap.clear();
+  invalidateUserRankCache();
+}
+
+// In-memory curriculums list caching (60s TTL)
+let cachedCurriculums: { data: Curriculum[]; time: number } | null = null;
+const CURRICULUMS_CACHE_TTL_MS = 60000;
+
+export function invalidateCurriculumsCache() {
+  cachedCurriculums = null;
+  cachedPublicConfig = null;
+}
+
+// Single-flight request coalescing for user leaderboard rank (deduplicates concurrent in-flight requests)
+const inFlightUserRank = new Map<string, Promise<any | null>>();
+
+export function invalidateUserRankCache(userId?: string) {
+  if (userId) {
+    for (const key of inFlightUserRank.keys()) {
+      if (key.startsWith(`${userId}_`)) {
+        inFlightUserRank.delete(key);
+      }
+    }
+  } else {
+    inFlightUserRank.clear();
+  }
+}
+
+// Single-flight request coalescing for student daily quests (deduplicates concurrent in-flight requests)
+const inFlightDailyQuests = new Map<string, Promise<DailyQuestProgress>>();
+
+export function invalidateDailyQuestsCache(userId?: string) {
+  if (userId) {
+    inFlightDailyQuests.delete(userId);
+  } else {
+    inFlightDailyQuests.clear();
+  }
+}
+
 // Helper: Daily coin replenishment + activity date refresh + streak update + subscription expiry check
 async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
   const today = getCairoDateString();
   let profileModified = false;
 
-  // Check and enforce subscription expiry
-  if (profile.subscription_end_date) {
-    const isExpired = new Date(profile.subscription_end_date).getTime() <= Date.now();
-    if (isExpired && profile.subscription_status === 'active') {
-      profile.subscription_status = 'expired';
-      profile.plan_type = 'free';
-      profileModified = true;
-    } else if (!isExpired && (profile.subscription_status !== 'active' || profile.plan_type === 'free')) {
-      if (profile.subscription_plan_id) {
+  // Check, self-heal, and enforce subscription duration and expiry
+  if (profile.plan_type && profile.plan_type !== 'free') {
+    const planInfo = normalizePlanId(profile.subscription_plan_id || profile.plan_type);
+    const expectedDurationDays = planInfo.durationDays;
+    let startIso = profile.subscription_start_date;
+    if (!startIso && supabase && profile.id) {
+      try {
+        const { data: tx } = await supabase
+          .from('payment_transactions')
+          .select('updated_at, created_at')
+          .eq('user_id', profile.id)
+          .eq('status', 'success')
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (tx && (tx.updated_at || tx.created_at)) {
+          startIso = tx.updated_at || tx.created_at;
+        }
+      } catch {
+        // Continue to fallback
+      }
+    }
+    if (!startIso) {
+      startIso = profile.created_at || new Date().toISOString();
+    }
+    const startMs = new Date(startIso).getTime();
+
+    if (!profile.subscription_end_date) {
+      // Self-healing: compute missing subscription_end_date
+      const computedEndMs = startMs + expectedDurationDays * 24 * 60 * 60 * 1000;
+      profile.subscription_start_date = startIso;
+      profile.subscription_end_date = new Date(computedEndMs).toISOString();
+      profile.subscription_plan_id = planInfo.planType;
+      if (computedEndMs > Date.now()) {
         profile.subscription_status = 'active';
-        profile.plan_type = (profile.subscription_plan_id as any) || 'pro_1m';
+      } else {
+        profile.subscription_status = 'expired';
+        profile.plan_type = 'free';
+      }
+      profileModified = true;
+    } else {
+      const currentEndMs = new Date(profile.subscription_end_date).getTime();
+      const currentSpanDays = Math.round((currentEndMs - startMs) / (24 * 60 * 60 * 1000));
+
+      // Self-healing: if an account subscribed to a 2-month or 3-month plan was truncated to ~30 days, correct it
+      if (expectedDurationDays > 30 && currentSpanDays <= 35) {
+        const correctedEndMs = startMs + expectedDurationDays * 24 * 60 * 60 * 1000;
+        profile.subscription_end_date = new Date(correctedEndMs).toISOString();
+        profile.subscription_start_date = startIso;
+        profile.subscription_plan_id = planInfo.planType;
+        if (correctedEndMs > Date.now()) {
+          profile.subscription_status = 'active';
+        } else {
+          profile.subscription_status = 'expired';
+          profile.plan_type = 'free';
+        }
         profileModified = true;
+      } else {
+        // Standard expiry verification
+        const isExpired = currentEndMs <= Date.now();
+        if (isExpired && profile.subscription_status === 'active') {
+          profile.subscription_status = 'expired';
+          profile.plan_type = 'free';
+          profileModified = true;
+        } else if (!isExpired && profile.subscription_status !== 'active') {
+          profile.subscription_status = 'active';
+          profile.plan_type = planInfo.planType;
+          profileModified = true;
+        }
       }
     }
   }
 
   // Daily coin replenishment and streak update on new day (aligned with Africa/Cairo calendar date)
   if (profile.last_active_date !== today) {
-    const isFree = !profile.plan_type || profile.plan_type === 'free' || profile.subscription_status !== 'active';
+    const effectiveStatus = profile.subscription_status || (profile.plan_type && profile.plan_type !== 'free' ? 'active' : 'inactive');
+    const isFree = !profile.plan_type || profile.plan_type === 'free' || effectiveStatus !== 'active';
     const cap = isFree ? (DAILY_COIN_CAPS.free ?? 5.0) : (DAILY_COIN_CAPS[profile.plan_type] ?? 80.0);
     const current = toPreciseCoins(profile.coins === undefined ? 0.0 : profile.coins);
     // Packages replenish up to their daily cap; free accounts replenish up to the freemium lifeline cap (5.0)
@@ -691,6 +954,10 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
     profileModified = true;
   }
 
+  if (profile.improve_ai_opt_in === undefined) {
+    profile.improve_ai_opt_in = true;
+  }
+
   if (profileModified) {
     const updatePayload: Partial<Profile> = {
       last_active_date: profile.last_active_date,
@@ -704,7 +971,11 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
     };
 
     if (supabase) {
-      await supabase.from('profiles').update(updatePayload).eq('id', profile.id);
+      const { error } = await supabase.from('profiles').update(updatePayload).eq('id', profile.id);
+      if (error) {
+        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, ...basePayload } = updatePayload;
+        await supabase.from('profiles').update(basePayload).eq('id', profile.id);
+      }
     } else {
       const data = readLocalDB();
       const p = (data.profiles || []).find((x: any) => x.id === profile.id);
@@ -739,6 +1010,21 @@ async function checkAndResetGuestDailyCoins(guest: DeviceGuest): Promise<DeviceG
     }
   }
   return guest;
+}
+
+function normalizeSubjectAlias(gradeLevel: string, subjectName: string): string {
+  const g = (gradeLevel || '').trim();
+  const s = (subjectName || '').trim();
+  if (g === '2_high' && (s === 'التاريخ' || s === 'تاريخ' || s === 'التاريخ المصري')) {
+    return 'التاريخ المصري';
+  }
+  if (g === '2_high' && (s === 'الفيزياء' || s === 'فيزياء')) {
+    return 'فيزياء';
+  }
+  if (g === '2_high' && (s === 'الرياضيات' || s === 'رياضيات')) {
+    return 'رياضيات';
+  }
+  return s;
 }
 
 export const db = {
@@ -783,20 +1069,43 @@ export const db = {
   },
 
   async createProfile(profile: Omit<Profile, 'created_at'>): Promise<Profile> {
-    const defaultCoins = profile.plan_type === 'pro' ? 80.0 : (profile.plan_type === 'max' ? 120.0 : 15.0);
+    const defaultCoins = profile.plan_type === 'pro' ? 80.0 : (profile.plan_type === 'max' ? 120.0 : 20.0);
     const newProfile = {
       ...profile,
       email: profile.email ? profile.email.toLowerCase() : undefined,
       coins: profile.coins !== undefined ? profile.coins : defaultCoins,
       points: profile.points !== undefined ? profile.points : 0,
       study_streak: profile.study_streak !== undefined ? profile.study_streak : 1,
-      last_active_date: profile.last_active_date || new Date().toISOString().split('T')[0],
+      last_active_date: profile.last_active_date || getCairoDateString(),
+      improve_ai_opt_in: profile.improve_ai_opt_in !== undefined ? profile.improve_ai_opt_in : true,
+      welcome_reward_claimed: profile.welcome_reward_claimed ?? true,
+      free_plan_claimed: profile.free_plan_claimed ?? true,
+      apology_compensation_claimed: false,
+      apology_dismissed: true, // Brand-new accounts created from now on never see the apology message
       created_at: new Date().toISOString()
     };
 
     if (supabase) {
-      const { data, error } = await supabase.from('profiles').insert(newProfile).select().single();
-      if (error) throw new Error(error.message);
+      let { data, error } = await supabase.from('profiles').insert(newProfile).select().single();
+      if (error) {
+        const { welcome_reward_claimed, free_plan_claimed, apology_compensation_claimed, apology_dismissed, ...safeProfile } = newProfile as any;
+        let retry = await supabase.from('profiles').insert(safeProfile).select().single();
+        if (retry.error) {
+          const missingMatch = retry.error.message?.match(/Could not find the '([^']+)' column/);
+          if (missingMatch && missingMatch[1]) {
+            delete (safeProfile as any)[missingMatch[1]];
+            retry = await supabase.from('profiles').insert(safeProfile).select().single();
+          }
+        }
+        if (retry.error) throw new Error(retry.error.message);
+        data = {
+          ...retry.data,
+          welcome_reward_claimed: (newProfile as any).welcome_reward_claimed ?? false,
+          free_plan_claimed: (newProfile as any).free_plan_claimed ?? false,
+          apology_compensation_claimed: (newProfile as any).apology_compensation_claimed ?? false,
+          apology_dismissed: (newProfile as any).apology_dismissed ?? true
+        };
+      }
       return data;
     } else {
       const data = readLocalDB();
@@ -811,23 +1120,29 @@ export const db = {
     }
   },
 
-  async updateProfilePlan(id: string, planType: 'free' | 'pro' | 'max'): Promise<Profile | null> {
-    const coins = planType === 'pro' ? 80.0 : (planType === 'max' ? 120.0 : 0.0);
-    const today = new Date().toISOString().split('T')[0];
+  async updateProfilePlan(id: string, planType: 'free' | 'pro' | 'pro_1m' | 'pro_2m' | 'pro_3m' | 'max'): Promise<Profile | null> {
     const isFree = planType === 'free';
+    const planInfo = normalizePlanId(planType);
+    const coins = isFree ? 0.0 : planInfo.dailyCap;
+    const durationDays = isFree ? 0 : planInfo.durationDays;
+    const today = new Date().toISOString().split('T')[0];
     const updatePayload = {
-      plan_type: planType,
+      plan_type: isFree ? ('free' as const) : planInfo.planType,
       coins,
       last_active_date: today,
       subscription_status: isFree ? ('inactive' as const) : ('active' as const),
       subscription_start_date: isFree ? null : new Date().toISOString(),
-      subscription_end_date: isFree ? null : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      subscription_plan_id: isFree ? null : (planType === 'max' ? 'pro_3m' : 'pro_1m')
+      subscription_end_date: isFree ? null : new Date(Date.now() + durationDays * 24 * 60 * 60 * 1000).toISOString(),
+      subscription_plan_id: isFree ? null : planInfo.planType
     };
     if (supabase) {
-      const { data, error } = await supabase.from('profiles').update(updatePayload).eq('id', id).select().single();
-      if (error) return null;
-      return data;
+      let { data, error } = await supabase.from('profiles').update(updatePayload).eq('id', id).select().single();
+      if (error) {
+        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, ...basePayload } = updatePayload;
+        const retry = await supabase.from('profiles').update(basePayload).eq('id', id).select().single();
+        if (retry.data) data = retry.data;
+      }
+      return data || null;
     } else {
       const data = readLocalDB();
       const profile = data.profiles.find((p: Profile) => p.id === id);
@@ -1080,10 +1395,17 @@ export const db = {
 
   // Curriculum Management
   async getCurriculums(): Promise<Curriculum[]> {
+    if (cachedCurriculums && (Date.now() - cachedCurriculums.time < CURRICULUMS_CACHE_TTL_MS)) {
+      return cachedCurriculums.data;
+    }
+
+    let results: Curriculum[] = [];
     if (supabase) {
-      const { data, error } = await supabase.from('curriculums').select('*');
+      const { data, error } = await supabase
+        .from('curriculums')
+        .select('id, grade_level, subject_name, file_name, units, is_placeholder, track_id, is_elective, created_at');
       if (error) return [];
-      return (data || []).map((c: any) => ({
+      results = (data || []).map((c: any) => ({
         ...c,
         units: Array.isArray(c.units) ? c.units : [],
         is_placeholder: !!c.is_placeholder,
@@ -1092,14 +1414,20 @@ export const db = {
       }));
     } else {
       const data = readLocalDB();
-      return (data.curriculums || []).map((c: any) => ({
-        ...c,
-        units: Array.isArray(c.units) ? c.units : [],
-        is_placeholder: !!c.is_placeholder,
-        track_id: c.track_id || null,
-        is_elective: !!c.is_elective
-      }));
+      results = (data.curriculums || []).map((c: any) => {
+        const { content: _, ...withoutContent } = c;
+        return {
+          ...withoutContent,
+          units: Array.isArray(c.units) ? c.units : [],
+          is_placeholder: !!c.is_placeholder,
+          track_id: c.track_id || null,
+          is_elective: !!c.is_elective
+        };
+      });
     }
+
+    cachedCurriculums = { data: results, time: Date.now() };
+    return results;
   },
 
   async createCurriculum(
@@ -1109,7 +1437,8 @@ export const db = {
     chunks: Omit<CurriculumChunk, 'curriculum_id'>[],
     units: CurriculumUnit[] = [],
     trackId?: string | null,
-    isElective?: boolean
+    isElective?: boolean,
+    rawContent?: string
   ): Promise<Curriculum> {
     const cleanGrade = gradeLevel.trim();
     const cleanSubject = subjectName.trim();
@@ -1119,6 +1448,7 @@ export const db = {
       grade_level: cleanGrade,
       subject_name: cleanSubject,
       file_name: fileName,
+      content: rawContent || null,
       units: Array.isArray(units) ? units : [],
       is_placeholder: false,
       track_id: trackId || null,
@@ -1127,20 +1457,26 @@ export const db = {
     };
 
     if (supabase) {
-      const { error: currError } = await supabase.from('curriculums').insert(newCurriculum);
+      let { error: currError } = await supabase.from('curriculums').insert(newCurriculum);
+      if (currError && (currError.code === 'PGRST204' || (currError.message && currError.message.includes("content")))) {
+        const { content: _, ...curriculumWithoutContent } = newCurriculum;
+        const retry = await supabase.from('curriculums').insert(curriculumWithoutContent);
+        currError = retry.error;
+      }
       if (currError) throw currError;
 
-      // Assign IDs to parent chunks first so children can reference them
-      const parentMap = new Map<string, string>(); // temp_parent_id -> real UUID
+      // Assign IDs to parent chunks first so children can reference them, preserving existing IDs
+      const parentMap = new Map<string, string>();
       for (const c of chunks) {
-        if (c.chunk_level === 'parent' && c.id) {
-          parentMap.set(c.id, crypto.randomUUID());
+        if (c.chunk_level === 'parent') {
+          const parentId = c.id || crypto.randomUUID();
+          parentMap.set(c.id || parentId, parentId);
         }
       }
 
       const formattedChunks = chunks.map(c => {
-        const realId = (c.chunk_level === 'parent' && c.id && parentMap.has(c.id))
-          ? parentMap.get(c.id)!
+        const realId = (c.chunk_level === 'parent' && c.id)
+          ? (parentMap.get(c.id) || c.id)
           : (c.id || crypto.randomUUID());
         return {
           id: realId,
@@ -1164,6 +1500,7 @@ export const db = {
           throw chunkError;
         }
       }
+      invalidatePublicConfigCache();
       return newCurriculum;
     } else {
       const data = readLocalDB();
@@ -1187,6 +1524,7 @@ export const db = {
       data.curriculum_chunks.push(...newChunks);
 
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return newCurriculum;
     }
   },
@@ -1215,6 +1553,7 @@ export const db = {
     if (supabase) {
       const { error: currError } = await supabase.from('curriculums').insert(newCurriculum);
       if (currError) throw currError;
+      invalidatePublicConfigCache();
       return newCurriculum;
     } else {
       const data = readLocalDB();
@@ -1224,6 +1563,7 @@ export const db = {
       }
       data.curriculums.push(newCurriculum);
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return newCurriculum;
     }
   },
@@ -1232,36 +1572,46 @@ export const db = {
     curriculumId: string,
     fileName: string,
     chunks: Omit<CurriculumChunk, 'curriculum_id'>[],
-    units: CurriculumUnit[] = []
+    units: CurriculumUnit[] = [],
+    rawContent?: string
   ): Promise<Curriculum | null> {
     if (supabase) {
       const { data: existing, error: findError } = await supabase.from('curriculums').select('*').eq('id', curriculumId).single();
       if (findError || !existing) return null;
 
-      const { error: updateError } = await supabase
+      const updatePayload: any = {
+        file_name: fileName,
+        is_placeholder: false,
+        content: rawContent || null,
+        units: Array.isArray(units) && units.length > 0 ? units : existing.units || []
+      };
+
+      let { error: updateError } = await supabase
         .from('curriculums')
-        .update({
-          file_name: fileName,
-          is_placeholder: false,
-          units: Array.isArray(units) && units.length > 0 ? units : existing.units || []
-        })
+        .update(updatePayload)
         .eq('id', curriculumId);
+      if (updateError && (updateError.code === 'PGRST204' || (updateError.message && updateError.message.includes("content")))) {
+        const { content: _, ...withoutContent } = updatePayload;
+        const retry = await supabase.from('curriculums').update(withoutContent).eq('id', curriculumId);
+        updateError = retry.error;
+      }
       if (updateError) throw updateError;
 
       // Delete existing chunks if any
       await supabase.from('curriculum_chunks').delete().eq('curriculum_id', curriculumId);
 
-      // Assign IDs to parent chunks first so children can reference them
+      // Assign IDs to parent chunks first so children can reference them, preserving existing IDs
       const parentMap = new Map<string, string>();
       for (const c of chunks) {
-        if (c.chunk_level === 'parent' && c.id) {
-          parentMap.set(c.id, crypto.randomUUID());
+        if (c.chunk_level === 'parent') {
+          const parentId = c.id || crypto.randomUUID();
+          parentMap.set(c.id || parentId, parentId);
         }
       }
 
       const formattedChunks = chunks.map(c => {
-        const realId = (c.chunk_level === 'parent' && c.id && parentMap.has(c.id))
-          ? parentMap.get(c.id)!
+        const realId = (c.chunk_level === 'parent' && c.id)
+          ? (parentMap.get(c.id) || c.id)
           : (c.id || crypto.randomUUID());
         return {
           id: realId,
@@ -1282,10 +1632,12 @@ export const db = {
         if (chunkError) throw chunkError;
       }
 
+      invalidatePublicConfigCache();
       return {
         ...existing,
         file_name: fileName,
         is_placeholder: false,
+        content: rawContent || null,
         units: Array.isArray(units) && units.length > 0 ? units : existing.units || []
       };
     } else {
@@ -1295,6 +1647,7 @@ export const db = {
 
       existing.file_name = fileName;
       existing.is_placeholder = false;
+      existing.content = rawContent || null;
       if (units && units.length > 0) existing.units = units;
 
       data.curriculum_chunks = (data.curriculum_chunks || []).filter((cc: CurriculumChunk) => cc.curriculum_id !== curriculumId);
@@ -1309,6 +1662,7 @@ export const db = {
       }));
       data.curriculum_chunks.push(...newChunks);
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return existing;
     }
   },
@@ -1320,6 +1674,7 @@ export const db = {
         .from('curriculums')
         .update({ units: sanitizedUnits })
         .eq('id', id);
+      if (!error) invalidatePublicConfigCache();
       return !error;
     } else {
       const data = readLocalDB();
@@ -1327,6 +1682,7 @@ export const db = {
       if (!curr) return false;
       curr.units = sanitizedUnits;
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return true;
     }
   },
@@ -1334,19 +1690,21 @@ export const db = {
   async deleteCurriculum(id: string): Promise<boolean> {
     if (supabase) {
       const { error } = await supabase.from('curriculums').delete().eq('id', id);
+      if (!error) invalidatePublicConfigCache();
       return !error;
     } else {
       const data = readLocalDB();
       data.curriculums = data.curriculums.filter((c: Curriculum) => c.id !== id);
       data.curriculum_chunks = data.curriculum_chunks.filter((cc: CurriculumChunk) => cc.curriculum_id !== id);
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return true;
     }
   },
 
   async getCurriculumRecord(gradeLevel: string, subjectName: string): Promise<Curriculum | null> {
     const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
+    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
     if (supabase) {
       const { data } = await supabase
         .from('curriculums')
@@ -1366,25 +1724,35 @@ export const db = {
 
   async getAllChunksForCurriculum(gradeLevel: string, subjectName: string): Promise<CurriculumChunk[]> {
     const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
+    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
     if (supabase) {
       const { data: currList } = await supabase
         .from('curriculums')
         .select('id')
         .eq('grade_level', cleanGrade)
-        .eq('subject_name', cleanSubject);
+        .eq('subject_name', cleanSubject)
+        .order('created_at', { ascending: false });
       if (!currList || currList.length === 0) return [];
       const curriculumIds = currList.map(c => c.id);
 
-      const { data: chunks, error } = await supabase
-        .from('curriculum_chunks')
-        .select('id, content, heading, curriculum_id, chunk_level, parent_id, position_index')
-        .in('curriculum_id', curriculumIds)
-        .neq('heading', '__CURRICULUM_SUMMARY__')
-        .order('position_index', { ascending: true })
-        .limit(1000);
-      if (error) return [];
-      return chunks || [];
+      // Paginated fetch to guarantee all chunks across the entire textbook are retrieved
+      let allChunks: CurriculumChunk[] = [];
+      let page = 0;
+      const pageSize = 1000;
+      while (true) {
+        const { data: chunks, error } = await supabase
+          .from('curriculum_chunks')
+          .select('id, content, heading, curriculum_id, chunk_level, parent_id, position_index')
+          .in('curriculum_id', curriculumIds)
+          .neq('heading', '__CURRICULUM_SUMMARY__')
+          .order('position_index', { ascending: true })
+          .range(page * pageSize, (page + 1) * pageSize - 1);
+        if (error || !chunks || chunks.length === 0) break;
+        allChunks = allChunks.concat(chunks);
+        if (chunks.length < pageSize) break;
+        page++;
+      }
+      return allChunks;
     } else {
       const data = readLocalDB();
       const curr = data.curriculums.find((c: Curriculum) =>
@@ -1460,7 +1828,7 @@ export const db = {
     subjectName: string
   ): Promise<{ entities: CurriculumEntity[]; relations: CurriculumRelation[] }> {
     const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
+    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
 
     if (supabase) {
       const { data: currList } = await supabase
@@ -1591,6 +1959,137 @@ export const db = {
     }
   },
 
+  async getPendingEmbeddingChunks(
+    curriculumId: string,
+    limit: number = 35
+  ): Promise<{
+    chunks: { id: string; heading: string; content: string }[];
+    totalRemaining: number;
+    totalChildren: number;
+  }> {
+    if (supabase) {
+      const [totalRes, pendingCountRes, batchRes] = await Promise.all([
+        supabase
+          .from('curriculum_chunks')
+          .select('id', { count: 'exact', head: true })
+          .eq('curriculum_id', curriculumId)
+          .eq('chunk_level', 'child'),
+        supabase
+          .from('curriculum_chunks')
+          .select('id', { count: 'exact', head: true })
+          .eq('curriculum_id', curriculumId)
+          .eq('chunk_level', 'child')
+          .is('embedding', null),
+        supabase
+          .from('curriculum_chunks')
+          .select('id, heading, content')
+          .eq('curriculum_id', curriculumId)
+          .eq('chunk_level', 'child')
+          .is('embedding', null)
+          .order('position_index', { ascending: true })
+          .limit(limit)
+      ]);
+
+      const totalChildren = totalRes.count ?? 0;
+      const totalRemaining = pendingCountRes.count ?? 0;
+      const chunks = (batchRes.data || []).map((c: any) => ({
+        id: c.id,
+        heading: c.heading,
+        content: c.content
+      }));
+
+      return { chunks, totalRemaining, totalChildren };
+    } else {
+      const data = readLocalDB();
+      const allChildren = (data.curriculum_chunks || []).filter(
+        (c: any) => c.curriculum_id === curriculumId && c.chunk_level === 'child'
+      );
+      const pendingChildren = allChildren.filter((c: any) => !c.embedding || c.embedding.length === 0);
+      const chunks = pendingChildren.slice(0, limit).map((c: any) => ({
+        id: c.id,
+        heading: c.heading,
+        content: c.content
+      }));
+      return {
+        chunks,
+        totalRemaining: pendingChildren.length,
+        totalChildren: allChildren.length
+      };
+    }
+  },
+
+  async saveChunkEmbeddings(
+    chunkEmbeddings: { id: string; embedding: number[] }[]
+  ): Promise<number> {
+    if (!chunkEmbeddings || chunkEmbeddings.length === 0) return 0;
+
+    if (supabase) {
+      let saved = 0;
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < chunkEmbeddings.length; i += BATCH_SIZE) {
+        const slice = chunkEmbeddings.slice(i, i + BATCH_SIZE);
+        await Promise.all(
+          slice.map(async (item) => {
+            if (!item.embedding || item.embedding.length === 0) return;
+            const { error } = await supabase!
+              .from('curriculum_chunks')
+              .update({ embedding: item.embedding })
+              .eq('id', item.id);
+            if (!error) saved++;
+          })
+        );
+      }
+      return saved;
+    } else {
+      const data = readLocalDB();
+      let saved = 0;
+      for (const item of chunkEmbeddings) {
+        const target = (data.curriculum_chunks || []).find((c: any) => c.id === item.id);
+        if (target && item.embedding && item.embedding.length > 0) {
+          target.embedding = item.embedding;
+          saved++;
+        }
+      }
+      if (saved > 0) writeLocalDB(data);
+      return saved;
+    }
+  },
+
+  async getCurriculumEmbeddingStats(
+    curriculumId: string
+  ): Promise<{ totalChildren: number; embeddedCount: number; pendingCount: number }> {
+    if (supabase) {
+      const [totalRes, pendingRes] = await Promise.all([
+        supabase
+          .from('curriculum_chunks')
+          .select('id', { count: 'exact', head: true })
+          .eq('curriculum_id', curriculumId)
+          .eq('chunk_level', 'child'),
+        supabase
+          .from('curriculum_chunks')
+          .select('id', { count: 'exact', head: true })
+          .eq('curriculum_id', curriculumId)
+          .eq('chunk_level', 'child')
+          .is('embedding', null)
+      ]);
+      const totalChildren = totalRes.count ?? 0;
+      const pendingCount = pendingRes.count ?? 0;
+      const embeddedCount = Math.max(0, totalChildren - pendingCount);
+      return { totalChildren, embeddedCount, pendingCount };
+    } else {
+      const data = readLocalDB();
+      const allChildren = (data.curriculum_chunks || []).filter(
+        (c: any) => c.curriculum_id === curriculumId && c.chunk_level === 'child'
+      );
+      const pendingChildren = allChildren.filter((c: any) => !c.embedding || c.embedding.length === 0);
+      const totalChildren = allChildren.length;
+      const pendingCount = pendingChildren.length;
+      const embeddedCount = Math.max(0, totalChildren - pendingCount);
+      return { totalChildren, embeddedCount, pendingCount };
+    }
+  },
+
+
   // ─── Legscy RAG search (kept for backward compat) ──────────────────────────
   async searchCurriculum(gradeLevel: string, subjectName: string, queryKeywords: string[]): Promise<CurriculumChunk[]> {
     return this.bm25SearchCurriculum(gradeLevel, subjectName, queryKeywords, []);
@@ -1604,7 +2103,7 @@ export const db = {
     englishKeywords: string[]
   ): Promise<CurriculumChunk[]> {
     const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
+    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
 
     if (supabase) {
       const { data: currList } = await supabase
@@ -1727,10 +2226,11 @@ export const db = {
       .from('curriculums')
       .select('id')
       .eq('grade_level', cleanGrade)
-      .eq('subject_name', cleanSubject);
+      .eq('subject_name', cleanSubject)
+      .order('created_at', { ascending: false });
 
     if (!currList || currList.length === 0) return [];
-    const curriculumId = currList[0].id; // use first curriculum
+    const curriculumId = currList[0].id; // use latest active curriculum
 
     // Use the hybrid_search_curriculum RPC function
     const { data: results, error } = await supabase.rpc('hybrid_search_curriculum', {
@@ -1815,7 +2315,7 @@ export const db = {
   // ─── v2 RAG: Get the curriculum summary chunk ─────────────────────────────
   async getCurriculumSummary(gradeLevel: string, subjectName: string): Promise<string> {
     const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
+    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
 
     if (supabase) {
       const { data: currList } = await supabase
@@ -1888,6 +2388,102 @@ export const db = {
   },
 
   // System Settings
+  async getPublicConfig(): Promise<{
+    websiteLink: string;
+    activeGradeLevels: string[];
+    activeTracks: string[];
+    activeCurriculumIds: string[];
+    allCurriculums: Curriculum[];
+  }> {
+    if (cachedPublicConfig && (Date.now() - lastPublicConfigTime < PUBLIC_CONFIG_CACHE_TTL_MS)) {
+      return cachedPublicConfig;
+    }
+
+    const DEFAULT_GRADE_LEVELS = ['1_middle', '2_middle', '3_middle', '1_high', '2_high'];
+    const DEFAULT_TRACKS = ['medicine_life_sciences', 'engineering_cs', 'business', 'arts_literature'];
+
+    let websiteLink = 'http://localhost:3000';
+    let activeGradeLevels = DEFAULT_GRADE_LEVELS;
+    let activeTracks = DEFAULT_TRACKS;
+    let activeCurriculumIds: string[] = [];
+
+    if (supabase) {
+      const { data: settingsData } = await supabase
+        .from('system_settings')
+        .select('key, value')
+        .in('key', ['website_link', 'active_grade_levels', 'active_tracks', 'active_curriculum_ids']);
+
+      if (settingsData && Array.isArray(settingsData)) {
+        for (const row of settingsData) {
+          if (row.key === 'website_link' && row.value) {
+            websiteLink = row.value;
+          } else if (row.key === 'active_grade_levels' && row.value) {
+            try {
+              const parsed = JSON.parse(row.value);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                activeGradeLevels = parsed.filter((g: string) => g !== '3_high');
+              }
+            } catch (e) {}
+          } else if (row.key === 'active_tracks' && row.value) {
+            try {
+              const parsed = JSON.parse(row.value);
+              if (Array.isArray(parsed)) {
+                activeTracks = parsed;
+              }
+            } catch (e) {}
+          } else if (row.key === 'active_curriculum_ids' && row.value) {
+            try {
+              activeCurriculumIds = JSON.parse(row.value);
+            } catch (e) {}
+          }
+        }
+      }
+    } else {
+      const data = readLocalDB();
+      const settings = (data.system_settings || []) as any[];
+      const linkSetting = settings.find((s: any) => s.key === 'website_link');
+      if (linkSetting?.value) websiteLink = linkSetting.value;
+
+      const gradesSetting = settings.find((s: any) => s.key === 'active_grade_levels');
+      if (gradesSetting?.value) {
+        try {
+          const parsed = JSON.parse(gradesSetting.value);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            activeGradeLevels = parsed.filter((g: string) => g !== '3_high');
+          }
+        } catch (e) {}
+      }
+
+      const tracksSetting = settings.find((s: any) => s.key === 'active_tracks');
+      if (tracksSetting?.value) {
+        try {
+          const parsed = JSON.parse(tracksSetting.value);
+          if (Array.isArray(parsed)) activeTracks = parsed;
+        } catch (e) {}
+      }
+
+      const currsSetting = settings.find((s: any) => s.key === 'active_curriculum_ids');
+      if (currsSetting?.value) {
+        try {
+          activeCurriculumIds = JSON.parse(currsSetting.value);
+        } catch (e) {}
+      }
+    }
+
+    const allCurriculums = await this.getCurriculums();
+
+    cachedPublicConfig = {
+      websiteLink,
+      activeGradeLevels,
+      activeTracks,
+      activeCurriculumIds,
+      allCurriculums
+    };
+    lastPublicConfigTime = Date.now();
+
+    return cachedPublicConfig;
+  },
+
   async getSystemSetting(key: string): Promise<string> {
     if (supabase) {
       const { data, error } = await supabase.from('system_settings').select('value').eq('key', key).single();
@@ -1904,6 +2500,7 @@ export const db = {
   },
 
   async setSystemSetting(key: string, value: string): Promise<void> {
+    invalidatePublicConfigCache();
     if (supabase) {
       await supabase.from('system_settings').upsert({ key, value });
     } else {
@@ -2148,7 +2745,24 @@ export const db = {
       
       curriculum.units = Array.isArray(curriculum.units) ? curriculum.units : [];
 
-      // Fetch parent chunks only to avoid duplicating content with child chunks
+      // If raw content is preserved directly on curriculum row, return it directly for 100% exact fidelity
+      if (curriculum.content && typeof curriculum.content === 'string' && curriculum.content.trim().length > 0) {
+        return { curriculum, content: curriculum.content };
+      }
+
+      // Check for __RAW_MARKDOWN__ special chunk in curriculum_chunks
+      const { data: rawChunk } = await supabase
+        .from('curriculum_chunks')
+        .select('content')
+        .eq('curriculum_id', id)
+        .eq('heading', '__RAW_MARKDOWN__')
+        .maybeSingle();
+
+      if (rawChunk && rawChunk.content && typeof rawChunk.content === 'string' && rawChunk.content.trim().length > 0) {
+        return { curriculum, content: rawChunk.content };
+      }
+
+      // Fallback for legacy records without stored content: reconstruct from parent chunks
       let allChunks: any[] = [];
       let page = 0;
       const pageSize = 1000;
@@ -2168,18 +2782,43 @@ export const db = {
 
       allChunks.sort((a, b) => (a.position_index ?? 0) - (b.position_index ?? 0));
       
-      const content = allChunks.map(c => {
+      let lastUnit = '';
+      let lastLesson = '';
+      const reconstructedParts: string[] = [];
+
+      for (const c of allChunks) {
         const rawContent = (c.content || '').trim();
-        if (c.heading && c.heading !== '__CURRICULUM_SUMMARY__' && c.heading !== 'مقدمة المنهج' && !c.heading.includes('(جزء') && !c.heading.includes('(')) {
-          if (rawContent.startsWith('# ') || rawContent.startsWith('## ') || rawContent.startsWith('### ')) {
-            return rawContent;
+        if (!rawContent || c.heading === '__CURRICULUM_SUMMARY__' || c.heading === '__RAW_MARKDOWN__') continue;
+
+        const heading = (c.heading || '').trim();
+        const breadcrumbs = heading.split('>').map((s: string) => s.trim()).filter(Boolean);
+
+        if (breadcrumbs.length >= 2) {
+          const unit = breadcrumbs[0];
+          const lesson = breadcrumbs[1];
+          const sub = breadcrumbs.slice(2).join(' > ');
+
+          if (unit && unit !== lastUnit) {
+            reconstructedParts.push(`# ${unit}`);
+            lastUnit = unit;
           }
-          return `# ${c.heading}\n${rawContent}`;
+          if (lesson && lesson !== lastLesson) {
+            reconstructedParts.push(`## ${lesson}`);
+            lastLesson = lesson;
+          }
+          if (sub && !sub.includes('(')) {
+            reconstructedParts.push(`### ${sub}`);
+          }
+        } else if (heading && heading !== 'مقدمة المنهج' && !heading.includes('(')) {
+          if (!rawContent.startsWith('#')) {
+            reconstructedParts.push(`# ${heading}`);
+          }
         }
-        return rawContent;
-      }).filter(Boolean).join('\n\n');
+
+        reconstructedParts.push(rawContent);
+      }
       
-      return { curriculum, content };
+      return { curriculum, content: reconstructedParts.join('\n\n') };
     } else {
       const data = readLocalDB();
       const curriculum = (data.curriculums || []).find((c: Curriculum) => c.id === id);
@@ -2187,22 +2826,56 @@ export const db = {
       
       curriculum.units = Array.isArray(curriculum.units) ? curriculum.units : [];
 
+      if (curriculum.content && typeof curriculum.content === 'string' && curriculum.content.trim().length > 0) {
+        return { curriculum, content: curriculum.content };
+      }
+
+      const rawChunk = (data.curriculum_chunks || []).find((c: any) => c.curriculum_id === id && c.heading === '__RAW_MARKDOWN__');
+      if (rawChunk && rawChunk.content && typeof rawChunk.content === 'string' && rawChunk.content.trim().length > 0) {
+        return { curriculum, content: rawChunk.content };
+      }
+
       const chunks = (data.curriculum_chunks || [])
-        .filter((cc: CurriculumChunk) => cc.curriculum_id === id && cc.chunk_level !== 'child')
+        .filter((cc: CurriculumChunk) => cc.curriculum_id === id && cc.chunk_level !== 'child' && cc.heading !== '__RAW_MARKDOWN__')
         .sort((a: any, b: any) => (a.position_index ?? 0) - (b.position_index ?? 0));
 
-      const content = chunks.map((c: CurriculumChunk) => {
+      let lastUnit = '';
+      let lastLesson = '';
+      const reconstructedParts: string[] = [];
+
+      for (const c of chunks) {
         const rawContent = (c.content || '').trim();
-        if (c.heading && c.heading !== '__CURRICULUM_SUMMARY__' && c.heading !== 'مقدمة المنهج' && !c.heading.includes('(جزء') && !c.heading.includes('(')) {
-          if (rawContent.startsWith('# ') || rawContent.startsWith('## ') || rawContent.startsWith('### ')) {
-            return rawContent;
+        if (!rawContent || c.heading === '__CURRICULUM_SUMMARY__' || c.heading === '__RAW_MARKDOWN__') continue;
+
+        const heading = (c.heading || '').trim();
+        const breadcrumbs = heading.split('>').map((s: string) => s.trim()).filter(Boolean);
+
+        if (breadcrumbs.length >= 2) {
+          const unit = breadcrumbs[0];
+          const lesson = breadcrumbs[1];
+          const sub = breadcrumbs.slice(2).join(' > ');
+
+          if (unit && unit !== lastUnit) {
+            reconstructedParts.push(`# ${unit}`);
+            lastUnit = unit;
           }
-          return `# ${c.heading}\n${rawContent}`;
+          if (lesson && lesson !== lastLesson) {
+            reconstructedParts.push(`## ${lesson}`);
+            lastLesson = lesson;
+          }
+          if (sub && !sub.includes('(')) {
+            reconstructedParts.push(`### ${sub}`);
+          }
+        } else if (heading && heading !== 'مقدمة المنهج' && !heading.includes('(')) {
+          if (!rawContent.startsWith('#')) {
+            reconstructedParts.push(`# ${heading}`);
+          }
         }
-        return rawContent;
-      }).filter(Boolean).join('\n\n');
-      
-      return { curriculum, content };
+
+        reconstructedParts.push(rawContent);
+      }
+
+      return { curriculum, content: reconstructedParts.join('\n\n') };
     }
   },
 
@@ -2210,16 +2883,28 @@ export const db = {
     id: string,
     gradeLevel: string,
     subjectName: string,
-    chunks: (Omit<CurriculumChunk, 'curriculum_id'> | CurriculumChunk)[]
+    chunks: (Omit<CurriculumChunk, 'curriculum_id'> | CurriculumChunk)[],
+    rawContent?: string
   ): Promise<boolean> {
     const cleanGrade = gradeLevel.trim();
     const cleanSubject = subjectName.trim();
     
     if (supabase) {
-      const { error: err1 } = await supabase
+      const updatePayload: any = {
+        grade_level: cleanGrade,
+        subject_name: cleanSubject,
+        content: rawContent || null
+      };
+
+      let { error: err1 } = await supabase
         .from('curriculums')
-        .update({ grade_level: cleanGrade, subject_name: cleanSubject })
+        .update(updatePayload)
         .eq('id', id);
+      if (err1 && (err1.code === 'PGRST204' || (err1.message && err1.message.includes("content")))) {
+        const { content: _, ...withoutContent } = updatePayload;
+        const retry = await supabase.from('curriculums').update(withoutContent).eq('id', id);
+        err1 = retry.error;
+      }
       if (err1) return false;
       
       const { error: err2 } = await supabase
@@ -2228,17 +2913,18 @@ export const db = {
         .eq('curriculum_id', id);
       if (err2) return false;
 
-      // Assign IDs to parent chunks first so children can reference them
+      // Assign IDs to parent chunks first so children can reference them, preserving existing IDs
       const parentMap = new Map<string, string>();
       for (const c of chunks) {
-        if (c.chunk_level === 'parent' && c.id) {
-          parentMap.set(c.id, crypto.randomUUID());
+        if (c.chunk_level === 'parent') {
+          const parentId = c.id || crypto.randomUUID();
+          parentMap.set(c.id || parentId, parentId);
         }
       }
       
       const formattedChunks = chunks.map(c => {
-        const realId = (c.chunk_level === 'parent' && c.id && parentMap.has(c.id))
-          ? parentMap.get(c.id)!
+        const realId = (c.chunk_level === 'parent' && c.id)
+          ? (parentMap.get(c.id) || c.id)
           : (c.id || crypto.randomUUID());
         return {
           id: realId,
@@ -2263,6 +2949,7 @@ export const db = {
         }
       }
       
+      invalidatePublicConfigCache();
       return true;
     } else {
       const data = readLocalDB();
@@ -2271,6 +2958,7 @@ export const db = {
       
       curriculum.grade_level = cleanGrade;
       curriculum.subject_name = cleanSubject;
+      curriculum.content = rawContent || null;
       
       data.curriculum_chunks = data.curriculum_chunks.filter((cc: CurriculumChunk) => cc.curriculum_id !== id);
       
@@ -2286,6 +2974,7 @@ export const db = {
       data.curriculum_chunks.push(...newChunks);
       
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return true;
     }
   },
@@ -2320,196 +3009,413 @@ export const db = {
     }
   },
 
-  async getDashboardStats() {
+  async updateImproveAiOptIn(id: string, optIn: boolean): Promise<Profile | null> {
     if (supabase) {
-      const { data: profiles, error: profilesErr } = await supabase.from('profiles').select('id, name, phone, email, grade_level, role');
-      if (profilesErr || !profiles) {
-        return { totalUsers: 0, usersByGrade: {}, highestUsageUser: null, highestUsageGrade: null };
-      }
-      
-      const students = profiles.filter(p => p.role === 'student');
-      const totalUsers = students.length;
-      
-      const usersByGrade: Record<string, number> = {};
-      students.forEach(p => {
-        usersByGrade[p.grade_level] = (usersByGrade[p.grade_level] || 0) + 1;
-      });
-      
-      const { data: chats, error: chatsErr } = await supabase.from('chat_history').select('user_id, sender, coins_cost');
-      if (chatsErr || !chats) {
-        return { totalUsers, usersByGrade, highestUsageUser: null, highestUsageGrade: null };
-      }
-      
-      const userMessageCounts: Record<string, number> = {};
-      const userCoinConsumption: Record<string, number> = {};
-      chats.forEach(chat => {
-        if (chat.sender === 'user' && chat.user_id) {
-          userMessageCounts[chat.user_id] = (userMessageCounts[chat.user_id] || 0) + 1;
-        }
-        if (chat.user_id) {
-          userCoinConsumption[chat.user_id] = (userCoinConsumption[chat.user_id] || 0) + Number(chat.coins_cost || 0);
-        }
-      });
-      
-      let highestUserId = '';
-      let highestCoins = 0;
-      Object.entries(userCoinConsumption).forEach(([uid, coins]) => {
-        if (coins > highestCoins) {
-          highestCoins = coins;
-          highestUserId = uid;
-        }
-      });
-      
-      if (!highestUserId) {
-        let highestCount = 0;
-        Object.entries(userMessageCounts).forEach(([uid, count]) => {
-          if (count > highestCount) {
-            highestCount = count;
-            highestUserId = uid;
-          }
-        });
-      }
-      
-      let highestUsageUser = null;
-      if (highestUserId) {
-        const u = students.find(p => p.id === highestUserId);
-        if (u) {
-          highestUsageUser = { 
-            name: u.name, 
-            phone: u.phone, 
-            email: u.email,
-            grade_level: u.grade_level, 
-            message_count: userMessageCounts[highestUserId] || 0,
-            coins_used: Math.round(userCoinConsumption[highestUserId] * 100) / 100
-          };
-        }
-      }
-      
-      const gradeCoinConsumption: Record<string, number> = {};
-      const gradeMessageCounts: Record<string, number> = {};
-      chats.forEach(chat => {
-        if (chat.user_id) {
-          const u = students.find(p => p.id === chat.user_id);
-          if (u) {
-            if (chat.sender === 'user') {
-              gradeMessageCounts[u.grade_level] = (gradeMessageCounts[u.grade_level] || 0) + 1;
-            }
-            gradeCoinConsumption[u.grade_level] = (gradeCoinConsumption[u.grade_level] || 0) + Number(chat.coins_cost || 0);
-          }
-        }
-      });
-      
-      let highestGrade = '';
-      let highestGradeCoins = 0;
-      Object.entries(gradeCoinConsumption).forEach(([grade, coins]) => {
-        if (coins > highestGradeCoins) {
-          highestGradeCoins = coins;
-          highestGrade = grade;
-        }
-      });
-      
-      const highestUsageGrade = highestGrade ? { 
-        grade_level: highestGrade, 
-        message_count: gradeMessageCounts[highestGrade] || 0,
-        coins_used: Math.round(highestGradeCoins * 100) / 100
-      } : null;
-      
-      return {
-        totalUsers,
-        usersByGrade,
-        highestUsageUser,
-        highestUsageGrade
-      };
+      const { data, error } = await supabase.from('profiles').update({ improve_ai_opt_in: optIn }).eq('id', id).select().single();
+      if (error) return null;
+      return data;
     } else {
       const data = readLocalDB();
-      const students = data.profiles.filter((p: Profile) => p.role === 'student');
-      const totalUsers = students.length;
+      const profile = (data.profiles || []).find((p: Profile) => p.id === id);
+      if (!profile) return null;
+      profile.improve_ai_opt_in = optIn;
+      writeLocalDB(data);
+      return profile;
+    }
+  },
+
+  async getDashboardStats() {
+    if (cachedDashboardStats && (Date.now() - lastDashboardStatsTime < DASHBOARD_CACHE_TTL_MS)) {
+      return cachedDashboardStats;
+    }
+
+    if (supabase) {
+      const todayDate = getCairoDateString();
+      const { data: profiles, error: profilesErr } = await supabase
+        .from('profiles')
+        .select('*');
       
-      const usersByGrade: Record<string, number> = {};
-      students.forEach((p: Profile) => {
-        usersByGrade[p.grade_level] = (usersByGrade[p.grade_level] || 0) + 1;
-      });
-      
-      const userMessageCounts: Record<string, number> = {};
-      const userCoinConsumption: Record<string, number> = {};
-      data.chat_history.forEach((chat: ChatMessage) => {
-        if (chat.sender === 'user' && chat.user_id) {
-          userMessageCounts[chat.user_id] = (userMessageCounts[chat.user_id] || 0) + 1;
-        }
-        if (chat.user_id) {
-          userCoinConsumption[chat.user_id] = (userCoinConsumption[chat.user_id] || 0) + Number(chat.coins_cost || 0);
-        }
-      });
-      
-      let highestUserId = '';
-      let highestCoins = 0;
-      Object.entries(userCoinConsumption).forEach(([uid, coins]) => {
-        if (coins > highestCoins) {
-          highestCoins = coins;
-          highestUserId = uid;
-        }
-      });
-      
-      if (!highestUserId) {
-        let highestCount = 0;
-        Object.entries(userMessageCounts).forEach(([uid, count]) => {
-          if (count > highestCount) {
-            highestCount = count;
-            highestUserId = uid;
-          }
-        });
+      if (profilesErr || !profiles) {
+        return {
+          totalUsers: 0,
+          freeUsersCount: 0,
+          subscribedUsersCount: 0,
+          expiredUsersCount: 0,
+          conversionRate: 0,
+          subscriptionsByPlan: { pro_1m: 0, pro_2m: 0, pro_3m: 0, max: 0, other: 0 },
+          totalRevenueEgp: 0,
+          totalRevenueEGP: 0,
+          successfulTransactionsCount: 0,
+          activeTodayCount: 0,
+          totalExamsCount: 0,
+          totalMessagesCount: 0,
+          totalFlashcardDecksCount: 0,
+          totalFlashcardsCount: 0,
+          flashcardsCreatedTodayCount: 0,
+          averageCardsPerDeck: 0,
+          flashcardsBySubject: {},
+          flashcardsByGrade: {},
+          totalPwaUsersCount: 0,
+          pwaAdoptionRate: 0,
+          pwaUsersByPlatform: { android: 0, ios: 0, desktop: 0, other: 0 },
+          pwaUsersByGrade: {},
+          pwaUsersList: [],
+          usersByGrade: {},
+          highestUsageUser: null,
+          highestUsageGrade: null
+        };
       }
-      
+
+      const students = profiles.filter((p: any) => p.role === 'student');
+      const totalUsers = students.length;
+
+      let subscribedUsersCount = 0;
+      let freeUsersCount = 0;
+      let expiredUsersCount = 0;
+      let activeTodayCount = 0;
+      let totalPwaUsersCount = 0;
+      const usersByGrade: Record<string, number> = {};
+      const pwaUsersByGrade: Record<string, number> = {};
+      const pwaUsersByPlatform: Record<string, number> = { android: 0, ios: 0, desktop: 0, other: 0 };
+      const pwaUsersList: Array<{
+        id: string;
+        name: string;
+        grade_level: string;
+        email?: string;
+        phone?: string;
+        pwa_platform?: string | null;
+        pwa_installed_at?: string | null;
+        plan_type: string;
+        subscription_status?: string;
+      }> = [];
+      const subscriptionsByPlan = { pro_1m: 0, pro_2m: 0, pro_3m: 0, max: 0, other: 0 };
+
+      students.forEach((p: any) => {
+        usersByGrade[p.grade_level] = (usersByGrade[p.grade_level] || 0) + 1;
+        if (p.last_active_date === todayDate) {
+          activeTodayCount++;
+        }
+        if (p.pwa_installed) {
+          totalPwaUsersCount++;
+          pwaUsersByGrade[p.grade_level] = (pwaUsersByGrade[p.grade_level] || 0) + 1;
+          const plat = (p.pwa_platform === 'android' || p.pwa_platform === 'ios' || p.pwa_platform === 'desktop') ? p.pwa_platform : 'other';
+          pwaUsersByPlatform[plat] = (pwaUsersByPlatform[plat] || 0) + 1;
+          pwaUsersList.push({
+            id: p.id,
+            name: p.name,
+            grade_level: p.grade_level,
+            email: p.email,
+            phone: p.phone,
+            pwa_platform: p.pwa_platform || 'other',
+            pwa_installed_at: p.pwa_installed_at,
+            plan_type: p.plan_type,
+            subscription_status: p.subscription_status
+          });
+        }
+        const isSub = (p.subscription_status === 'active') || (p.plan_type && p.plan_type !== 'free');
+        const isExp = p.subscription_status === 'expired';
+        if (isSub) {
+          subscribedUsersCount++;
+          if (p.plan_type === 'pro_1m') subscriptionsByPlan.pro_1m++;
+          else if (p.plan_type === 'pro_2m') subscriptionsByPlan.pro_2m++;
+          else if (p.plan_type === 'pro_3m') subscriptionsByPlan.pro_3m++;
+          else if (p.plan_type === 'max') subscriptionsByPlan.max++;
+          else subscriptionsByPlan.other++;
+        } else if (isExp) {
+          expiredUsersCount++;
+        } else {
+          freeUsersCount++;
+        }
+      });
+
+      pwaUsersList.sort((a, b) => new Date(b.pwa_installed_at || 0).getTime() - new Date(a.pwa_installed_at || 0).getTime());
+      const pwaAdoptionRate = totalUsers > 0 ? Math.round((totalPwaUsersCount / totalUsers) * 1000) / 10 : 0;
+
+      const conversionRate = totalUsers > 0 ? Math.round((subscribedUsersCount / totalUsers) * 1000) / 10 : 0;
+
+      let totalRevenueEgp = 0;
+      let successfulTransactionsCount = 0;
+      try {
+        const { data: txs } = await supabase
+          .from('payment_transactions')
+          .select('amount')
+          .eq('status', 'success');
+        if (txs) {
+          successfulTransactionsCount = txs.length;
+          txs.forEach((t: any) => {
+            totalRevenueEgp += Number(t.amount || 0);
+          });
+        }
+      } catch (e) {
+        console.warn('Dashboard stats revenue query notice:', e);
+      }
+
+      let totalExamsCount = 0;
+      try {
+        const { count: eCount } = await supabase.from('exams').select('*', { count: 'exact', head: true });
+        totalExamsCount = eCount || 0;
+      } catch (_) {}
+
+      let totalMessagesCount = 0;
+      try {
+        const { count: mCount } = await supabase.from('chat_history').select('*', { count: 'exact', head: true });
+        totalMessagesCount = mCount || 0;
+      } catch (_) {}
+
+      let totalFlashcardDecksCount = 0;
+      let totalFlashcardsCount = 0;
+      let flashcardsCreatedTodayCount = 0;
+      const flashcardsBySubject: Record<string, number> = {};
+      const flashcardsByGrade: Record<string, number> = {};
+
+      try {
+        const [
+          { count: deckCount },
+          { count: cardCount },
+          { data: allDecks }
+        ] = await Promise.all([
+          supabase.from('flashcard_decks').select('*', { count: 'exact', head: true }),
+          supabase.from('flashcards').select('*', { count: 'exact', head: true }),
+          supabase.from('flashcard_decks').select('id, user_id, subject_name, grade_level, created_at')
+        ]);
+
+        totalFlashcardDecksCount = deckCount || 0;
+        totalFlashcardsCount = cardCount || 0;
+
+        if (allDecks) {
+          allDecks.forEach((d: any) => {
+            const subj = d.subject_name || 'عام';
+            flashcardsBySubject[subj] = (flashcardsBySubject[subj] || 0) + 1;
+            if (d.grade_level) {
+              flashcardsByGrade[d.grade_level] = (flashcardsByGrade[d.grade_level] || 0) + 1;
+            }
+            if (d.created_at) {
+              try {
+                const dateStr = new Date(d.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+                if (dateStr === todayDate) {
+                  flashcardsCreatedTodayCount++;
+                }
+              } catch (_) {}
+            }
+          });
+        }
+      } catch (e) {
+        console.warn('Dashboard stats flashcards query notice:', e);
+      }
+
+      const averageCardsPerDeck = totalFlashcardDecksCount > 0
+        ? Math.round((totalFlashcardsCount / totalFlashcardDecksCount) * 10) / 10
+        : 0;
+
       let highestUsageUser = null;
-      if (highestUserId) {
-        const u = students.find((p: Profile) => p.id === highestUserId);
-        if (u) {
-          highestUsageUser = { 
-            name: u.name, 
-            phone: u.phone, 
-            email: u.email,
-            grade_level: u.grade_level, 
-            message_count: userMessageCounts[highestUserId] || 0,
-            coins_used: Math.round(userCoinConsumption[highestUserId] * 100) / 100
+      let highestUsageGrade = null;
+      try {
+        const sortedStudents = [...students].sort((a: any, b: any) => (b.points || 0) - (a.points || 0));
+        if (sortedStudents.length > 0) {
+          const top = sortedStudents[0];
+          highestUsageUser = {
+            name: top.name,
+            phone: top.phone,
+            email: top.email,
+            grade_level: top.grade_level,
+            message_count: top.points || 0,
+            coins_used: top.coins || 0
           };
         }
-      }
-      
-      const gradeCoinConsumption: Record<string, number> = {};
-      const gradeMessageCounts: Record<string, number> = {};
-      data.chat_history.forEach((chat: ChatMessage) => {
-        if (chat.user_id) {
-          const u = students.find((p: Profile) => p.id === chat.user_id);
-          if (u) {
-            if (chat.sender === 'user') {
-              gradeMessageCounts[u.grade_level] = (gradeMessageCounts[u.grade_level] || 0) + 1;
-            }
-            gradeCoinConsumption[u.grade_level] = (gradeCoinConsumption[u.grade_level] || 0) + Number(chat.coins_cost || 0);
-          }
+        const gradeEntries = Object.entries(usersByGrade);
+        if (gradeEntries.length > 0) {
+          gradeEntries.sort((a, b) => b[1] - a[1]);
+          highestUsageGrade = {
+            grade_level: gradeEntries[0][0],
+            message_count: gradeEntries[0][1]
+          };
         }
-      });
-      
-      let highestGrade = '';
-      let highestGradeCoins = 0;
-      Object.entries(gradeCoinConsumption).forEach(([grade, coins]) => {
-        if (coins > highestGradeCoins) {
-          highestGradeCoins = coins;
-          highestGrade = grade;
-        }
-      });
-      
-      const highestUsageGrade = highestGrade ? { 
-        grade_level: highestGrade, 
-        message_count: gradeMessageCounts[highestGrade] || 0,
-        coins_used: Math.round(highestGradeCoins * 100) / 100
-      } : null;
-      
-      return {
+      } catch (_) {}
+
+      const stats = {
         totalUsers,
+        freeUsersCount,
+        subscribedUsersCount,
+        expiredUsersCount,
+        conversionRate,
+        subscriptionsByPlan,
+        totalRevenueEgp: Math.round(totalRevenueEgp),
+        totalRevenueEGP: Math.round(totalRevenueEgp),
+        successfulTransactionsCount,
+        activeTodayCount,
+        totalExamsCount,
+        totalMessagesCount,
+        totalFlashcardDecksCount,
+        totalFlashcardsCount,
+        flashcardsCreatedTodayCount,
+        averageCardsPerDeck,
+        flashcardsBySubject,
+        flashcardsByGrade,
+        totalPwaUsersCount,
+        pwaAdoptionRate,
+        pwaUsersByPlatform,
+        pwaUsersByGrade,
+        pwaUsersList,
         usersByGrade,
         highestUsageUser,
         highestUsageGrade
       };
+
+      cachedDashboardStats = stats;
+      lastDashboardStatsTime = Date.now();
+      return stats;
+    } else {
+      const data = readLocalDB();
+      const todayDate = getCairoDateString();
+      const students = (data.profiles || []).filter((p: Profile) => p.role === 'student');
+      const totalUsers = students.length;
+
+      let subscribedUsersCount = 0;
+      let freeUsersCount = 0;
+      let expiredUsersCount = 0;
+      let activeTodayCount = 0;
+      let totalPwaUsersCount = 0;
+      const usersByGrade: Record<string, number> = {};
+      const pwaUsersByGrade: Record<string, number> = {};
+      const pwaUsersByPlatform: Record<string, number> = { android: 0, ios: 0, desktop: 0, other: 0 };
+      const pwaUsersList: Array<{
+        id: string;
+        name: string;
+        grade_level: string;
+        email?: string;
+        phone?: string;
+        pwa_platform?: string | null;
+        pwa_installed_at?: string | null;
+        plan_type: string;
+        subscription_status?: string;
+      }> = [];
+      const subscriptionsByPlan = { pro_1m: 0, pro_2m: 0, pro_3m: 0, max: 0, other: 0 };
+
+      students.forEach((p: Profile) => {
+        usersByGrade[p.grade_level] = (usersByGrade[p.grade_level] || 0) + 1;
+        if (p.last_active_date === todayDate) {
+          activeTodayCount++;
+        }
+        if (p.pwa_installed) {
+          totalPwaUsersCount++;
+          pwaUsersByGrade[p.grade_level] = (pwaUsersByGrade[p.grade_level] || 0) + 1;
+          const plat = (p.pwa_platform === 'android' || p.pwa_platform === 'ios' || p.pwa_platform === 'desktop') ? p.pwa_platform : 'other';
+          pwaUsersByPlatform[plat] = (pwaUsersByPlatform[plat] || 0) + 1;
+          pwaUsersList.push({
+            id: p.id,
+            name: p.name,
+            grade_level: p.grade_level,
+            email: p.email,
+            phone: p.phone,
+            pwa_platform: p.pwa_platform || 'other',
+            pwa_installed_at: p.pwa_installed_at,
+            plan_type: p.plan_type,
+            subscription_status: p.subscription_status
+          });
+        }
+        if (p.subscription_status === 'active' && p.plan_type !== 'free') {
+          subscribedUsersCount++;
+          if (p.plan_type === 'pro_1m') subscriptionsByPlan.pro_1m++;
+          else if (p.plan_type === 'pro_2m') subscriptionsByPlan.pro_2m++;
+          else if (p.plan_type === 'pro_3m') subscriptionsByPlan.pro_3m++;
+          else if (p.plan_type === 'max') subscriptionsByPlan.max++;
+          else subscriptionsByPlan.other++;
+        } else if (p.subscription_status === 'expired') {
+          expiredUsersCount++;
+        } else {
+          freeUsersCount++;
+        }
+      });
+
+      pwaUsersList.sort((a, b) => new Date(b.pwa_installed_at || 0).getTime() - new Date(a.pwa_installed_at || 0).getTime());
+      const pwaAdoptionRate = totalUsers > 0 ? Math.round((totalPwaUsersCount / totalUsers) * 1000) / 10 : 0;
+
+      const conversionRate = totalUsers > 0 ? Math.round((subscribedUsersCount / totalUsers) * 1000) / 10 : 0;
+
+      let totalRevenueEgp = 0;
+      let successfulTransactionsCount = 0;
+      (data.payment_transactions || []).forEach((t: any) => {
+        if (t.status === 'success') {
+          successfulTransactionsCount++;
+          totalRevenueEgp += Number(t.amount || 0);
+        }
+      });
+
+      const totalExamsCount = (data.exams || []).length;
+      const totalMessagesCount = (data.chat_history || []).length;
+
+      const allDecks = data.flashcard_decks || [];
+      const allCards = data.flashcards || [];
+      const totalFlashcardDecksCount = allDecks.length;
+      const totalFlashcardsCount = allCards.length;
+      let flashcardsCreatedTodayCount = 0;
+      const flashcardsBySubject: Record<string, number> = {};
+      const flashcardsByGrade: Record<string, number> = {};
+
+      allDecks.forEach((d: any) => {
+        const subj = d.subject_name || 'عام';
+        flashcardsBySubject[subj] = (flashcardsBySubject[subj] || 0) + 1;
+        if (d.grade_level) {
+          flashcardsByGrade[d.grade_level] = (flashcardsByGrade[d.grade_level] || 0) + 1;
+        }
+        if (d.created_at) {
+          try {
+            const dateStr = new Date(d.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+            if (dateStr === todayDate) {
+              flashcardsCreatedTodayCount++;
+            }
+          } catch (_) {}
+        }
+      });
+
+      const averageCardsPerDeck = totalFlashcardDecksCount > 0
+        ? Math.round((totalFlashcardsCount / totalFlashcardDecksCount) * 10) / 10
+        : 0;
+
+      let highestUsageUser = null;
+      if (students.length > 0) {
+        const top = [...students].sort((a, b) => (b.points || 0) - (a.points || 0))[0];
+        highestUsageUser = {
+          name: top.name,
+          phone: top.phone,
+          email: top.email,
+          grade_level: top.grade_level,
+          message_count: top.points || 0,
+          coins_used: top.coins || 0
+        };
+      }
+
+      const stats = {
+        totalUsers,
+        freeUsersCount,
+        subscribedUsersCount,
+        expiredUsersCount,
+        conversionRate,
+        subscriptionsByPlan,
+        totalRevenueEgp: Math.round(totalRevenueEgp),
+        successfulTransactionsCount,
+        activeTodayCount,
+        totalExamsCount,
+        totalMessagesCount,
+        totalFlashcardDecksCount,
+        totalFlashcardsCount,
+        flashcardsCreatedTodayCount,
+        averageCardsPerDeck,
+        flashcardsBySubject,
+        flashcardsByGrade,
+        totalPwaUsersCount,
+        pwaAdoptionRate,
+        pwaUsersByPlatform,
+        pwaUsersByGrade,
+        pwaUsersList,
+        usersByGrade,
+        highestUsageUser,
+        highestUsageGrade: null
+      };
+
+      cachedDashboardStats = stats;
+      lastDashboardStatsTime = Date.now();
+      return stats;
     }
   },
 
@@ -2641,6 +3547,7 @@ export const db = {
       if (fileName) update.file_name = fileName;
       const { data, error } = await supabase.from('curriculums').update(update).eq('id', id).select().single();
       if (error) return null;
+      invalidatePublicConfigCache();
       return data;
     } else {
       const data = readLocalDB();
@@ -2649,6 +3556,7 @@ export const db = {
       curriculum.subject_name = cleanSubject;
       if (fileName) curriculum.file_name = fileName;
       writeLocalDB(data);
+      invalidatePublicConfigCache();
       return curriculum;
     }
   },
@@ -2927,7 +3835,7 @@ export const db = {
     const today = getCairoDateString();
     const isActiveSub = profile.subscription_status === 'active' && profile.plan_type !== 'free';
     const planCap = DAILY_COIN_CAPS[profile.plan_type] ?? (isActiveSub ? 80.0 : 0.0);
-    const newCoins = isActiveSub ? toPreciseCoins(planCap) : toPreciseCoins(15.0);
+    const newCoins = isActiveSub ? toPreciseCoins(planCap) : toPreciseCoins(20.0);
 
     profile.coins = newCoins;
     profile.last_active_date = today;
@@ -2953,8 +3861,228 @@ export const db = {
     };
   },
 
+  async grantUserSubscription(
+    userId: string,
+    planId: 'pro_1m' | 'pro_2m' | 'pro_3m' | string,
+    durationDays?: number,
+    adminNote?: string
+  ): Promise<{ success: boolean; error?: string; message?: string; profile?: Profile }> {
+    const profile = await this.getProfile(userId);
+    if (!profile) {
+      return { success: false, error: 'المستخدم غير موجود.' };
+    }
+
+    const validPlans = ['pro_1m', 'pro_2m', 'pro_3m'];
+    const selectedPlan = (validPlans.includes(planId) ? planId : 'pro_1m') as 'pro_1m' | 'pro_2m' | 'pro_3m';
+    
+    let days = durationDays;
+    if (!days || days <= 0) {
+      days = selectedPlan === 'pro_3m' ? 90 : selectedPlan === 'pro_2m' ? 60 : 30;
+    }
+
+    const planAmount = selectedPlan === 'pro_3m' ? 140 : selectedPlan === 'pro_2m' ? 110 : 60;
+    const planCap = DAILY_COIN_CAPS[selectedPlan] ?? 80.0;
+    const now = new Date();
+    const startDateIso = now.toISOString();
+    const endDate = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+    const endDateIso = endDate.toISOString();
+
+    const updatePayload = {
+      subscription_status: 'active' as const,
+      plan_type: selectedPlan,
+      subscription_plan_id: selectedPlan,
+      subscription_start_date: startDateIso,
+      subscription_end_date: endDateIso,
+      coins: Math.max(profile.coins || 0, planCap)
+    };
+
+    if (supabase) {
+      let { data, error } = await supabase.from('profiles').update(updatePayload).eq('id', userId).select().single();
+      if (error) {
+        // Fallback: update using only base columns that exist in the table
+        const basePayload = {
+          plan_type: selectedPlan,
+          coins: Math.max(profile.coins || 0, planCap)
+        };
+        const fallbackRes = await supabase.from('profiles').update(basePayload).eq('id', userId).select().single();
+        if (fallbackRes.error) return { success: false, error: 'فشل تحديث بيانات الاشتراك في قاعدة البيانات.' };
+        data = fallbackRes.data;
+      }
+
+      try {
+        const orderId = `admin_grant_${userId.slice(0, 8)}_${Date.now()}`;
+        await supabase.from('payment_transactions').insert({
+          user_id: userId,
+          order_id: orderId,
+          plan_id: selectedPlan,
+          amount: planAmount,
+          currency: 'EGP',
+          status: 'success',
+          provider: 'admin_manual',
+          payment_method: 'Admin Manual Grant',
+          raw_response: { note: adminNote || 'تفعيل اشتراك يدوي من لوحة التحكم', granted_at: startDateIso, duration_days: days }
+        });
+      } catch (e) {
+        console.warn('Grant subscription transaction insert notice:', e);
+      }
+
+      try {
+        await this.createNotification({
+          title: 'تهانينا! تم تفعيل اشتراكك بنجاح',
+          body: `قام مشرف النظام بتفعيل باقة (${selectedPlan === 'pro_3m' ? '3 أشهر' : selectedPlan === 'pro_2m' ? 'شهرين' : 'شهر برو'}) لحسابك لمدة ${days} يوماً مع رصيد يومي ${planCap} نقطة. نتمنى لك دراسة موفقة!`,
+          type: 'success',
+          target: 'web',
+          user_id: userId
+        });
+      } catch (_) {}
+
+      invalidateDashboardStatsCache();
+
+      return {
+        success: true,
+        message: `تم تفعيل باقة (${selectedPlan}) بنجاح للطالب لمدة ${days} يوماً.`,
+        profile: data
+      };
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: Profile) => x.id === userId);
+      if (!p) return { success: false, error: 'المستخدم غير موجود.' };
+
+      p.subscription_status = 'active';
+      p.plan_type = selectedPlan;
+      p.subscription_plan_id = selectedPlan;
+      p.subscription_start_date = startDateIso;
+      p.subscription_end_date = endDateIso;
+      p.coins = Math.max(p.coins || 0, planCap);
+
+      data.payment_transactions = data.payment_transactions || [];
+      const orderId = `admin_grant_${userId.slice(0, 8)}_${Date.now()}`;
+      data.payment_transactions.push({
+        id: `tx_${Date.now()}`,
+        user_id: userId,
+        order_id: orderId,
+        plan_id: selectedPlan,
+        amount: planAmount,
+        currency: 'EGP',
+        status: 'success',
+        provider: 'admin_manual',
+        payment_method: 'Admin Manual Grant',
+        raw_response: { note: adminNote || 'تفعيل اشتراك يدوي من لوحة التحكم', duration_days: days },
+        created_at: startDateIso,
+        updated_at: startDateIso
+      });
+
+      data.notifications = data.notifications || [];
+      data.notifications.push({
+        id: `notif_${Date.now()}`,
+        title: 'تهانينا! تم تفعيل اشتراكك بنجاح',
+        body: `قام مشرف النظام بتفعيل باقة (${selectedPlan === 'pro_3m' ? '3 أشهر' : selectedPlan === 'pro_2m' ? 'شهرين' : 'شهر برو'}) لحسابك لمدة ${days} يوماً مع رصيد يومي ${planCap} نقطة. نتمنى لك دراسة موفقة!`,
+        type: 'success',
+        target: 'web',
+        user_id: userId,
+        active: true,
+        created_at: startDateIso
+      });
+
+      writeLocalDB(data);
+      invalidateDashboardStatsCache();
+
+      return {
+        success: true,
+        message: `تم تفعيل باقة (${selectedPlan}) بنجاح للطالب لمدة ${days} يوماً.`,
+        profile: p
+      };
+    }
+  },
+
+  async updateStudentProfile(
+    userId: string,
+    updates: { name?: string; phone?: string; grade_level?: string; email?: string; track_id?: string | null; improve_ai_opt_in?: boolean }
+  ): Promise<{ success: boolean; error?: string; profile?: Profile }> {
+    const profile = await this.getProfile(userId);
+    if (!profile) return { success: false, error: 'الطالب غير موجود.' };
+
+    const payload: Partial<Profile> = {};
+    if (updates.name && updates.name.trim()) payload.name = updates.name.trim();
+    if (updates.phone && updates.phone.trim()) payload.phone = updates.phone.trim();
+    if (updates.email && updates.email.trim()) payload.email = updates.email.trim();
+    if (updates.grade_level) payload.grade_level = updates.grade_level;
+    if (updates.track_id !== undefined) payload.track_id = updates.track_id;
+    if (updates.improve_ai_opt_in !== undefined) payload.improve_ai_opt_in = updates.improve_ai_opt_in;
+
+    if (supabase) {
+      const { data, error } = await supabase.from('profiles').update(payload).eq('id', userId).select().single();
+      if (error) return { success: false, error: 'فشل تحديث بيانات الطالب في قاعدة البيانات.' };
+      invalidateDashboardStatsCache();
+      return { success: true, profile: data };
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: Profile) => x.id === userId);
+      if (!p) return { success: false, error: 'الطالب غير موجود.' };
+      Object.assign(p, payload);
+      writeLocalDB(data);
+      invalidateDashboardStatsCache();
+      return { success: true, profile: p };
+    }
+  },
+
+  async toggleUserBan(
+    userId: string,
+    isBanned: boolean,
+    reason?: string
+  ): Promise<{ success: boolean; error?: string; message?: string }> {
+    if (supabase) {
+      let { error } = await supabase.from('profiles').update({
+        subscription_status: isBanned ? 'suspended' : 'inactive',
+        unlimited_credit: isBanned ? false : undefined
+      }).eq('id', userId);
+      if (error) {
+        const { error: fbErr } = await supabase.from('profiles').update({
+          unlimited_credit: isBanned ? false : undefined,
+          coins: isBanned ? 0 : undefined
+        }).eq('id', userId);
+        if (fbErr) return { success: false, error: 'فشل تغيير حالة الحساب.' };
+      }
+      invalidateDashboardStatsCache();
+      return { success: true, message: isBanned ? 'تم تجميد حساب الطالب بنجاح.' : 'تم رفع التجميد وتنشيط الحساب بنجاح.' };
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: Profile) => x.id === userId);
+      if (!p) return { success: false, error: 'المستخدم غير موجود.' };
+      p.subscription_status = isBanned ? 'suspended' : 'inactive';
+      writeLocalDB(data);
+      invalidateDashboardStatsCache();
+      return { success: true, message: isBanned ? 'تم تجميد حساب الطالب بنجاح.' : 'تم رفع التجميد وتنشيط الحساب بنجاح.' };
+    }
+  },
+
+  async sendTargetedNotification(
+    userId: string,
+    title: string,
+    body: string,
+    type: 'info' | 'warning' | 'alert' | 'success' = 'info'
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const notif = await this.createNotification({
+        title: title.trim(),
+        body: body.trim(),
+        type: type === 'alert' ? 'warning' : type,
+        target: 'web',
+        user_id: userId
+      });
+      return { success: !!notif };
+    } catch (e: any) {
+      return { success: false, error: e.message || 'فشل إرسال الإشعار.' };
+    }
+  },
+
   // ─── Notifications ─────────────────────────────────────────────────────────
   async getActiveNotifications(target: 'web' | 'phone', userId?: string | null): Promise<AppNotification[]> {
+    if (!userId && cachedBroadcastNotifications && cachedBroadcastNotifications.target === target && (Date.now() - cachedBroadcastNotifications.time < BROADCAST_NOTIF_CACHE_TTL_MS)) {
+      return cachedBroadcastNotifications.data;
+    }
+
+    let results: AppNotification[] = [];
     if (supabase) {
       let query = supabase
         .from('notifications')
@@ -2970,7 +4098,7 @@ export const db = {
 
       const { data, error } = await query;
       if (error) return [];
-      return (data || []).filter((n: AppNotification) => {
+      results = (data || []).filter((n: AppNotification) => {
         const matchesTarget = n.target === 'both' || n.target === target;
         const matchesUser = !n.user_id || (userId && n.user_id === userId);
         return matchesTarget && matchesUser;
@@ -2978,7 +4106,7 @@ export const db = {
     } else {
       const data = readLocalDB();
       const list = (data.notifications || []) as AppNotification[];
-      return list
+      results = list
         .filter(n => {
           const matchesActive = n.active;
           const matchesTarget = n.target === 'both' || n.target === target;
@@ -2987,6 +4115,11 @@ export const db = {
         })
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
     }
+
+    if (!userId) {
+      cachedBroadcastNotifications = { target, data: results, time: Date.now() };
+    }
+    return results;
   },
 
   async getAllNotifications(): Promise<AppNotification[]> {
@@ -3001,6 +4134,7 @@ export const db = {
   },
 
   async createNotification(notification: Omit<AppNotification, 'id' | 'created_at' | 'active'>): Promise<AppNotification> {
+    invalidateNotificationsCache();
     const newNotification: AppNotification = {
       ...notification,
       user_id: notification.user_id || null,
@@ -3022,6 +4156,7 @@ export const db = {
   },
 
   async setNotificationActive(id: string, active: boolean): Promise<boolean> {
+    invalidateNotificationsCache();
     if (supabase) {
       const { error } = await supabase.from('notifications').update({ active }).eq('id', id);
       return !error;
@@ -3036,6 +4171,7 @@ export const db = {
   },
 
   async deleteNotification(id: string): Promise<boolean> {
+    invalidateNotificationsCache();
     if (supabase) {
       const { error } = await supabase.from('notifications').delete().eq('id', id);
       return !error;
@@ -3113,28 +4249,394 @@ export const db = {
   },
 
   // ─── User management (admin) ───────────────────────────────────────────────
-  async getUsers(search?: string): Promise<Omit<Profile, 'password_hash'>[]> {
+  async getUsers(
+    search?: string,
+    options?: {
+      tier?: 'all' | 'free' | 'subscribed' | 'expired' | 'pwa';
+      grade_level?: string;
+    }
+  ): Promise<{
+    users: Omit<Profile, 'password_hash'>[];
+    counts: {
+      total: number;
+      subscribed: number;
+      free: number;
+      expired: number;
+      pwa: number;
+    };
+  }> {
     if (supabase) {
-      let query = supabase.from('profiles').select('id, phone, email, name, grade_level, plan_type, role, coins, points, study_streak, unlimited_credit, created_at, last_active_date');
-      if (search) {
-        const cleanSearch = search.replace(/[%(),.*+?^${}|[\]\\]/g, '').trim();
-        if (cleanSearch) {
-          query = query.or(`name.ilike.%${cleanSearch}%,phone.ilike.%${cleanSearch}%,email.ilike.%${cleanSearch}%`);
-        }
+      const [
+        { data: rawProfiles, error },
+        { data: userMessages },
+        { data: userExams },
+        { data: userSubmissions },
+        { data: userDecks },
+        { data: allCards }
+      ] = await Promise.all([
+        supabase.from('profiles').select('*').eq('role', 'student').order('created_at', { ascending: false }),
+        supabase.from('chat_history').select('user_id, created_at').eq('sender', 'user'),
+        supabase.from('exams').select('user_id'),
+        supabase.from('exam_submissions').select('user_id'),
+        supabase.from('flashcard_decks').select('id, user_id'),
+        supabase.from('flashcards').select('deck_id')
+      ]);
+      
+      if (error || !rawProfiles) {
+        console.error('getUsers Supabase query error:', error);
+        return { users: [], counts: { total: 0, subscribed: 0, free: 0, expired: 0, pwa: 0 } };
       }
-      const { data, error } = await query.order('created_at', { ascending: false });
-      if (error) return [];
-      return data || [];
+
+      const messageCounts: Record<string, number> = {};
+      const userChatDaysMap: Record<string, Set<string>> = {};
+      userMessages?.forEach((m: any) => {
+        if (m.user_id) {
+          messageCounts[m.user_id] = (messageCounts[m.user_id] || 0) + 1;
+          if (m.created_at) {
+            if (!userChatDaysMap[m.user_id]) userChatDaysMap[m.user_id] = new Set<string>();
+            try {
+              const d = new Date(m.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+              userChatDaysMap[m.user_id].add(d);
+            } catch (_) {
+              userChatDaysMap[m.user_id].add(m.created_at.slice(0, 10));
+            }
+          }
+        }
+      });
+
+      const examCreatedCounts: Record<string, number> = {};
+      userExams?.forEach((e: any) => {
+        if (e.user_id) examCreatedCounts[e.user_id] = (examCreatedCounts[e.user_id] || 0) + 1;
+      });
+
+      const examCompletedCounts: Record<string, number> = {};
+      userSubmissions?.forEach((s: any) => {
+        if (s.user_id) examCompletedCounts[s.user_id] = (examCompletedCounts[s.user_id] || 0) + 1;
+      });
+
+      const deckCounts: Record<string, number> = {};
+      const deckUserMap: Record<string, string> = {};
+      userDecks?.forEach((d: any) => {
+        if (d.user_id) {
+          deckCounts[d.user_id] = (deckCounts[d.user_id] || 0) + 1;
+          if (d.id) deckUserMap[d.id] = d.user_id;
+        }
+      });
+
+      const cardCounts: Record<string, number> = {};
+      allCards?.forEach((c: any) => {
+        if (c.deck_id && deckUserMap[c.deck_id]) {
+          const uId = deckUserMap[c.deck_id];
+          cardCounts[uId] = (cardCounts[uId] || 0) + 1;
+        }
+      });
+
+      const allProfiles = rawProfiles.map((p: any) => {
+        const isSub = (p.subscription_status === 'active') || (p.plan_type && p.plan_type !== 'free');
+        const isExp = p.subscription_status === 'expired';
+        return {
+          ...p,
+          subscription_status: p.subscription_status || (isSub ? 'active' : (isExp ? 'expired' : 'inactive')),
+          subscription_start_date: p.subscription_start_date || (isSub ? p.created_at : null),
+          subscription_end_date: p.subscription_end_date || null,
+          messages_sent_count: messageCounts[p.id] || 0,
+          active_chat_days_count: userChatDaysMap[p.id]?.size || 0,
+          exams_created_count: examCreatedCounts[p.id] || 0,
+          exams_completed_count: examCompletedCounts[p.id] || 0,
+          flashcard_decks_count: deckCounts[p.id] || 0,
+          flashcards_created_count: cardCounts[p.id] || 0,
+          pwa_installed: !!p.pwa_installed,
+          pwa_installed_at: p.pwa_installed_at || null,
+          pwa_platform: p.pwa_platform || null,
+          improve_ai_opt_in: p.improve_ai_opt_in !== undefined ? !!p.improve_ai_opt_in : true
+        };
+      });
+
+      const total = allProfiles.length;
+      let subscribedCount = 0;
+      let freeCount = 0;
+      let expiredCount = 0;
+      let pwaCount = 0;
+
+      allProfiles.forEach((p: any) => {
+        const isSub = p.subscription_status === 'active' && p.plan_type !== 'free';
+        const isExp = p.subscription_status === 'expired';
+        if (isSub) subscribedCount++;
+        else if (isExp) expiredCount++;
+        else freeCount++;
+        if (p.pwa_installed) pwaCount++;
+      });
+
+      let filtered = allProfiles;
+
+      const tier = options?.tier || 'all';
+      if (tier === 'subscribed') {
+        filtered = filtered.filter((p: any) => p.subscription_status === 'active' && p.plan_type !== 'free');
+      } else if (tier === 'free') {
+        filtered = filtered.filter((p: any) => p.plan_type === 'free' || p.subscription_status === 'inactive' || !p.subscription_status);
+      } else if (tier === 'expired') {
+        filtered = filtered.filter((p: any) => p.subscription_status === 'expired');
+      } else if (tier === 'pwa') {
+        filtered = filtered.filter((p: any) => p.pwa_installed === true);
+      }
+
+      if (options?.grade_level && options.grade_level !== 'all') {
+        filtered = filtered.filter((p: any) => p.grade_level === options.grade_level);
+      }
+
+      if (search) {
+        const s = search.toLowerCase().trim();
+        filtered = filtered.filter((p: any) => 
+          (p.name && p.name.toLowerCase().includes(s)) ||
+          (p.phone && p.phone.includes(s)) ||
+          (p.email && p.email.toLowerCase().includes(s))
+        );
+      }
+
+      return {
+        users: filtered,
+        counts: {
+          total,
+          subscribed: subscribedCount,
+          free: freeCount,
+          expired: expiredCount,
+          pwa: pwaCount
+        }
+      };
     } else {
       const data = readLocalDB();
-      let list = data.profiles as Profile[];
-      if (search) {
-        const s = search.toLowerCase();
-        list = list.filter(p => p.name.toLowerCase().includes(s) || (p.phone && p.phone.includes(s)) || (p.email && p.email.toLowerCase().includes(s)));
+      const allProfiles = (data.profiles || []).filter((p: Profile) => p.role === 'student');
+      const total = allProfiles.length;
+      let subscribedCount = 0;
+      let freeCount = 0;
+      let expiredCount = 0;
+      let pwaCount = 0;
+
+      allProfiles.forEach((p: Profile) => {
+        const isSub = p.subscription_status === 'active' && p.plan_type !== 'free';
+        const isExp = p.subscription_status === 'expired';
+        if (isSub) subscribedCount++;
+        else if (isExp) expiredCount++;
+        else freeCount++;
+        if (p.pwa_installed) pwaCount++;
+      });
+
+      const messageCounts: Record<string, number> = {};
+      const userChatDaysMap: Record<string, Set<string>> = {};
+      (data.chat_history || []).forEach((m: any) => {
+        if (m.user_id && m.sender === 'user') {
+          messageCounts[m.user_id] = (messageCounts[m.user_id] || 0) + 1;
+          if (m.created_at) {
+            if (!userChatDaysMap[m.user_id]) userChatDaysMap[m.user_id] = new Set<string>();
+            try {
+              const d = new Date(m.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+              userChatDaysMap[m.user_id].add(d);
+            } catch (_) {
+              userChatDaysMap[m.user_id].add(m.created_at.slice(0, 10));
+            }
+          }
+        }
+      });
+
+      const examCreatedCounts: Record<string, number> = {};
+      (data.exams || []).forEach((e: any) => {
+        if (e.user_id) examCreatedCounts[e.user_id] = (examCreatedCounts[e.user_id] || 0) + 1;
+      });
+
+      const examCompletedCounts: Record<string, number> = {};
+      (data.exam_submissions || []).forEach((s: any) => {
+        if (s.user_id) examCompletedCounts[s.user_id] = (examCompletedCounts[s.user_id] || 0) + 1;
+      });
+
+      const deckCounts: Record<string, number> = {};
+      const deckUserMap: Record<string, string> = {};
+      (data.flashcard_decks || []).forEach((d: any) => {
+        if (d.user_id) {
+          deckCounts[d.user_id] = (deckCounts[d.user_id] || 0) + 1;
+          if (d.id) deckUserMap[d.id] = d.user_id;
+        }
+      });
+
+      const cardCounts: Record<string, number> = {};
+      (data.flashcards || []).forEach((c: any) => {
+        if (c.deck_id && deckUserMap[c.deck_id]) {
+          const uId = deckUserMap[c.deck_id];
+          cardCounts[uId] = (cardCounts[uId] || 0) + 1;
+        }
+      });
+
+      let filtered = allProfiles;
+
+      const tier = options?.tier || 'all';
+      if (tier === 'subscribed') {
+        filtered = filtered.filter((p: Profile) => p.subscription_status === 'active' && p.plan_type !== 'free');
+      } else if (tier === 'free') {
+        filtered = filtered.filter((p: Profile) => p.plan_type === 'free' || p.subscription_status === 'inactive' || !p.subscription_status);
+      } else if (tier === 'expired') {
+        filtered = filtered.filter((p: Profile) => p.subscription_status === 'expired');
+      } else if (tier === 'pwa') {
+        filtered = filtered.filter((p: Profile) => p.pwa_installed === true);
       }
-      return [...list]
-        .sort((a, b) => b.created_at.localeCompare(a.created_at))
-        .map(({ password_hash, ...rest }) => rest);
+
+      if (options?.grade_level && options.grade_level !== 'all') {
+        filtered = filtered.filter((p: Profile) => p.grade_level === options.grade_level);
+      }
+
+      if (search) {
+        const s = search.toLowerCase().trim();
+        filtered = filtered.filter((p: Profile) => 
+          (p.name && p.name.toLowerCase().includes(s)) ||
+          (p.phone && p.phone.includes(s)) ||
+          (p.email && p.email.toLowerCase().includes(s))
+        );
+      }
+
+      const mapped = filtered
+        .sort((a: Profile, b: Profile) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .map(({ password_hash, ...rest }: Profile) => ({
+          ...rest,
+          messages_sent_count: messageCounts[rest.id] || 0,
+          active_chat_days_count: userChatDaysMap[rest.id]?.size || 0,
+          exams_created_count: examCreatedCounts[rest.id] || 0,
+          exams_completed_count: examCompletedCounts[rest.id] || 0,
+          flashcard_decks_count: deckCounts[rest.id] || 0,
+          flashcards_created_count: cardCounts[rest.id] || 0,
+          pwa_installed: !!rest.pwa_installed,
+          pwa_installed_at: rest.pwa_installed_at || null,
+          pwa_platform: rest.pwa_platform || null,
+          improve_ai_opt_in: rest.improve_ai_opt_in !== undefined ? !!rest.improve_ai_opt_in : true
+        }));
+
+      return {
+        users: mapped,
+        counts: {
+          total,
+          subscribed: subscribedCount,
+          free: freeCount,
+          expired: expiredCount,
+          pwa: pwaCount
+        }
+      };
+    }
+  },
+
+  async getUserSentMessagesCount(userId: string): Promise<number> {
+    if (supabase) {
+      const { count } = await supabase.from('chat_history').select('*', { count: 'exact', head: true }).eq('user_id', userId).eq('sender', 'user');
+      return count || 0;
+    } else {
+      const data = readLocalDB();
+      return (data.chat_history || []).filter((m: any) => m.user_id === userId && m.sender === 'user').length;
+    }
+  },
+
+  async getUserActiveChatDaysCount(userId: string): Promise<number> {
+    if (supabase) {
+      const { data } = await supabase.from('chat_history').select('created_at').eq('user_id', userId).eq('sender', 'user');
+      if (!data || data.length === 0) return 0;
+      const days = new Set<string>();
+      data.forEach((m: any) => {
+        if (m.created_at) {
+          try {
+            days.add(new Date(m.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }));
+          } catch (_) {
+            days.add(m.created_at.slice(0, 10));
+          }
+        }
+      });
+      return days.size;
+    } else {
+      const data = readLocalDB();
+      const days = new Set<string>();
+      (data.chat_history || []).forEach((m: any) => {
+        if (m.user_id === userId && m.sender === 'user' && m.created_at) {
+          try {
+            days.add(new Date(m.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' }));
+          } catch (_) {
+            days.add(m.created_at.slice(0, 10));
+          }
+        }
+      });
+      return days.size;
+    }
+  },
+
+  async getUserExamsCount(userId: string): Promise<number> {
+    if (supabase) {
+      const { count } = await supabase.from('exams').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+      return count || 0;
+    } else {
+      const data = readLocalDB();
+      return (data.exams || []).filter((e: any) => e.user_id === userId).length;
+    }
+  },
+
+  async getUserExamSubmissionsCount(userId: string): Promise<number> {
+    if (supabase) {
+      const { count } = await supabase.from('exam_submissions').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+      return count || 0;
+    } else {
+      const data = readLocalDB();
+      return (data.exam_submissions || []).filter((s: any) => s.user_id === userId).length;
+    }
+  },
+
+  async getUserFlashcardDecksCount(userId: string): Promise<number> {
+    if (supabase) {
+      const { count } = await supabase.from('flashcard_decks').select('*', { count: 'exact', head: true }).eq('user_id', userId);
+      return count || 0;
+    } else {
+      const data = readLocalDB();
+      return (data.flashcard_decks || []).filter((d: any) => d.user_id === userId).length;
+    }
+  },
+
+  async getUserFlashcardsCount(userId: string): Promise<number> {
+    if (supabase) {
+      const { data: userDecks } = await supabase.from('flashcard_decks').select('id').eq('user_id', userId);
+      if (!userDecks || userDecks.length === 0) return 0;
+      const deckIds = userDecks.map((d: any) => d.id);
+      const { count } = await supabase.from('flashcards').select('*', { count: 'exact', head: true }).in('deck_id', deckIds);
+      return count || 0;
+    } else {
+      const data = readLocalDB();
+      const userDeckIds = new Set((data.flashcard_decks || []).filter((d: any) => d.user_id === userId).map((d: any) => d.id));
+      return (data.flashcards || []).filter((c: any) => userDeckIds.has(c.deck_id)).length;
+    }
+  },
+
+  async recordPwaInstall(userId: string, platform?: string): Promise<boolean> {
+    const cleanPlatform = (platform === 'ios' || platform === 'android' || platform === 'desktop') ? platform : 'unknown';
+    const now = new Date().toISOString();
+    
+    // Invalidate dashboard stats cache so admin sees update immediately
+    invalidateDashboardStatsCache();
+
+    if (supabase) {
+      try {
+        const { error } = await supabase
+          .from('profiles')
+          .update({
+            pwa_installed: true,
+            pwa_installed_at: now,
+            pwa_platform: cleanPlatform
+          })
+          .eq('id', userId);
+        if (!error) return true;
+        console.error('recordPwaInstall Supabase error:', error);
+      } catch (err) {
+        console.error('recordPwaInstall exception:', err);
+      }
+      return false;
+    } else {
+      const data = readLocalDB();
+      const profile = (data.profiles || []).find((p: Profile) => p.id === userId);
+      if (!profile) return false;
+      profile.pwa_installed = true;
+      profile.pwa_installed_at = profile.pwa_installed_at || now;
+      profile.pwa_platform = cleanPlatform as any;
+      writeLocalDB(data);
+      return true;
     }
   },
 
@@ -3228,7 +4730,148 @@ export const db = {
       }
     }
     profile.points = newPoints;
+    invalidateUserRankCache(userId);
+    invalidateDailyQuestsCache(userId);
     return newPoints;
+  },
+
+  async claimWelcomeCoins(userId: string): Promise<Profile | null> {
+    const profile = await this.getProfile(userId);
+    if (!profile) return null;
+    if (profile.welcome_reward_claimed) {
+      return profile;
+    }
+    const currentCoins = profile.coins === undefined ? 0.0 : profile.coins;
+    // Exactly 20 free points upon registration: if student already has 20.0, do not add more on top
+    const newCoins = currentCoins >= 20.0 ? currentCoins : toPreciseCoins(Math.min(20.0, currentCoins + 15.0));
+    const updates: any = { coins: newCoins, welcome_reward_claimed: true, plan_type: profile.plan_type || 'free' };
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('profiles').update(updates).eq('id', userId).select().single();
+        if (error) {
+          const fallbackRes = await supabase.from('profiles').update({ coins: newCoins, plan_type: profile.plan_type || 'free' }).eq('id', userId).select().single();
+          return fallbackRes.data || { ...profile, coins: newCoins, welcome_reward_claimed: true };
+        }
+        return data || { ...profile, ...updates };
+      } catch (err) {
+        return { ...profile, coins: newCoins, welcome_reward_claimed: true };
+      }
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: any) => x.id === userId);
+      if (p) {
+        p.coins = newCoins;
+        p.welcome_reward_claimed = true;
+        p.plan_type = p.plan_type || 'free';
+        writeLocalDB(data);
+      }
+      return { ...profile, ...updates };
+    }
+  },
+
+  async subscribeFreePlan(userId: string): Promise<Profile | null> {
+    const profile = await this.getProfile(userId);
+    if (!profile) return null;
+    if (profile.free_plan_claimed) {
+      return profile;
+    }
+    const currentCoins = profile.coins === undefined ? 0.0 : profile.coins;
+    // Free plan baseline: if student already has 20.0, do not add more on top
+    const newCoins = currentCoins >= 20.0 ? currentCoins : toPreciseCoins(Math.max(currentCoins, 5.0));
+    const updates: any = { coins: newCoins, free_plan_claimed: true, plan_type: 'free' as const };
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('profiles').update(updates).eq('id', userId).select().single();
+        if (error) {
+          const fallbackRes = await supabase.from('profiles').update({ coins: newCoins, plan_type: 'free' }).eq('id', userId).select().single();
+          return fallbackRes.data || { ...profile, coins: newCoins, free_plan_claimed: true, plan_type: 'free' };
+        }
+        return data || { ...profile, ...updates };
+      } catch (err) {
+        return { ...profile, coins: newCoins, free_plan_claimed: true, plan_type: 'free' };
+      }
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: any) => x.id === userId);
+      if (p) {
+        p.coins = newCoins;
+        p.free_plan_claimed = true;
+        p.plan_type = 'free';
+        writeLocalDB(data);
+      }
+      return { ...profile, ...updates };
+    }
+  },
+
+  async claimApologyCompensation(userId: string): Promise<{ success: boolean; profile: Profile | null; error?: string }> {
+    const profile = await this.getProfile(userId);
+    if (!profile) {
+      return { success: false, profile: null, error: 'المستخدم غير موجود' };
+    }
+    if (!isExistingAccountForApology(profile)) {
+      return { success: false, profile, error: 'هذا التعويض مخصص للحسابات السابقة فقط' };
+    }
+    if (profile.apology_compensation_claimed) {
+      return { success: false, profile, error: 'تم استلام نقاط التعويض مسبقاً' };
+    }
+
+    const currentCoins = profile.coins === undefined ? 0.0 : profile.coins;
+    const newCoins = toPreciseCoins(currentCoins + 15.0);
+    const updates: any = {
+      coins: newCoins,
+      apology_compensation_claimed: true,
+      apology_dismissed: true
+    };
+
+    if (supabase) {
+      try {
+        const { data, error } = await supabase.from('profiles').update(updates).eq('id', userId).select().single();
+        if (error) {
+          const fallbackRes = await supabase.from('profiles').update({ coins: newCoins }).eq('id', userId).select().single();
+          return {
+            success: true,
+            profile: fallbackRes.data ? { ...fallbackRes.data, apology_compensation_claimed: true, apology_dismissed: true } : { ...profile, ...updates }
+          };
+        }
+        return { success: true, profile: data || { ...profile, ...updates } };
+      } catch (err) {
+        return { success: true, profile: { ...profile, ...updates } };
+      }
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: any) => x.id === userId);
+      if (p) {
+        p.coins = newCoins;
+        p.apology_compensation_claimed = true;
+        p.apology_dismissed = true;
+        writeLocalDB(data);
+      }
+      return { success: true, profile: { ...profile, ...updates } };
+    }
+  },
+
+  async dismissApology(userId: string): Promise<boolean> {
+    const profile = await this.getProfile(userId);
+    if (!profile) return false;
+    if (profile.apology_dismissed) return true;
+
+    const updates: any = { apology_dismissed: true };
+    if (supabase) {
+      try {
+        await supabase.from('profiles').update(updates).eq('id', userId);
+        return true;
+      } catch (err) {
+        return true;
+      }
+    } else {
+      const data = readLocalDB();
+      const p = (data.profiles || []).find((x: any) => x.id === userId);
+      if (p) {
+        p.apology_dismissed = true;
+        writeLocalDB(data);
+      }
+      return true;
+    }
   },
 
   async hasSubmittedExam(examId: string, userId?: string, deviceId?: string): Promise<boolean> {
@@ -3246,6 +4889,13 @@ export const db = {
   },
 
   async getLeaderboard(gradeLevel?: string, limit: number = 10): Promise<any[]> {
+    const cacheKey = `${gradeLevel || 'all'}_${limit}`;
+    const cached = cachedLeaderboardMap.get(cacheKey);
+    if (cached && (Date.now() - cached.time < LEADERBOARD_CACHE_TTL_MS)) {
+      return cached.data;
+    }
+
+    let results: any[] = [];
     if (supabase) {
       const { data, error } = await supabase.rpc('get_leaderboard', {
         p_grade_level: gradeLevel || null,
@@ -3255,7 +4905,7 @@ export const db = {
         console.error('get_leaderboard RPC error:', error);
         return [];
       }
-      return data || [];
+      results = data || [];
     } else {
       const data = readLocalDB();
       const students = data.profiles.filter((p: any) => {
@@ -3290,88 +4940,111 @@ export const db = {
         return b.average_accuracy - a.average_accuracy;
       });
       
-      return stats.slice(0, limit).map((s: any, idx: number) => ({
+      results = stats.slice(0, limit).map((s: any, idx: number) => ({
         ...s,
         rank_number: idx + 1
       }));
     }
+
+    cachedLeaderboardMap.set(cacheKey, { data: results, time: Date.now() });
+    return results;
   },
 
   async getUserLeaderboardRank(userId: string, gradeLevel?: string): Promise<any | null> {
-    if (supabase) {
-      const { data, error } = await supabase.rpc('get_user_leaderboard_rank', {
-        p_user_id: userId,
-        p_grade_level: gradeLevel || null
-      });
-      if (!error && data && data.length > 0) {
-        return data[0];
+    const cacheKey = `${userId}_${gradeLevel || 'all'}`;
+    const existingPromise = inFlightUserRank.get(cacheKey);
+    if (existingPromise) {
+      return existingPromise;
+    }
+
+    const fetchPromise = (async () => {
+      let result: any = null;
+      if (supabase) {
+        const { data, error } = await supabase.rpc('get_user_leaderboard_rank', {
+          p_user_id: userId,
+          p_grade_level: gradeLevel || null
+        });
+        if (!error && data && data.length > 0) {
+          result = data[0];
+        } else {
+          // Fallback: If RPC not present, compute from broader query
+          const fullList = await this.getLeaderboard(gradeLevel, 500);
+          const userEntry = fullList.find((s: any) => s.user_id === userId);
+          if (userEntry) {
+            result = {
+              ...userEntry,
+              is_in_top_10: userEntry.rank_number <= 10
+            };
+          }
+        }
+      } else {
+        const data = readLocalDB();
+        const students = data.profiles.filter((p: any) => {
+          if (p.role !== 'student') return false;
+          if (gradeLevel && p.grade_level !== gradeLevel) return false;
+          const email = (p.email || '').toLowerCase();
+          const name = (p.name || '').toLowerCase();
+          if (email.includes('test') || email.includes('trial')) return false;
+          if (name.includes('test') || name.includes('trial') || p.name?.includes('اختباري') || p.name?.includes('تجريبي')) return false;
+          return true;
+        });
+        
+        const stats = students.map((p: any) => {
+          const userSubmissions = data.exam_submissions ? data.exam_submissions.filter((es: any) => es.user_id === p.id) : [];
+          const avgAccuracy = userSubmissions.length > 0 
+            ? userSubmissions.reduce((acc: number, curr: any) => acc + curr.score, 0) / userSubmissions.length
+            : 0.0;
+          return {
+            user_id: p.id,
+            name: p.name,
+            grade_level: p.grade_level,
+            coins: p.coins || 0,
+            points: p.points || 0,
+            study_streak: p.study_streak || 1,
+            average_accuracy: Math.round(avgAccuracy * 100) / 100
+          };
+        });
+        
+        stats.sort((a: any, b: any) => {
+          if ((b.points || 0) !== (a.points || 0)) return (b.points || 0) - (a.points || 0);
+          if (b.study_streak !== a.study_streak) return b.study_streak - a.study_streak;
+          return b.average_accuracy - a.average_accuracy;
+        });
+        
+        const index = stats.findIndex((s: any) => s.user_id === userId);
+        if (index === -1) {
+          const currentUser = data.profiles.find((p: any) => p.id === userId);
+          if (!currentUser) {
+            result = null;
+          } else {
+            result = {
+              user_id: currentUser.id,
+              name: currentUser.name,
+              grade_level: currentUser.grade_level,
+              coins: currentUser.coins || 0,
+              points: currentUser.points || 0,
+              study_streak: currentUser.study_streak || 1,
+              average_accuracy: 0,
+              rank_number: stats.length + 1,
+              is_in_top_10: false
+            };
+          }
+        } else {
+          result = {
+            ...stats[index],
+            rank_number: index + 1,
+            is_in_top_10: (index + 1) <= 10
+          };
+        }
       }
-      // Fallback: If RPC not present, compute from broader query
-      const fullList = await this.getLeaderboard(gradeLevel, 500);
-      const userEntry = fullList.find((s: any) => s.user_id === userId);
-      if (userEntry) {
-        return {
-          ...userEntry,
-          is_in_top_10: userEntry.rank_number <= 10
-        };
-      }
-      return null;
-    } else {
-      const data = readLocalDB();
-      const students = data.profiles.filter((p: any) => {
-        if (p.role !== 'student') return false;
-        if (gradeLevel && p.grade_level !== gradeLevel) return false;
-        const email = (p.email || '').toLowerCase();
-        const name = (p.name || '').toLowerCase();
-        if (email.includes('test') || email.includes('trial')) return false;
-        if (name.includes('test') || name.includes('trial') || p.name?.includes('اختباري') || p.name?.includes('تجريبي')) return false;
-        return true;
-      });
-      
-      const stats = students.map((p: any) => {
-        const userSubmissions = data.exam_submissions ? data.exam_submissions.filter((es: any) => es.user_id === p.id) : [];
-        const avgAccuracy = userSubmissions.length > 0 
-          ? userSubmissions.reduce((acc: number, curr: any) => acc + curr.score, 0) / userSubmissions.length
-          : 0.0;
-        return {
-          user_id: p.id,
-          name: p.name,
-          grade_level: p.grade_level,
-          coins: p.coins || 0,
-          points: p.points || 0,
-          study_streak: p.study_streak || 1,
-          average_accuracy: Math.round(avgAccuracy * 100) / 100
-        };
-      });
-      
-      stats.sort((a: any, b: any) => {
-        if ((b.points || 0) !== (a.points || 0)) return (b.points || 0) - (a.points || 0);
-        if (b.study_streak !== a.study_streak) return b.study_streak - a.study_streak;
-        return b.average_accuracy - a.average_accuracy;
-      });
-      
-      const index = stats.findIndex((s: any) => s.user_id === userId);
-      if (index === -1) {
-        const currentUser = data.profiles.find((p: any) => p.id === userId);
-        if (!currentUser) return null;
-        return {
-          user_id: currentUser.id,
-          name: currentUser.name,
-          grade_level: currentUser.grade_level,
-          coins: currentUser.coins || 0,
-          points: currentUser.points || 0,
-          study_streak: currentUser.study_streak || 1,
-          average_accuracy: 0,
-          rank_number: stats.length + 1,
-          is_in_top_10: false
-        };
-      }
-      
-      return {
-        ...stats[index],
-        rank_number: index + 1,
-        is_in_top_10: (index + 1) <= 10
-      };
+      return result;
+    })();
+
+    inFlightUserRank.set(cacheKey, fetchPromise);
+    try {
+      return await fetchPromise;
+    } finally {
+      inFlightUserRank.delete(cacheKey);
     }
   },
 
@@ -3506,15 +5179,27 @@ export const db = {
       const { data } = await supabase.from('flashcards').select('*').eq('id', cardId).maybeSingle();
       card = data;
       if (card && userId) {
-        const { data: deck } = await supabase.from('flashcard_decks').select('id').eq('id', card.deck_id).eq('user_id', userId).maybeSingle();
+        const { data: deck } = await supabase.from('flashcard_decks').select('id, user_id').eq('id', card.deck_id).maybeSingle();
         if (!deck) throw new Error('Unauthorized access to flashcard');
+        if (deck.user_id !== userId) {
+          const profile = await this.getProfile(userId);
+          if (!profile || profile.role !== 'admin') {
+            throw new Error('Unauthorized access to flashcard');
+          }
+        }
       }
     } else {
       const data = readLocalDB();
       card = (data.flashcards || []).find((c: any) => c.id === cardId) || null;
       if (card && userId) {
-        const deck = (data.flashcard_decks || []).find((d: any) => d.id === card.deck_id && d.user_id === userId);
+        const deck = (data.flashcard_decks || []).find((d: any) => d.id === card.deck_id);
         if (!deck) throw new Error('Unauthorized access to flashcard');
+        if (deck.user_id !== userId) {
+          const user = (data.profiles || []).find((p: any) => p.id === userId);
+          if (!user || user.role !== 'admin') {
+            throw new Error('Unauthorized access to flashcard');
+          }
+        }
       }
     }
 
@@ -3747,27 +5432,11 @@ export const db = {
     const profile = await this.getProfile(userId);
     if (!profile) return { success: false };
 
-    let dailyCap = 80.0;
-    let planTitle = 'باقة شهر (80 نقطة يومياً متجددة)';
-    let planType: 'pro' | 'pro_1m' | 'pro_2m' | 'pro_3m' = 'pro_1m';
-    let durationDays = 30;
-
-    if (planId === 'pro_1m' || planId === '1_month' || planId === 'pro') {
-      dailyCap = 80.0;
-      planType = 'pro_1m';
-      planTitle = 'باقة شهر (80 نقطة يومياً متجددة)';
-      durationDays = 30;
-    } else if (planId === 'pro_2m' || planId === '2_months') {
-      dailyCap = 90.0;
-      planType = 'pro_2m';
-      planTitle = 'باقة شهرين (90 نقطة يومياً متجددة)';
-      durationDays = 60;
-    } else if (planId === 'pro_3m' || planId === '3_months' || planId === 'max') {
-      dailyCap = 120.0;
-      planType = 'pro_3m';
-      planTitle = 'باقة 3 أشهر (120 نقطة يومياً متجددة)';
-      durationDays = 90;
-    }
+    const planInfo = normalizePlanId(planId);
+    const dailyCap = planInfo.dailyCap;
+    const planTitle = planInfo.planTitle;
+    const planType = planInfo.planType;
+    const durationDays = planInfo.durationDays;
 
     const currentCoins = profile.coins ?? 0.0;
     const newCoins = toPreciseCoins(Math.max(currentCoins, dailyCap));
@@ -3780,14 +5449,18 @@ export const db = {
       subscription_status: 'active' as const,
       subscription_start_date: startDate,
       subscription_end_date: endDate,
-      subscription_plan_id: planId,
+      subscription_plan_id: planType,
       coins: newCoins,
       last_active_date: today
     };
 
     // Upgrade profile to active package
     if (supabase) {
-      await supabase.from('profiles').update(subscriptionPayload).eq('id', userId);
+      const { error } = await supabase.from('profiles').update(subscriptionPayload).eq('id', userId);
+      if (error) {
+        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, ...basePayload } = subscriptionPayload;
+        await supabase.from('profiles').update(basePayload).eq('id', userId);
+      }
     } else {
       const data = readLocalDB();
       const p = (data.profiles || []).find((x: Profile) => x.id === userId);
@@ -3802,7 +5475,7 @@ export const db = {
       await this.createNotification({
         user_id: userId,
         title: 'تم تفعيل اشتراكك بنجاح',
-        body: `تهانينا! تم تفعيل ${planTitle} وضبط رصيدك إلى ${newCoins} نقطة تتجدد يومياً. استمتع بميزات المساعد الذكي غير المحدودة.`,
+        body: `تهانينا! تم تفعيل ${planTitle} وضبط رصيدك إلى ${newCoins} نقطة تتجدد يومياً لمدة ${durationDays} يوماً. استمتع بميزات المساعد الذكي غير المحدودة.`,
         type: 'success',
         target: 'both'
       });
@@ -3811,6 +5484,12 @@ export const db = {
     }
 
     const updatedProfile = await this.getProfile(userId);
+    if (updatedProfile) {
+      updatedProfile.subscription_status = 'active';
+      updatedProfile.subscription_start_date = updatedProfile.subscription_start_date || startDate;
+      updatedProfile.subscription_end_date = updatedProfile.subscription_end_date || endDate;
+      updatedProfile.subscription_plan_id = updatedProfile.subscription_plan_id || planType;
+    }
     return { success: true, profile: updatedProfile };
   },
 
@@ -3868,7 +5547,7 @@ export const db = {
       }
     }
 
-    const coinsToGrant = isAbuse ? 0.0 : 15.0;
+    const coinsToGrant = 20.0;
 
     // Record grant attempt
     try {
@@ -4328,9 +6007,31 @@ export const db = {
       return [];
     } else {
       const data = readLocalDB();
-      return (data.study_notebook || [])
-        .filter((n: StudyNotebookItem) => n.user_id === userId && (!subjectName || n.subject_name === subjectName))
-        .sort((a: StudyNotebookItem, b: StudyNotebookItem) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      const rawNotes: StudyNotebookItem[] = (data.study_notebook || [])
+        .filter((n: StudyNotebookItem) => n.user_id === userId && (!subjectName || n.subject_name === subjectName));
+
+      // Backfill session_id & message_id from chat_history if missing
+      const history: ChatMessage[] = data.chat_history || [];
+      const notes = rawNotes.map((n: StudyNotebookItem) => {
+        if (!n.session_id && history.length > 0) {
+          const match = history.find(ch => 
+            ch.user_id === userId &&
+            ch.sender === 'ai' &&
+            ch.message &&
+            (ch.message === n.content || ch.message.includes(n.content.trim().slice(0, 50)) || n.content.includes(ch.message.trim().slice(0, 50)))
+          );
+          if (match) {
+            return {
+              ...n,
+              session_id: match.session_id || null,
+              message_id: match.id || null
+            };
+          }
+        }
+        return n;
+      });
+
+      return notes.sort((a: StudyNotebookItem, b: StudyNotebookItem) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     }
   },
 
@@ -4341,6 +6042,8 @@ export const db = {
     title: string;
     content: string;
     noteType?: 'formula' | 'definition' | 'solution' | 'law' | 'general';
+    sessionId?: string | null;
+    messageId?: string | null;
   }): Promise<StudyNotebookItem> {
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `note_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     const nowIso = new Date().toISOString();
@@ -4352,6 +6055,8 @@ export const db = {
       title: params.title.trim(),
       content: params.content.trim(),
       note_type: params.noteType || 'formula',
+      session_id: params.sessionId || null,
+      message_id: params.messageId || null,
       created_at: nowIso
     };
 
@@ -4396,96 +6101,131 @@ export const db = {
   // ─── Daily Quests & Habit Formation System ──────────────────────────────────
 
   async getDailyQuests(userId: string): Promise<DailyQuestProgress> {
-    const todayCairo = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
-    const profile = await this.getProfile(userId);
-    const streakDays = profile?.study_streak || 1;
-
-    // Check today's user activity
-    let chatCountToday = 0;
-    let examsCountToday = 0;
-    let claimedQuestIds: string[] = [];
-
-    if (supabase) {
-      try {
-        const { count: msgCount } = await supabase.from('chat_history')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', userId)
-          .eq('sender', 'user')
-          .gte('created_at', `${todayCairo}T00:00:00+02:00`);
-        chatCountToday = msgCount || 0;
-
-        const { count: subCount } = await supabase.from('exam_submissions')
-          .select('id', { count: 'exact', head: true })
-          .eq('user_id', userId)
-          .gte('submitted_at', `${todayCairo}T00:00:00+02:00`);
-        examsCountToday = subCount || 0;
-      } catch (err) {}
-    } else {
-      const data = readLocalDB();
-      chatCountToday = (data.chat_history || []).filter(
-        (m: any) => m.user_id === userId && m.sender === 'user' && (m.created_at || '').startsWith(todayCairo)
-      ).length;
-      examsCountToday = (data.exam_submissions || []).filter(
-        (s: any) => s.user_id === userId && (s.submitted_at || '').startsWith(todayCairo)
-      ).length;
+    const existingPromise = inFlightDailyQuests.get(userId);
+    if (existingPromise) {
+      return existingPromise;
     }
 
-    // Check claimed quests from local or profile metadata
-    const data = readLocalDB();
-    const claimedList = (data.claimed_daily_quests || []).filter(
-      (c: any) => c.user_id === userId && c.date === todayCairo
-    );
-    claimedQuestIds = claimedList.map((c: any) => c.quest_id);
+    const fetchPromise = (async () => {
+      const todayCairo = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
+      const profile = await this.getProfile(userId);
+      const streakDays = profile?.study_streak || 1;
 
-    // Calculate quest targets and progress
-    const quest1Current = Math.min(1, chatCountToday >= 1 ? 1 : 0);
-    const quest2Current = Math.min(3, chatCountToday >= 2 ? 3 : chatCountToday);
-    const quest3Current = Math.min(1, examsCountToday >= 1 ? 1 : (chatCountToday >= 3 ? 1 : 0));
+      // Check today's user activity
+      let chatCountToday = 0;
+      let examsCountToday = 0;
+      let claimedQuestIds: string[] = [];
 
-    const quests: DailyQuestItem[] = [
-      {
-        id: 'quest_interactive_quiz',
-        title: 'حل سؤال تفاعلي أو مسألة في المنهج',
-        description: 'اطرح سؤالاً على المساعد الذكي أو أجب على سؤال تفاعلي سريع',
-        icon: 'Sparkles',
-        target: 1,
-        current: quest1Current,
-        completed: quest1Current >= 1,
-        rewardPoints: 2,
-        claimed: claimedQuestIds.includes('quest_interactive_quiz')
-      },
-      {
-        id: 'quest_concept_review',
-        title: 'مراجعة 3 مفاهيم أو كروت ذكية',
-        description: 'راجع المفاهيم في المدرب الذكي أو تصفح دروس المنهج',
-        icon: 'Brain',
-        target: 3,
-        current: quest2Current,
-        completed: quest2Current >= 3,
-        rewardPoints: 3,
-        claimed: claimedQuestIds.includes('quest_concept_review')
-      },
-      {
-        id: 'quest_exam_challenge',
-        title: 'خوض اختبار أو حل مسألة بوكليت',
-        description: 'قدم اختباراً تقييمياً ذكياً أو حل مسألة معقدة بالخطوات',
-        icon: 'FileText',
-        target: 1,
-        current: quest3Current,
-        completed: quest3Current >= 1,
-        rewardPoints: 5,
-        claimed: claimedQuestIds.includes('quest_exam_challenge')
+      if (supabase) {
+        try {
+          const [msgRes, subRes, claimedRes] = await Promise.all([
+            supabase.from('chat_history')
+              .select('id', { count: 'exact', head: true })
+              .eq('user_id', userId)
+              .eq('sender', 'user')
+              .gte('created_at', `${todayCairo}T00:00:00+02:00`),
+            supabase.from('exam_submissions')
+              .select('id', { count: 'exact', head: true })
+              .eq('user_id', userId)
+              .gte('submitted_at', `${todayCairo}T00:00:00+02:00`),
+            supabase.from('claimed_daily_quests')
+              .select('quest_id')
+              .eq('user_id', userId)
+              .eq('date', todayCairo)
+          ]);
+
+          chatCountToday = msgRes.count || 0;
+          examsCountToday = subRes.count || 0;
+          if (claimedRes.data && Array.isArray(claimedRes.data)) {
+            claimedQuestIds = claimedRes.data.map((c: any) => c.quest_id);
+          } else {
+            // Fallback to local store if claimed_daily_quests table is not yet migrated in Supabase
+            const data = readLocalDB();
+            const claimedList = (data.claimed_daily_quests || []).filter(
+              (c: any) => c.user_id === userId && c.date === todayCairo
+            );
+            claimedQuestIds = claimedList.map((c: any) => c.quest_id);
+          }
+        } catch (err) {
+          const data = readLocalDB();
+          const claimedList = (data.claimed_daily_quests || []).filter(
+            (c: any) => c.user_id === userId && c.date === todayCairo
+          );
+          claimedQuestIds = claimedList.map((c: any) => c.quest_id);
+        }
+      } else {
+        const data = readLocalDB();
+        chatCountToday = (data.chat_history || []).filter(
+          (m: any) => m.user_id === userId && m.sender === 'user' && (m.created_at || '').startsWith(todayCairo)
+        ).length;
+        examsCountToday = (data.exam_submissions || []).filter(
+          (s: any) => s.user_id === userId && (s.submitted_at || '').startsWith(todayCairo)
+        ).length;
+        const claimedList = (data.claimed_daily_quests || []).filter(
+          (c: any) => c.user_id === userId && c.date === todayCairo
+        );
+        claimedQuestIds = claimedList.map((c: any) => c.quest_id);
       }
-    ];
 
-    const allCompleted = quests.every(q => q.completed);
+      // Calculate quest targets and progress
+      const quest1Current = Math.min(1, chatCountToday >= 1 ? 1 : 0);
+      const quest2Current = Math.min(3, chatCountToday >= 2 ? 3 : chatCountToday);
+      const quest3Current = Math.min(1, examsCountToday >= 1 ? 1 : (chatCountToday >= 3 ? 1 : 0));
 
-    return {
-      date: todayCairo,
-      quests,
-      allCompleted,
-      streakDays
-    };
+      const quests: DailyQuestItem[] = [
+        {
+          id: 'quest_interactive_quiz',
+          title: 'حل سؤال تفاعلي أو مسألة في المنهج',
+          description: 'اطرح سؤالاً على المساعد الذكي أو أجب على سؤال تفاعلي سريع',
+          icon: 'Sparkles',
+          target: 1,
+          current: quest1Current,
+          completed: quest1Current >= 1,
+          rewardPoints: 2,
+          claimed: claimedQuestIds.includes('quest_interactive_quiz')
+        },
+        {
+          id: 'quest_concept_review',
+          title: 'مراجعة 3 مفاهيم أو كروت ذكية',
+          description: 'راجع المفاهيم في المدرب الذكي أو تصفح دروس المنهج',
+          icon: 'Brain',
+          target: 3,
+          current: quest2Current,
+          completed: quest2Current >= 3,
+          rewardPoints: 3,
+          claimed: claimedQuestIds.includes('quest_concept_review')
+        },
+        {
+          id: 'quest_exam_challenge',
+          title: 'خوض اختبار أو حل مسألة بوكليت',
+          description: 'قدم اختباراً تقييمياً ذكياً أو حل مسألة معقدة بالخطوات',
+          icon: 'FileText',
+          target: 1,
+          current: quest3Current,
+          completed: quest3Current >= 1,
+          rewardPoints: 5,
+          claimed: claimedQuestIds.includes('quest_exam_challenge')
+        }
+      ];
+
+      const allCompleted = quests.every(q => q.completed);
+
+      const result: DailyQuestProgress = {
+        date: todayCairo,
+        quests,
+        allCompleted,
+        streakDays
+      };
+
+      return result;
+    })();
+
+    inFlightDailyQuests.set(userId, fetchPromise);
+    try {
+      return await fetchPromise;
+    } finally {
+      inFlightDailyQuests.delete(userId);
+    }
   },
 
   async claimDailyQuestReward(userId: string, questId: string): Promise<{ success: boolean; pointsAwarded: number; totalPoints: number }> {
@@ -4507,16 +6247,51 @@ export const db = {
     const pointsAwarded = quest.rewardPoints;
     const totalPoints = await this.addPoints(userId, pointsAwarded);
 
-    // Record claim
-    const data = readLocalDB();
-    if (!data.claimed_daily_quests) data.claimed_daily_quests = [];
-    data.claimed_daily_quests.push({
-      user_id: userId,
-      date: todayCairo,
-      quest_id: questId,
-      claimed_at: new Date().toISOString()
-    });
-    writeLocalDB(data);
+    // Record claim in Supabase or local store
+    if (supabase) {
+      try {
+        const { error } = await supabase.from('claimed_daily_quests').insert({
+          user_id: userId,
+          date: todayCairo,
+          quest_id: questId,
+          claimed_at: new Date().toISOString()
+        });
+        if (error) {
+          const data = readLocalDB();
+          if (!data.claimed_daily_quests) data.claimed_daily_quests = [];
+          data.claimed_daily_quests.push({
+            user_id: userId,
+            date: todayCairo,
+            quest_id: questId,
+            claimed_at: new Date().toISOString()
+          });
+          writeLocalDB(data);
+        }
+      } catch (e) {
+        const data = readLocalDB();
+        if (!data.claimed_daily_quests) data.claimed_daily_quests = [];
+        data.claimed_daily_quests.push({
+          user_id: userId,
+          date: todayCairo,
+          quest_id: questId,
+          claimed_at: new Date().toISOString()
+        });
+        writeLocalDB(data);
+      }
+    } else {
+      const data = readLocalDB();
+      if (!data.claimed_daily_quests) data.claimed_daily_quests = [];
+      data.claimed_daily_quests.push({
+        user_id: userId,
+        date: todayCairo,
+        quest_id: questId,
+        claimed_at: new Date().toISOString()
+      });
+      writeLocalDB(data);
+    }
+
+    invalidateDailyQuestsCache(userId);
+    invalidateUserRankCache(userId);
 
     return { success: true, pointsAwarded, totalPoints };
   }

@@ -2,23 +2,35 @@ export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifyPassword, hashPasswordSecure, generateSessionToken, parseDeviceMetadata } from '@/lib/auth_helpers';
-import { checkRateLimit, getClientIp } from '@/lib/rate_limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate_limiter';
 
 export async function POST(req: NextRequest) {
   try {
     const ip = getClientIp(req);
-    const rateLimit = checkRateLimit(`login_${ip}`, 5, 60);
-    if (!rateLimit.allowed) {
+    const body = await req.json();
+    const { email, password, device_id, browser_fingerprint, platform: clientPlatform, is_pwa } = body;
+
+    const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+
+    // 1. Per-Account rate limit: Max 5 login attempts per minute per email
+    if (cleanEmail) {
+      const emailRateLimit = await checkRateLimitAsync(`login_email_${cleanEmail}`, 5, 60);
+      if (!emailRateLimit.allowed) {
+        return NextResponse.json(
+          { error: `تم تجاوز الحد المسموح من محاولات الدخول لهذا الحساب. يرجى المحاولة بعد ${emailRateLimit.resetSeconds} ثانية.` },
+          { status: 429 }
+        );
+      }
+    }
+
+    // 2. Network IP rate limit: Max 60 login attempts per minute per IP
+    const ipRateLimit = await checkRateLimitAsync(`login_ip_${ip}`, 60, 60);
+    if (!ipRateLimit.allowed) {
       return NextResponse.json(
-        { error: `تم تجاوز الحد المسموح من محاولات الدخول. يرجى المحاولة بعد ${rateLimit.resetSeconds} ثانية.` },
+        { error: `تم تجاوز الحد المسموح من محاولات الدخول من هذه الشبكة. يرجى المحاولة بعد ${ipRateLimit.resetSeconds} ثانية.` },
         { status: 429 }
       );
     }
-
-    const body = await req.json();
-    const { email, password, device_id, browser_fingerprint, platform: clientPlatform } = body;
-
-    const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
 
     if (!cleanEmail || !password) {
       return NextResponse.json(
@@ -73,6 +85,11 @@ export async function POST(req: NextRequest) {
       deviceName
     });
 
+    if (is_pwa || req.headers.get('x-is-pwa') === 'true') {
+      const pwaPlat = /iPhone|iPad|iPod/i.test(userAgent) ? 'ios' : /Android/i.test(userAgent) ? 'android' : 'desktop';
+      await db.recordPwaInstall(profile.id, pwaPlat);
+    }
+
     return NextResponse.json({
       success: true,
       token,
@@ -92,16 +109,22 @@ export async function POST(req: NextRequest) {
         subscription_end_date: profile.subscription_end_date,
         subscription_plan_id: profile.subscription_plan_id,
         role: profile.role,
-        coins: profile.coins === undefined ? 15.0 : profile.coins,
+        coins: profile.coins === undefined ? 20.0 : profile.coins,
         points: profile.points || 0,
-        study_streak: profile.study_streak || 1
+        study_streak: profile.study_streak || 1,
+        welcome_reward_claimed: !!profile.welcome_reward_claimed,
+        free_plan_claimed: !!profile.free_plan_claimed,
+        apology_compensation_claimed: !!profile.apology_compensation_claimed,
+        apology_dismissed: !!profile.apology_dismissed,
+        created_at: profile.created_at,
+        improve_ai_opt_in: profile.improve_ai_opt_in !== undefined ? profile.improve_ai_opt_in : true
       }
     });
 
   } catch (error: any) {
     console.error('Login API Error:', error);
     return NextResponse.json(
-      { error: 'حدث خطأ أثناء تسجيل الدخول.' },
+      { error: error?.message || 'حدث خطأ أثناء تسجيل الدخول.' },
       { status: 500 }
     );
   }

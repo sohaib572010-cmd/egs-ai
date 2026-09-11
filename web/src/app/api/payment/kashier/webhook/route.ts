@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import { verifyKashierWebhookSignature } from '@/lib/kashier';
+import { verifyKashierWebhookSignature, isKashierSuccessStatus } from '@/lib/kashier';
 
 export async function POST(req: NextRequest) {
   try {
@@ -32,13 +32,13 @@ export async function POST(req: NextRequest) {
     const orderId = data.merchantOrderId || data.orderId || data.order_id || body.merchantOrderId || body.orderId;
     const paymentStatus = (data.status || data.paymentStatus || body.status || body.paymentStatus || '').toUpperCase();
     const transactionId = data.kashierOrderReference || data.transactionId || data.reference || body.transactionId || null;
-    const paymentMethod = data.method || data.paymentMethod || body.method || null;
+    const paymentMethod = data.cardBrand || data.method || data.paymentMethod || body.cardBrand || body.method || null;
 
     if (!orderId) {
       return NextResponse.json({ error: 'Missing order ID' }, { status: 400 });
     }
 
-    const isSuccess = paymentStatus === 'SUCCESS' || paymentStatus === 'CAPTURED' || paymentStatus === 'APPROVED' || paymentStatus === 'PAID';
+    const isSuccess = isKashierSuccessStatus(paymentStatus);
 
     const transaction = await db.getPaymentTransactionByOrderId(orderId);
     if (transaction) {

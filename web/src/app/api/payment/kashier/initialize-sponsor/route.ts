@@ -17,9 +17,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Check if student already has an active, unexpired subscription
-    const isSubscribed = profile.subscription_status === 'active' &&
-      profile.plan_type &&
-      profile.plan_type !== 'free' &&
+    const isSubscribed = (profile.subscription_status === 'active' || (profile.plan_type && profile.plan_type !== 'free')) &&
       (!profile.subscription_end_date || new Date(profile.subscription_end_date).getTime() > Date.now());
 
     if (isSubscribed) {
@@ -52,7 +50,7 @@ export async function POST(req: NextRequest) {
       provider: 'kashier'
     });
 
-    const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://egsaiedu.com';
+    const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || process.env.NEXT_PUBLIC_SITE_UR || 'https://egsaiedu.com').replace(/\/+$/, '');
     const merchantRedirect = `${siteUrl}/api/payment/kashier/callback`;
     const serverWebhook = `${siteUrl}/api/payment/kashier/webhook`;
 

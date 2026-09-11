@@ -40,6 +40,7 @@ import {
   ArrowRight,
   ArrowLeft,
   ArrowDown,
+  Camera,
   Image as ImageIcon,
   Mic,
   GraduationCap,
@@ -53,6 +54,7 @@ import {
   Flame,
   Coins,
   Award,
+  Gift,
   Edit2,
   Trash2,
   PlusCircle,
@@ -76,6 +78,7 @@ import {
   Languages,
   Compass,
   Clock,
+  History,
   Crown,
   Calendar,
   Download,
@@ -98,9 +101,17 @@ import {
   CheckSquare,
   Square,
   BarChart3,
-  FileCheck
+  FileCheck,
+  Activity,
+  Lightbulb,
+  Cpu,
+  MessageSquareText,
+  ToggleLeft,
+  ToggleRight
 } from 'lucide-react';
 import AppTour, { TourScreen } from '@/components/AppTour';
+import { isEnglishSubject, isEnglishText } from '@/lib/subject_helpers';
+import { DEFAULT_STATIC_CURRICULUMS, DEFAULT_DAILY_QUESTS, DEFAULT_DAILY_QUESTS_DATA } from '@/lib/default_curriculums';
 
 interface SearchStep {
   step: string;
@@ -109,6 +120,8 @@ interface SearchStep {
 }
 
 interface ChatMessage {
+  id?: string;
+  session_id?: string;
   sender: 'user' | 'ai';
   message: string;
   created_at?: string;
@@ -117,6 +130,7 @@ interface ChatMessage {
   duration?: number;
   hasError?: boolean;
   searchSteps?: SearchStep[]; // v2 RAG search steps for display
+  isStreaming?: boolean;
 }
 
 
@@ -315,83 +329,366 @@ const ThoughtBlock = ({
   duration?: number; 
   isThinking?: boolean; 
 }) => {
-  const [expanded, setExpanded] = useState(isThinking || false);
-
-  useEffect(() => {
-    if (isThinking) setExpanded(true);
-  }, [isThinking]);
+  const [expanded, setExpanded] = useState(false);
 
   if (!thought && !isThinking) return null;
 
   return (
-    <div className="thought-block">
-      <button
-        type="button"
-        onClick={() => setExpanded(!expanded)}
-        className="thought-toggle-btn"
+    <div
+      className="thought-block"
+      style={{
+        background: 'var(--sidebar-bg)',
+        border: '1px solid var(--border-color)',
+        borderRadius: '14px',
+        padding: '10px 14px',
+        marginBottom: '10px',
+        fontSize: '0.82rem',
+        color: 'var(--text-secondary)',
+        direction: 'rtl',
+        overflow: 'hidden',
+        transition: 'all 0.3s ease',
+        width: '100%'
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          cursor: 'pointer',
+          marginBottom: expanded && thought ? '8px' : 0,
+          userSelect: 'none'
+        }}
+        onClick={() => setExpanded(e => !e)}
       >
-        <Brain size={16} className={isThinking ? 'animate-spin' : ''} style={{ color: 'var(--primary-color)' }} />
-        <span>
-          {isThinking 
-            ? `جارٍ التفكير (${duration || 0} ثانية)...` 
-            : `فكّر لمدة ${duration || 1} ثانية`}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--primary-color)' }}>
+            <Brain size={16} className={isThinking ? 'animate-spin' : ''} />
+          </span>
+          <span style={{ fontWeight: 700, color: 'var(--primary-color)', fontSize: '0.8rem' }}>
+            {isThinking 
+              ? `جارٍ التفكير والتحليل (${duration || 0} ثانية)...` 
+              : `خطوات التفكير الذكي (${duration || 1} ثانية)`}
+          </span>
+        </div>
+        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none' }}>
+          <span>{expanded ? 'إخفاء' : 'عرض'}</span>
+          <ChevronRight size={15} style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }} />
         </span>
-        <ChevronRight size={15} style={{ 
-          transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)',
-          transition: 'transform 0.22s ease',
-        }} />
-      </button>
+      </div>
       
-      {expanded && thought && (
-        <div className="thought-content">{thought}</div>
+      {expanded && (
+        <div
+          className="thought-content"
+          style={{
+            margin: 0,
+            padding: '10px 12px',
+            borderTop: '1px solid var(--border-color)',
+            borderRight: 'none',
+            color: 'var(--text-secondary)',
+            fontSize: '0.82rem',
+            lineHeight: '1.65',
+            whiteSpace: 'pre-wrap',
+            textAlign: 'right',
+            direction: 'rtl',
+            background: 'transparent',
+            borderRadius: 0,
+            fontStyle: thought ? 'normal' : 'italic',
+            opacity: thought ? 1 : 0.8
+          }}
+        >
+          {thought || 'جارٍ توليد وتحليل خطوات التفكير...'}
+        </div>
       )}
     </div>
   );
 };
 
-  // Clean and normalize LaTeX formulas
-  const cleanFormula = (raw: string): string => {
+const RenewalCountdownDisplay = React.memo(({ targetIso }: { targetIso?: string }) => {
+  const [countdown, setCountdown] = useState<string>('00:00:00');
+
+  useEffect(() => {
+    const update = () => {
+      if (targetIso) {
+        const diffMs = new Date(targetIso).getTime() - Date.now();
+        if (diffMs > 0) {
+          const totalSec = Math.floor(diffMs / 1000);
+          const h = Math.floor(totalSec / 3600);
+          const m = Math.floor((totalSec % 3600) / 60);
+          const s = totalSec % 60;
+          setCountdown(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+          return;
+        }
+      }
+      const now = new Date();
+      const nextUtcMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
+      const diff = Math.max(0, Math.floor((nextUtcMidnight.getTime() - now.getTime()) / 1000));
+      const hours = Math.floor(diff / 3600);
+      const mins = Math.floor((diff % 3600) / 60);
+      const secs = diff % 60;
+      setCountdown(`${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+    };
+
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [targetIso]);
+
+  return <>{countdown}</>;
+});
+RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
+
+  // Clean and normalize LaTeX formulas, Unicode superscripts, operators, and Arabic curriculum symbols
+  const cleanFormula = (raw: string, isEnglish: boolean = false): string => {
     if (!raw) return '';
     let f = raw.trim();
-    if ((f.startsWith('\\[') && f.endsWith('\\]')) || (f.startsWith('$$') && f.endsWith('$$'))) {
-      f = f.slice(2, -2).trim();
-    } else if (f.startsWith('\\(') && f.endsWith('\\)')) {
-      f = f.slice(2, -2).trim();
-    } else if (f.startsWith('$') && f.endsWith('$') && f.length > 2) {
-      f = f.slice(1, -1).trim();
+
+    // 1. Strip delimiters and stray dollar signs / escaped brackets
+    f = f.replace(/\\?\$+/g, ' ').replace(/\\[\[\]\(\)]/g, ' ');
+    // Strip leaked markdown bold / strikethrough tokens
+    f = f.replace(/\*\*/g, '').replace(/~~/g, '');
+
+    // 2. Normalize combinations and permutations from legacy forms
+    f = f.replace(/(?:\{\s*\}|\{)?\s*\^\{?(?:\\text\{)?([٠-٩0-9\u0600-\u06FF]+)\}?\}?\s*\\text\{(ق|ل)\}_\{?(?:\\text\{)?([٠-٩0-9\u0600-\u06FF]+)\}?\}?/g,
+      (m, n, op, r) => `${n} \\text{ ${op} } ${r}`
+    );
+
+    // 3. Fix AI Latin letter 'V' or 'v' erroneously used for Arabic digit '٧'
+    f = f.replace(/\\text\{\s*([Vv])\s*\}/g, '\\text{٧}')
+         .replace(/\b([Vv])\s*(?=\\text\{\s*ق\s*\})/g, '٧ ')
+         .replace(/(?<=\\text\{\s*ق\s*\}\s*)([Vv])\b/g, ' ٧');
+
+    // 4. Fix malformed binomial term double exponents (e.g. \text{أ}^\text{ب3}^\text{2})
+    f = f.replace(/(?:\\text\{([^\}]+)\}|([أ-ي]))\s*\^\s*(?:\\text\{)?([أ-ي])\s*([٠-٩0-9]+)\}?\s*\^\s*(?:\\text\{)?([٠-٩0-9]+)\}?/g,
+      '\\text{$1$2}^{\\text{$5}}\\,\\text{$3}^{\\text{$4}}'
+    );
+    f = f.replace(/(?:\\text\{([^\}]+)\}|([أ-ي]))\s*\^\s*(?:\\text\{)?([أ-ي])\s*([٠-٩0-9]+)\}?/g,
+      '\\text{$1$2}^{\\text{$4}}\\,\\text{$3}'
+    );
+
+    // 5. Ensure all superscripts and subscripts are enclosed in braces
+    f = f.replace(/\^\s*(\\text\{[^\}]*\})/g, '^{$1}')
+         .replace(/\_\s*(\\text\{[^\}]*\})/g, '_{$1}');
+
+    const cleanForCheck = f.replace(/\\(?:text|mathrm|mathbf|mathit|degree|celsius|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi|frac|sqrt|times|div|pm|approx|le|ge|neq|sum|int|lim|to|leftarrow|rightarrow|Rightarrow|Leftarrow)\b/g, '');
+
+    const hasArabicSymbols = /[\u0600-\u06FF]/.test(cleanForCheck);
+    const hasLatinVariables = /[a-zA-Z]/.test(cleanForCheck);
+    const isArabicFormula = hasArabicSymbols && !hasLatinVariables;
+
+    // 6. Normalize Unicode superscripts to standard LaTeX ^{...}
+    const SUPERSCRIPT_MAP: Record<string, string> = {
+      '⁰': isArabicFormula ? '٠' : '0',
+      '¹': isArabicFormula ? '١' : '1',
+      '²': isArabicFormula ? '٢' : '2',
+      '³': isArabicFormula ? '٣' : '3',
+      '⁴': isArabicFormula ? '٤' : '4',
+      '⁵': isArabicFormula ? '٥' : '5',
+      '⁶': isArabicFormula ? '٦' : '6',
+      '⁷': isArabicFormula ? '٧' : '7',
+      '⁸': isArabicFormula ? '٨' : '8',
+      '⁹': isArabicFormula ? '٩' : '9',
+      '⁺': '+', '⁻': '-'
+    };
+    f = f.replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻]+/g, (match) => {
+      const inner = match.split('').map(c => SUPERSCRIPT_MAP[c] || c).join('');
+      return `^{${inner}}`;
+    });
+
+    // 7. Normalize Unicode operators to LaTeX
+    f = f.replace(/×/g, ' \\times ')
+         .replace(/÷/g, ' \\div ')
+         .replace(/−/g, '-')
+         .replace(/·/g, ' \\cdot ')
+         .replace(/≤/g, ' \\le ')
+         .replace(/≥/g, ' \\ge ')
+         .replace(/≠/g, ' \\neq ')
+         .replace(/≈/g, ' \\approx ')
+         .replace(/±/g, ' \\pm ')
+         .replace(/∞/g, ' \\infty ');
+
+    // 8. In Arabic formulas (with Arabic variables and NO Latin variables), normalize standalone Western digits into Arabic numerals
+    if (isArabicFormula) {
+      const ARABIC_DIGIT_CONV = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+      f = f.replace(/(?<![\\A-Za-z_])\b([0-9]+)\b(?![A-Za-z_])/g, (match) => {
+        return match.replace(/[0-9]/g, d => ARABIC_DIGIT_CONV[+d]);
+      });
     }
+
+    // 9. Wrap bare Arabic variables, words, and Arabic digits in \text{...} so KaTeX applies Arabic font & BiDi isolation
+    if (hasArabicSymbols) {
+      f = f.replace(/\\(?:text|mathrm|mathbf|mathit)\{[^\}]*\}|([\u0600-\u06FF]+)/g, (match, arabic) => {
+        if (arabic) {
+          return `\\text{${arabic}}`;
+        }
+        return match;
+      });
+    }
+
+    // 10. Guarantee all newly created \text{...} in exponents are enclosed in braces
+    f = f.replace(/\^\s*(\\text\{[^\}]*\})/g, '^{$1}')
+         .replace(/\_\s*(\\text\{[^\}]*\})/g, '_{$1}')
+         .replace(/\^\s*([٠-٩\u0600-\u06FF])/g, '^{$1}')
+         .replace(/\_\s*([٠-٩\u0600-\u06FF])/g, '_{$1}');
+
+    // 11. Fix consecutive double superscripts on the same base without matching across operations
+    f = f.replace(/\^(\{[^{}\s\+\-\*=,]+\}|[^\s\{\}\+\-\*=,]+)\s*\^(\{[^{}\s\+\-\*=,]+\}|[^\s\{\}\+\-\*=,]+)/g, '^{$1}\\,^{$2}');
+
     f = f.replace(/\\\s*$/, '');
     f = f.replace(/\\(approx|times|pm|div|le|ge|leq|geq|neq|sim|simeq|equiv|to|leftarrow|rightarrow|Rightarrow|Leftarrow)\\(frac|sqrt|text|mathbf|mathit|mathrm|sum|int|lim)/g, '\\$1 \\$2');
-    return f;
+    return f.replace(/\s+/g, ' ').trim();
+  };
+
+  // GeneratingElementCard: Displays animated Arabic placeholder while structured elements (quizzes, SVG, formulas, cards) stream
+  const GeneratingElementCard = ({
+    type,
+    label
+  }: {
+    type: 'interactive_question' | 'quiz' | 'illustration' | 'flashcards' | 'symbols' | 'lesson_nav';
+    label?: string;
+  }) => {
+    const getDetails = () => {
+      switch (type) {
+        case 'interactive_question':
+          return {
+            text: label || 'جاري إعداد السؤال التفاعلي...',
+            icon: <HelpCircle size={18} />,
+            badge: 'سؤال تفاعلي',
+            className: 'interactive_question'
+          };
+        case 'quiz':
+          return {
+            text: label || 'جاري توليد الاختبار...',
+            icon: <GraduationCap size={18} />,
+            badge: 'اختبار تدريبي',
+            className: 'quiz'
+          };
+        case 'illustration':
+          return {
+            text: label || 'جاري إنشاء الرسم التوضيحي...',
+            icon: <ImageIcon size={18} />,
+            badge: 'رسم توضيحي',
+            className: 'illustration'
+          };
+        case 'flashcards':
+          return {
+            text: label || 'جاري إنشاء كروت الاستذكار...',
+            icon: <Layers size={18} />,
+            badge: 'بطاقات ذكية',
+            className: 'flashcards'
+          };
+        case 'symbols':
+          return {
+            text: label || 'جاري كتابة الرموز والمعادلات...',
+            icon: <Calculator size={18} />,
+            badge: 'صيغة رياضية',
+            className: 'symbols'
+          };
+        case 'lesson_nav':
+          return {
+            text: label || 'جاري تنظيم خطة الدرس...',
+            icon: <BookOpen size={18} />,
+            badge: 'خطة الدرس',
+            className: 'lesson_nav'
+          };
+        default:
+          return {
+            text: label || 'جاري التوليد...',
+            icon: <Sparkles size={18} />,
+            badge: 'معالجة ذكية',
+            className: ''
+          };
+      }
+    };
+
+    const details = getDetails();
+
+    return (
+      <div className={`generating-element-card animate-fade-in ${details.className}`}>
+        <div className="generating-element-icon-box">
+          {details.icon}
+        </div>
+        <div className="generating-element-text-wrap">
+          <span className="generating-element-title">
+            {details.text}
+          </span>
+          <div className="generating-element-status">
+            <span>{details.badge}</span>
+            <Loader2 size={14} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+          </div>
+        </div>
+      </div>
+    );
   };
 
   // MathRenderer: Renders LaTeX equations inline or block using bundled KaTeX (synchronous, no CDN load-race)
-  const MathRenderer = ({ formula, block = false }: { formula: string; block?: boolean }) => {
-    const cleaned = React.useMemo(() => cleanFormula(formula), [formula]);
+  const MathRenderer = ({ formula, block = false, isStreaming = false, isEnglish = false }: { formula: string; block?: boolean; isStreaming?: boolean; isEnglish?: boolean }) => {
+    const cleaned = React.useMemo(() => cleanFormula(formula, isEnglish), [formula, isEnglish]);
+    const cleanForDir = (formula || '').replace(/\\(?:text|mathrm|mathbf|mathit|degree|celsius|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi|frac|sqrt|times|div|pm|approx|le|ge|neq|sum|int|lim|to|leftarrow|rightarrow|Rightarrow|Leftarrow)\b/g, '');
+    const hasArabic = /[\u0600-\u06FF]/.test(cleanForDir);
+    const hasLatin = /[a-zA-Z]/.test(cleanForDir);
+    const isArabicFormula = hasArabic && !hasLatin;
+    const mathDir = isArabicFormula ? 'rtl' : 'ltr';
 
     const html = React.useMemo(() => {
       if (!cleaned) return '';
+      const macros = {
+        '\\RR': '\\mathbb{R}',
+        '\\NN': '\\mathbb{N}',
+        '\\ZZ': '\\mathbb{Z}',
+        '\\QQ': '\\mathbb{Q}',
+        '\\CC': '\\mathbb{C}',
+        '\\degree': '^\\circ',
+        '\\degreeC': '^\\circ\\text{C}',
+        '\\celsius': '^\\circ\\text{C}',
+        '\\ohm': '\\Omega',
+        '\\micro': '\\mu',
+        '\\ga': '\\text{جا}',
+        '\\gta': '\\text{جتا}',
+        '\\za': '\\text{ظا}',
+        '\\zota': '\\text{ظتا}',
+        '\\qaf': '\\text{ق}',
+        '\\lam': '\\text{ل}',
+        '\\naha': '\\text{نها}',
+        '\\logar': '\\text{لو}',
+        '\\defe': '\\text{د}',
+        '\\had': '\\text{ح}',
+      };
+
       try {
-        return katex.renderToString(cleaned, {
+        const res = katex.renderToString(cleaned, {
           displayMode: block,
-          throwOnError: false,
+          throwOnError: false, // Per PRD Section 3: graceful fallback without raw code dumps
           strict: false,
-          // trust: false (default) — security: AI LaTeX output blocks \includegraphics/\href/etc.
-          macros: {
-            '\\RR': '\\mathbb{R}',
-            '\\NN': '\\mathbb{N}',
-            '\\ZZ': '\\mathbb{Z}',
-            '\\QQ': '\\mathbb{Q}',
-            '\\CC': '\\mathbb{C}',
-            '\\degree': '^\\circ',
-            '\\degreeC': '^\\circ\\text{C}',
-            '\\celsius': '^\\circ\\text{C}',
-            '\\ohm': '\\Omega',
-            '\\micro': '\\mu',
-          },
+          trust: false, // security: AI LaTeX output blocks \includegraphics/\href/etc.
+          macros,
         });
+
+        if (res.includes('class="katex-error"')) {
+          // Attempt a secondary repair pass: unwrap bare \text and clean syntax
+          const repaired = cleaned
+            .replace(/\\text\{\s*([^{}]+)\s*\}/g, '$1')
+            .replace(/\\(?:text|mathrm|mathbf|mathit)\b/g, '')
+            .replace(/[\{\}]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (repaired && repaired !== cleaned) {
+            const retry = katex.renderToString(repaired, {
+              displayMode: block,
+              throwOnError: false,
+              strict: false,
+              trust: false,
+              macros,
+            });
+            if (!retry.includes('class="katex-error"')) {
+              return retry;
+            }
+          }
+          return ''; // Drop to clean fallbackText to prevent raw inverted code dumps
+        }
+
+        return res;
       } catch (e) {
-        console.error('KaTeX error:', e);
         return '';
       }
     }, [cleaned, block]);
@@ -401,7 +698,7 @@ const ThoughtBlock = ({
         return (
           <div
             className="math-block animate-fade-in"
-            dir="ltr"
+            dir={mathDir}
             dangerouslySetInnerHTML={{ __html: html }}
           />
         );
@@ -409,19 +706,40 @@ const ThoughtBlock = ({
       return (
         <span
           className="math-inline"
-          dir="ltr"
+          dir={mathDir}
           dangerouslySetInnerHTML={{ __html: html }}
         />
       );
     }
 
+    if (isStreaming) {
+      if (block) {
+        return <GeneratingElementCard type="symbols" label="جاري كتابة الرموز والمعادلات..." />;
+      }
+      return (
+        <span className="math-inline" dir="rtl" style={{ opacity: 0.8, display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+          <Loader2 size={12} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+          <span style={{ fontSize: '0.82em', color: 'var(--text-muted)' }}>جاري إعداد الرمز...</span>
+        </span>
+      );
+    }
+
+    // Graceful fallback for unparseable strings: unwrap bare \text{...} so raw LaTeX syntax never leaks
+    const fallbackText = cleaned
+      .replace(/\\text\{([^}]+)\}/g, '$1')
+      .replace(/\\(?:frac|sqrt|times|div|pm|approx|le|ge|neq|cdot|sum|int|lim)\b/g, ' ')
+      .replace(/[{}]/g, '')
+      .replace(/\\[a-zA-Z]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
     return block ? (
-      <div className="math-block" dir="ltr">
-        {cleaned}
+      <div className="math-block" dir={mathDir}>
+        {fallbackText}
       </div>
     ) : (
-      <code className="math-inline" dir="ltr">
-        {cleaned}
+      <code className="math-inline" dir={mathDir}>
+        {fallbackText}
       </code>
     );
   };
@@ -474,11 +792,17 @@ const ThoughtBlock = ({
     );
   };
 
+  const formatArabicNumerals = (rawText: string, _isEnglish?: boolean): string => {
+    return rawText;
+  };
+
   // parseInlineText: parses bold, italic, code, links, and math delimiters inline
-  const parseInlineText = (text: string): React.ReactNode[] => {
+  const parseInlineText = (text: string, depth: number = 0): React.ReactNode[] => {
     if (!text) return [];
 
-    const regex = /(\\\([\s\S]*?\\\))|(\\\[[\s\S]*?\\\])|(\$\$[\s\S]*?\$\$)|(\$(?!\s)(?:[^\$\n\\]|\\.)+?(?<!\s)\$)|(\*\*\*[^*]+?\*\*\*|___[^_]+?___)|(\*\*[^*]+?\*\*|__[^_]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(~~[^~\n]+?~~)|(`[^`\n]+?`)|(\[[^\]\n]+\]\(https?:\/\/[^\s\)]+\))/g;
+    const isEng = isEnglishText(text);
+
+    const regex = /(\\\[[\s\S]*?\\\])|(\\\([\s\S]*?\\\))|(\$\$[\s\S]*?\$\$)|(\$(?:[^\$]|\\.)+?\$)|(\*\*\*[^*]+?\*\*\*|___[^_]+?___)|(\*\*[^*]+?\*\*|__[^_]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(~~[^~\n]+?~~)|(`[^`\n]+?`)|(\[[^\]\n]+\]\(https?:\/\/[^\s\)]+\))|(\\(?:text|mathbf|mathrm|frac|sqrt|xrightarrow|times|div|pm|approx|le|ge|neq|sum|int|lim|sin|cos|tan|cot|sec|csc|log|ln|to|rightarrow|leftarrow|Rightarrow|Leftarrow|cdot|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi)\b(?:\{[^{}\n]*\}|[^\$\s،,\)]+)*)/g;
 
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
@@ -486,39 +810,44 @@ const ThoughtBlock = ({
 
     while ((match = regex.exec(text)) !== null) {
       if (match.index > lastIndex) {
-        parts.push(text.substring(lastIndex, match.index));
+        parts.push(formatArabicNumerals(text.substring(lastIndex, match.index), isEng));
       }
 
       const matched = match[0];
       const key = `${match.index}-${lastIndex}`;
 
       if (match[1]) {
-        // Inline math \( ... \)
-        parts.push(<MathRenderer key={`mi-${key}`} formula={matched.slice(2, -2)} block={false} />);
+        // Block math \[ ... \]
+        parts.push(<MathRenderer key={`mb-${key}`} formula={matched.slice(2, -2)} block={true} isEnglish={isEng} />);
       } else if (match[2]) {
-        // Block math \[ ... \] (embedded inline)
-        parts.push(<MathRenderer key={`mb-${key}`} formula={matched.slice(2, -2)} block={true} />);
+        // Inline math \( ... \)
+        parts.push(<MathRenderer key={`mi-${key}`} formula={matched.slice(2, -2)} block={false} isEnglish={isEng} />);
       } else if (match[3]) {
-        // Block math $$ ... $$ (embedded inline)
-        parts.push(<MathRenderer key={`mb-${key}`} formula={matched.slice(2, -2)} block={true} />);
+        // Block math $$ ... $$
+        parts.push(<MathRenderer key={`mb-${key}`} formula={matched.slice(2, -2)} block={true} isEnglish={isEng} />);
       } else if (match[4]) {
         // Inline math $ ... $
-        parts.push(<MathRenderer key={`mi-${key}`} formula={matched.slice(1, -1)} block={false} />);
+        parts.push(<MathRenderer key={`mi-${key}`} formula={matched.slice(1, -1)} block={false} isEnglish={isEng} />);
       } else if (match[5]) {
         // Bold + Italic *** ... *** or ___ ... ___
         const content = matched.startsWith('***') ? matched.slice(3, -3) : matched.slice(3, -3);
-        parts.push(<strong key={`bi-${key}`} style={{ fontWeight: 800 }}><em>{content}</em></strong>);
+        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
+        parts.push(<strong key={`bi-${key}`} style={{ fontWeight: 800 }}><em>{children}</em></strong>);
       } else if (match[6]) {
         // Bold ** ... ** or __ ... __
         const content = matched.startsWith('**') ? matched.slice(2, -2) : matched.slice(2, -2);
-        parts.push(<strong key={`b-${key}`} style={{ fontWeight: 800 }}>{content}</strong>);
+        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
+        parts.push(<strong key={`b-${key}`} style={{ fontWeight: 800 }}>{children}</strong>);
       } else if (match[7]) {
         // Italic * ... * or _ ... _
         const content = matched.startsWith('*') ? matched.slice(1, -1) : matched.slice(1, -1);
-        parts.push(<em key={`i-${key}`}>{content}</em>);
+        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
+        parts.push(<em key={`i-${key}`}>{children}</em>);
       } else if (match[8]) {
         // Strikethrough ~~ ... ~~
-        parts.push(<del key={`del-${key}`}>{matched.slice(2, -2)}</del>);
+        const content = matched.slice(2, -2);
+        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
+        parts.push(<del key={`del-${key}`}>{children}</del>);
       } else if (match[9]) {
         // Inline code ` ... `
         parts.push(<code key={`c-${key}`}>{matched.slice(1, -1)}</code>);
@@ -526,6 +855,7 @@ const ThoughtBlock = ({
         // Link [text](url)
         const linkMatch = matched.match(/^\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)$/);
         if (linkMatch) {
+          const children = depth < 3 ? parseInlineText(linkMatch[1], depth + 1) : formatArabicNumerals(linkMatch[1], isEng);
           parts.push(
             <a
               key={`a-${key}`}
@@ -534,11 +864,19 @@ const ThoughtBlock = ({
               rel="noopener noreferrer"
               className="markdown-link"
             >
-              {linkMatch[1]}
+              {children}
             </a>
           );
         } else {
           parts.push(matched);
+        }
+      } else if (match[11]) {
+        // Bare LaTeX formula without delimiters (e.g. \frac{1}{2}, \sqrt{x})
+        if (matched.startsWith('\\text{') && matched.endsWith('}')) {
+          const innerText = matched.slice(6, -1);
+          parts.push(formatArabicNumerals(innerText, isEng));
+        } else {
+          parts.push(<MathRenderer key={`bare-${key}`} formula={matched} block={false} isEnglish={isEng} />);
         }
       }
 
@@ -546,14 +884,15 @@ const ThoughtBlock = ({
     }
 
     if (lastIndex < text.length) {
-      parts.push(text.substring(lastIndex));
+      parts.push(formatArabicNumerals(text.substring(lastIndex), isEng));
     }
 
     return parts;
   };
 
   // MarkdownMessage: Universal markdown & math parser (headers, blockquotes, lists, tables, code, LaTeX blocks)
-  const MarkdownMessage = ({ content }: { content: string }) => {
+  const MarkdownMessage = ({ content, isStreaming = false }: { content: string; isStreaming?: boolean }) => {
+    const isEng = isEnglishText(content);
     const lines = content.split('\n');
     const blocks: React.ReactNode[] = [];
     
@@ -577,14 +916,53 @@ const ThoughtBlock = ({
           codeLines.push(lines[idx]);
           idx++;
         }
-        if (idx < lines.length) idx++;
-        if (lang.toLowerCase() === 'svg') {
-          blocks.push(
-            <SvgDiagram key={`svg-${idx}`} svgContent={codeLines.join('\n')} />
-          );
+        const hasClosingFence = idx < lines.length && lines[idx].trim().startsWith('```');
+        if (hasClosingFence) idx++;
+
+        const isSvg = lang.toLowerCase() === 'svg' || 
+          codeLines.some(l => l.includes('<svg') || l.includes('</svg>')) || 
+          (lang.toLowerCase() === 'xml' && codeLines.some(l => l.includes('<svg')));
+
+        if (isSvg) {
+          const isSvgComplete = hasClosingFence && codeLines.join('\n').includes('</svg>');
+          if (isSvgComplete) {
+            blocks.push(
+              <SvgDiagram key={`svg-${idx}`} svgContent={codeLines.join('\n')} />
+            );
+          } else {
+            blocks.push(
+              <GeneratingElementCard key={`svg-gen-${idx}`} type="illustration" label="جاري إنشاء الرسم التوضيحي..." />
+            );
+          }
         } else {
           blocks.push(
             <CodeBlock key={`code-${idx}`} code={codeLines.join('\n')} language={lang} />
+          );
+        }
+        continue;
+      }
+
+      // Raw SVG tags (block or inline SVG without markdown fences)
+      if (trimmed.startsWith('<svg') || (trimmed.startsWith('<?xml') && trimmed.includes('<svg'))) {
+        let svgLines: string[] = [line];
+        let hasEndSvg = trimmed.includes('</svg>');
+        idx++;
+        while (idx < lines.length && !hasEndSvg) {
+          svgLines.push(lines[idx]);
+          if (lines[idx].includes('</svg>')) {
+            hasEndSvg = true;
+          }
+          idx++;
+        }
+        if (hasEndSvg) {
+          blocks.push(<SvgDiagram key={`rawsvg-${idx}`} svgContent={svgLines.join('\n')} />);
+        } else {
+          blocks.push(
+            <GeneratingElementCard
+              key={`rawsvg-gen-${idx}`}
+              type="illustration"
+              label="جاري إنشاء الرسم التوضيحي..."
+            />
           );
         }
         continue;
@@ -599,7 +977,7 @@ const ThoughtBlock = ({
         }
         blocks.push(
           <blockquote key={`quote-${idx}`} className="markdown-blockquote">
-            <MarkdownMessage content={quoteLines.join('\n')} />
+            <MarkdownMessage content={quoteLines.join('\n')} isStreaming={isStreaming} />
           </blockquote>
         );
         continue;
@@ -608,7 +986,7 @@ const ThoughtBlock = ({
       // 3. Block math $$ ... $$
       if (trimmed.startsWith('$$') && trimmed.endsWith('$$') && trimmed.length > 4) {
         const formula = trimmed.substring(2, trimmed.length - 2);
-        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={formula} block={true} />);
+        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={formula} block={true} isStreaming={isStreaming} isEnglish={isEng} />);
         idx++;
         continue;
       }
@@ -621,19 +999,22 @@ const ThoughtBlock = ({
           mathLines.push(lines[idx]);
           idx++;
         }
-        if (idx < lines.length) {
+        const hasClosing = idx < lines.length && lines[idx].trim().endsWith('$$');
+        if (hasClosing) {
           const endLine = lines[idx].trim().replace(/\$\$$/, '').trim();
           if (endLine) mathLines.push(endLine);
           idx++;
+          blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={mathLines.join('\n')} block={true} isStreaming={isStreaming} isEnglish={isEng} />);
+        } else {
+          blocks.push(<GeneratingElementCard key={`mathblock-gen-${idx}`} type="symbols" label="جاري كتابة الرموز والمعادلات..." />);
         }
-        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={mathLines.join('\n')} block={true} />);
         continue;
       }
 
       // 4. Block math \[ ... \]
       if (trimmed.startsWith('\\[') && trimmed.endsWith('\\]') && trimmed.length > 4) {
         const formula = trimmed.substring(2, trimmed.length - 2);
-        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={formula} block={true} />);
+        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={formula} block={true} isStreaming={isStreaming} isEnglish={isEng} />);
         idx++;
         continue;
       }
@@ -646,12 +1027,15 @@ const ThoughtBlock = ({
           mathLines.push(lines[idx]);
           idx++;
         }
-        if (idx < lines.length) {
+        const hasClosing = idx < lines.length && lines[idx].trim().endsWith('\\]');
+        if (hasClosing) {
           const endLine = lines[idx].trim().replace(/\\\]$/, '').trim();
           if (endLine) mathLines.push(endLine);
           idx++;
+          blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={mathLines.join('\n')} block={true} isStreaming={isStreaming} isEnglish={isEng} />);
+        } else {
+          blocks.push(<GeneratingElementCard key={`mathblock-gen-${idx}`} type="symbols" label="جاري كتابة الرموز والمعادلات..." />);
         }
-        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={mathLines.join('\n')} block={true} />);
         continue;
       }
 
@@ -661,6 +1045,7 @@ const ThoughtBlock = ({
         const env = beginMatch[1];
         const endPattern = `\\end{${env}}`;
         const envLines: string[] = [line];
+        let hasEnd = trimmed.includes(endPattern);
         idx++;
         while (idx < lines.length && !lines[idx].includes(endPattern)) {
           envLines.push(lines[idx]);
@@ -668,17 +1053,46 @@ const ThoughtBlock = ({
         }
         if (idx < lines.length) {
           envLines.push(lines[idx]);
+          hasEnd = true;
           idx++;
         }
-        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={envLines.join('\n')} block={true} />);
+        if (hasEnd) {
+          blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={envLines.join('\n')} block={true} isStreaming={isStreaming} isEnglish={isEng} />);
+        } else {
+          blocks.push(<GeneratingElementCard key={`mathenv-gen-${idx}`} type="symbols" label="جاري كتابة الرموز والمعادلات..." />);
+        }
         continue;
       }
 
-      // 6. Standalone math formula line (e.g. \frac{...}{...} without text prose)
-      const isStandaloneFormula = /^\s*(?:\\[a-zA-Z]+|\d|[=\+\-\*\/\(\)\{\}\^\._\s]|\\approx|\\times|\\div|\\pm|\\sqrt|\\frac)+\s*$/.test(trimmed) &&
+      // 6. Standalone math formula line (LaTeX or Arabic/Unicode math equations)
+      // Exclude lines containing markdown formatting (bold **, strikethrough ~~, links [)
+      // Note: single underscore _ is widely used in LaTeX subscripts (V_x, a_1), so only check for __bold__ or isolated _italic_
+      const hasMarkdownFormatting = /\*\*|~~|__|^\[/.test(trimmed) ||
+        /(?<![a-zA-Z0-9\\])_[^_\s][^_]*_(?![a-zA-Z0-9])/.test(trimmed) ||
+        /(?<!\S)\*[^*\n]+\*(?!\S)/.test(trimmed);
+
+      // Exclude lines containing inline math delimiters ($ or \() - these must be parsed inline!
+      const hasInlineDelimiters = /\$|\\\(/.test(trimmed);
+
+      // Exclude lines starting with prose/introductory words
+      const isProseIntro = /^(إذن|إذاً|وبالتالي|حيث|وحيث أن|بما أن|نلاحظ أن|نعوض في|نعوض|خطوة|أولاً|ثانياً|ثالثاً|رابعاً|خامساً|الشرح|ملحوظة|تنبيه|المعطيات|المطلوب|القانون|الحل|الناتج|الحد|معامل|قيمة|أي أن)\b/i.test(trimmed);
+
+      const isExistingLaTeXFormula = /^\s*(?:\\[a-zA-Z]+|[a-zA-Z0-9]|[=\+\-\*\/\(\)\{\}\^\._\s]|\\approx|\\times|\\div|\\pm|\\sqrt|\\frac)+\s*$/.test(trimmed) &&
         /\\(frac|sqrt|approx|times|pm|div|sum|int|cdot|alpha|beta|theta|pi)\b/.test(trimmed);
+      const hasMathRelation = /[=≈≡≤≥≠]/.test(trimmed) || /\\(approx|equiv|le|ge|neq|sim|to)\b/.test(trimmed);
+      const hasMathSymbols = /[⁰¹²³⁴⁵⁶⁷⁸⁹×÷\^]/.test(trimmed) || /\\(times|div|pm|frac|sqrt)\b/.test(trimmed);
+      const arabicLettersCount = (trimmed.match(/[ء-ي]{2,}/g) || []).length;
+      const hasMathOperands = /\d|[a-zA-Zسصعنرقأبج]/.test(trimmed);
+
+      const isStandaloneFormula = !hasMarkdownFormatting && !hasInlineDelimiters && !isProseIntro && (
+        isExistingLaTeXFormula || (
+          arabicLettersCount === 0 &&
+          (hasMathRelation || hasMathSymbols) &&
+          hasMathOperands
+        )
+      );
       if (isStandaloneFormula) {
-        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={trimmed} block={true} />);
+        blocks.push(<MathRenderer key={`mathblock-${idx}`} formula={trimmed} block={true} isStreaming={isStreaming} isEnglish={isEng} />);
         idx++;
         continue;
       }
@@ -765,12 +1179,12 @@ const ThoughtBlock = ({
 
       // 10. Lists & Task Lists
       const isUl = trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('+ ');
-      const isOl = /^\d+\.\s/.test(trimmed);
+      const isOl = /^(?:\d+|[٠-٩]+)\.\s/.test(trimmed);
 
       if (isUl || isOl) {
         const isCurrentListType = (l: string) => isUl
           ? (l.trim().startsWith('- ') || l.trim().startsWith('* ') || l.trim().startsWith('+ '))
-          : /^\d+\.\s/.test(l.trim());
+          : /^(?:\d+|[٠-٩]+)\.\s/.test(l.trim());
 
         const listItems: { text: string; isTask: boolean; isChecked: boolean }[] = [];
 
@@ -779,7 +1193,7 @@ const ThoughtBlock = ({
           if (isUl) {
             itemText = itemText.substring(2);
           } else {
-            itemText = itemText.replace(/^\d+\.\s/, '');
+            itemText = itemText.replace(/^(?:\d+|[٠-٩]+)\.\s/, '');
           }
 
           let isTask = false;
@@ -818,8 +1232,9 @@ const ThoughtBlock = ({
             </ul>
           );
         } else {
+          const isArabicList = !isEnglishText(listItems.map(i => i.text).join(' '));
           blocks.push(
-            <ol key={`ol-${idx}`} style={{ marginRight: '1.5rem', marginBottom: '0.8rem', listStyleType: 'decimal' }}>
+            <ol key={`ol-${idx}`} style={{ marginRight: '1.5rem', marginBottom: '0.8rem', listStyleType: isArabicList ? 'arabic-indic' : 'decimal' }}>
               {listItems.map((item, lIdx) => (
                 <li key={lIdx} style={{ marginBottom: '0.4rem' }}>{parseInlineText(item.text)}</li>
               ))}
@@ -841,6 +1256,16 @@ const ThoughtBlock = ({
     return <div className="markdown-body">{blocks}</div>;
   };
 
+  // renderFormattedMath: Intelligently renders rich text containing LaTeX formulas, Markdown, or raw KaTeX expressions
+  const renderFormattedMath = (text: string | null | undefined): React.ReactNode => {
+    if (!text) return null;
+    const str = String(text);
+    if (str.includes('\n') || str.includes('$$') || str.includes('\\[') || str.startsWith('#') || str.startsWith('- ') || str.startsWith('>')) {
+      return <MarkdownMessage content={str} />;
+    }
+    return <>{parseInlineText(str)}</>;
+  };
+
   // Interactive Quiz Card Component
   const InteractiveQuizCard = ({ 
     quiz, 
@@ -855,6 +1280,8 @@ const ThoughtBlock = ({
     const [essayAnswer, setEssayAnswer] = useState('');
     const [submitted, setSubmitted] = useState(false);
     const [tfAnswer, setTfAnswer] = useState<boolean | null>(null);
+
+    const isEnglishQuiz = isEnglishText(quiz?.question);
 
     const isCorrect = () => {
       if (quiz.type === 'multiple_choice') {
@@ -882,19 +1309,23 @@ const ThoughtBlock = ({
         borderRadius: '16px',
         padding: '18px',
         margin: '12px 0',
-        direction: 'rtl',
+        direction: isEnglishQuiz ? 'ltr' : 'rtl',
         boxShadow: 'var(--shadow-sm)',
         maxWidth: '500px',
         width: '100%',
         color: 'var(--text-main)',
-        textAlign: 'right'
+        textAlign: isEnglishQuiz ? 'left' : 'right'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
           <FileText size={16} style={{ color: 'var(--primary-color)' }} />
-          <span style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--primary-color)' }}>اختبر فهمك مع EGS AI:</span>
+          <span style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--primary-color)' }}>
+            {isEnglishQuiz ? 'Test your understanding with EGS AI:' : 'اختبر فهمك مع EGS AI:'}
+          </span>
         </div>
         
-        <p style={{ fontWeight: 700, fontSize: '0.98rem', marginBottom: '16px', lineHeight: '1.5' }}>{quiz.question}</p>
+        <div style={{ fontWeight: 700, fontSize: '0.98rem', marginBottom: '16px', lineHeight: '1.5' }}>
+          {renderFormattedMath(quiz.question)}
+        </div>
 
         {quiz.type === 'multiple_choice' && quiz.options && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -906,7 +1337,7 @@ const ThoughtBlock = ({
                 border: '1.5px solid var(--border-color)',
                 background: 'var(--card-bg)',
                 color: 'var(--text-main)',
-                textAlign: 'right',
+                textAlign: isEnglishQuiz ? 'left' : 'right',
                 cursor: 'pointer',
                 fontWeight: 600,
                 fontSize: '0.88rem',
@@ -942,7 +1373,10 @@ const ThoughtBlock = ({
                   }}
                   style={btnStyle}
                 >
-                  {idx + 1}. {opt}
+                  <span style={{ marginLeft: isEnglishQuiz ? '6px' : '0', marginRight: isEnglishQuiz ? '0' : '6px' }}>
+                    {isEnglishQuiz ? `${idx + 1}.` : `${['١', '٢', '٣', '٤', '٥', '٦'][idx] || idx + 1}.`}
+                  </span>
+                  <span>{parseInlineText(opt)}</span>
                 </button>
               );
             })}
@@ -952,8 +1386,8 @@ const ThoughtBlock = ({
         {quiz.type === 'true_false' && (
           <div style={{ display: 'flex', gap: '12px' }}>
             {[
-              { val: true, label: 'صح', color: 'var(--success-color)', bg: 'rgba(42, 157, 143, 0.1)' },
-              { val: false, label: 'خطأ', color: 'var(--danger-color)', bg: 'rgba(230, 57, 70, 0.1)' }
+              { val: true, label: isEnglishQuiz ? 'True' : 'صح', color: 'var(--success-color)', bg: 'rgba(42, 157, 143, 0.1)' },
+              { val: false, label: isEnglishQuiz ? 'False' : 'خطأ', color: 'var(--danger-color)', bg: 'rgba(230, 57, 70, 0.1)' }
             ].map((btn) => {
               const isSelected = tfAnswer === btn.val;
               let btnStyle: React.CSSProperties = {
@@ -1012,7 +1446,7 @@ const ThoughtBlock = ({
               disabled={submitted}
               value={essayAnswer}
               onChange={(e) => setEssayAnswer(e.target.value)}
-              placeholder="اكتب إجابتك هنا يا بطل..."
+              placeholder={isEnglishQuiz ? "Type your answer here..." : "اكتب إجابتك النموذجية هنا..."}
               rows={3}
               style={{
                 width: '100%',
@@ -1022,7 +1456,9 @@ const ThoughtBlock = ({
                 background: 'var(--card-bg)',
                 color: 'var(--text-main)',
                 outline: 'none',
-                fontSize: '0.88rem'
+                fontSize: '0.88rem',
+                direction: isEnglishQuiz ? 'ltr' : 'rtl',
+                textAlign: isEnglishQuiz ? 'left' : 'right'
               }}
             />
             <button
@@ -1037,7 +1473,7 @@ const ThoughtBlock = ({
                 fontWeight: 700
               }}
             >
-              إرسال الإجابة للتقييم
+              {isEnglishQuiz ? 'Submit Answer' : 'إرسال الإجابة للتقييم'}
             </button>
           </div>
         )}
@@ -1050,26 +1486,31 @@ const ThoughtBlock = ({
             background: 'var(--card-bg)',
             borderLeft: `4px solid ${quiz.type === 'essay' ? 'var(--primary-color)' : (isCorrect() ? 'var(--success-color)' : 'var(--danger-color)')}`,
             fontSize: '0.85rem',
-            lineHeight: '1.5'
+            lineHeight: '1.5',
+            direction: isEnglishQuiz ? 'ltr' : 'rtl',
+            textAlign: isEnglishQuiz ? 'left' : 'right'
           }}>
             {quiz.type !== 'essay' && (
               <p style={{ fontWeight: 800, color: isCorrect() ? 'var(--success-color)' : 'var(--danger-color)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                 {isCorrect() ? (
                   <>
                     <Award size={16} />
-                    <span>إجابة صحيحة! أحسنت يا بطل (+2 نقطة في الترتيب)!</span>
+                    <span>{isEnglishQuiz ? 'Correct answer! Great job (+2 ranking points)!' : 'إجابة صحيحة! أحسنت يا بطل (+2 نقطة في الترتيب)!'}</span>
                   </>
                 ) : (
-                  <span>إجابة خاطئة، لا بأس فالهدف هو التعلم!</span>
+                  <span>{isEnglishQuiz ? 'Incorrect, keep practicing to master this!' : 'إجابة خاطئة، لا بأس فالهدف هو التعلم!'}</span>
                 )}
               </p>
             )}
             {quiz.type === 'essay' && (
               <p style={{ fontWeight: 800, color: 'var(--primary-color)', marginBottom: '4px' }}>
-                تم إرسال إجابتك للتحليل!
+                {isEnglishQuiz ? 'Your answer has been submitted for evaluation!' : 'تم إرسال إجابتك للتحليل!'}
               </p>
             )}
-            <p style={{ color: 'var(--text-secondary)', marginBottom: onGoToExams ? '10px' : '0' }}><strong>الشرح والتوضيح:</strong> {quiz.explanation}</p>
+            <div style={{ color: 'var(--text-secondary)', marginBottom: onGoToExams ? '10px' : '0' }}>
+              <strong>{isEnglishQuiz ? 'Explanation: ' : 'الشرح والتوضيح: '}</strong>
+              {renderFormattedMath(quiz.explanation)}
+            </div>
             {onGoToExams && (
               <button
                 type="button"
@@ -1091,7 +1532,7 @@ const ThoughtBlock = ({
                 }}
               >
                 <FileText size={13} />
-                <span>اختبر نفسك في امتحان كامل على هذا المفهوم</span>
+                <span>{isEnglishQuiz ? 'Take a full exam on this topic' : 'اختبر نفسك في امتحان كامل على هذا المفهوم'}</span>
                 <ArrowLeft size={13} />
               </button>
             )}
@@ -1161,10 +1602,18 @@ const ThoughtBlock = ({
     }, []);
 
     const studentSponsorUrl = typeof window !== 'undefined' && storedUser?.id
-      ? `${window.location.origin}/sponsor?student_id=${storedUser.id}&plan=pro_1m`
+      ? `${window.location.origin}/sponsor?student_id=${storedUser.id}&plan=pro_3m`
       : 'https://egsaiedu.com/sponsor';
 
-    const parentWhatsAppText = `السلام عليكم يا بابا/ماما، أنا بستخدم منصة EGS AI لمذاكرة المنهج والامتحانات التفاعلية، ورصيدي اليومي المجاني انتهى. باقة الشهر بـ 60 جنيه فقط (أقل من 2 جنيه في اليوم) بتفتح كل المواد وشرح المسائل بالخطوات وتوليد الامتحانات. ممكن تشترك لي من الرابط ده: ${studentSponsorUrl}`;
+    const parentWhatsAppText = `السلام عليكم يا بابا / يا ماما 🌸
+أنا بذاكر حالياً على منصة EGS AI لمناهج مرحلتي الدراسية، وحققت إنجاز ممتاز النهاردة في حل المسائل ونماذج الامتحانات.
+
+عشان أقدر أواصل المذاكرة ليلة الامتحان ونماذج البوكليت بنموذج التفكير المعمق، حابب أشترك في "باقة الترم الدراسي الكامل (3 أشهر)" بـ 140 جنيه فقط (شاملة الـ 3 شهور كلها، يعني 1.5 جنيه في اليوم فقط، وأوفر بكتير جداً من الدروس الخصوصية).
+
+تقدر تفعّل لي الاشتراك فوراً وبكل أمان بضغطة واحدة عبر فودافون كاش أو انستاباي أو كروت ميزة من الرابط ده:
+${studentSponsorUrl}
+
+شكراً لدعمك ليا في دراستي ❤️`;
 
     return (
       <div className="motivational-paywall-card animate-scale-in">
@@ -1228,7 +1677,7 @@ const ThoughtBlock = ({
               }}
             >
               <MessageCircle size={18} />
-              <span>أرسل لولي أمرك للاشتراك عبر واتساب (60 ج.م)</span>
+              <span>أرسل لولي أمرك للاشتراك في باقة الترم عبر واتساب (140 ج.م)</span>
             </a>
           )}
 
@@ -1314,17 +1763,23 @@ const ThoughtBlock = ({
   const FormattedChatMessage = ({ 
     content, 
     sender,
+    isStreaming,
     onGoToExams,
     onAnswerSubmit,
     onGoToFlashcards,
-    onGoToSubscriptions
+    onGoToSubscriptions,
+    onSparkPrompt,
+    onSaveToNotebook
   }: { 
     content: string; 
     sender: 'user' | 'ai';
+    isStreaming?: boolean;
     onGoToExams: (exam: any) => void;
     onAnswerSubmit: (text: string, isCorrect?: boolean) => void;
     onGoToFlashcards?: (subjectName: string) => void;
     onGoToSubscriptions?: () => void;
+    onSparkPrompt?: (text: string) => void;
+    onSaveToNotebook?: (text: string) => void;
   }) => {
     if (sender === 'user') {
       return <div style={{ whiteSpace: 'pre-wrap', direction: 'rtl' }}>{content}</div>;
@@ -1335,6 +1790,10 @@ const ThoughtBlock = ({
     let examData: any = null;
     let flashcardsData: any = null;
     let isPaywall = false;
+    let isGeneratingQuiz = false;
+    let isGeneratingExam = false;
+    let isGeneratingFlashcards = false;
+    let isGeneratingLessonNav = false;
 
     if (displayContent.includes('[UPGRADE_PAYWALL]')) {
       isPaywall = true;
@@ -1374,10 +1833,96 @@ const ThoughtBlock = ({
       }
     }
 
+    const lessonNavRegex = /\[LESSON_NAV\]([\s\S]*?)\[\/LESSON_NAV\]/;
+    const lessonNavMatch = content.match(lessonNavRegex);
+    let lessonNavData: {
+      lesson_title?: string;
+      current_point?: number;
+      total_points?: number;
+      current_point_title?: string;
+      next_point_title?: string | null;
+      is_completed?: boolean;
+    } | null = null;
+
+    if (lessonNavMatch) {
+      displayContent = displayContent.replace(lessonNavMatch[0], '');
+      try {
+        lessonNavData = JSON.parse(lessonNavMatch[1].trim());
+      } catch (e) {
+        console.error('Lesson Nav JSON parse error:', e);
+      }
+    } else if (
+      sender === 'ai' &&
+      !isStreaming &&
+      !isPaywall &&
+      /(?:وهنبدأ في شرح النقطة|يلا بينا ندخل على النقطة|النقطة الأولى:|النقطة الثانية:|النقطة الثالثة:|النقطة الرابعة:|النقطة الخامسة:)/i.test(displayContent)
+    ) {
+      const nextPointMatch = displayContent.match(/وهنبدأ في شرح النقطة\s+([^\n.!؟،]+)/i);
+      const nextPointName = nextPointMatch ? nextPointMatch[1].trim().replace(/بعد ما.*/, '').trim() : 'النقطة التالية';
+      lessonNavData = {
+        current_point_title: 'نقطة من الدرس',
+        next_point_title: nextPointName,
+        is_completed: false
+      };
+    }
+
+    // Intercept in-progress protocol tags before closing tags arrive
+    if (displayContent.includes('[QUIZ_QUESTION]')) {
+      isGeneratingQuiz = true;
+      const idx = displayContent.indexOf('[QUIZ_QUESTION]');
+      displayContent = displayContent.slice(0, idx).trim();
+    }
+
+    if (displayContent.includes('[CREATE_EXAM]')) {
+      isGeneratingExam = true;
+      const idx = displayContent.indexOf('[CREATE_EXAM]');
+      displayContent = displayContent.slice(0, idx).trim();
+    }
+
+    if (displayContent.includes('[CREATE_FLASHCARDS]')) {
+      isGeneratingFlashcards = true;
+      const idx = displayContent.indexOf('[CREATE_FLASHCARDS]');
+      displayContent = displayContent.slice(0, idx).trim();
+    }
+
+    if (displayContent.includes('[LESSON_NAV]')) {
+      isGeneratingLessonNav = true;
+      const idx = displayContent.indexOf('[LESSON_NAV]');
+      displayContent = displayContent.slice(0, idx).trim();
+    }
+
+    // Strip partial tag typing at the end of streaming content
+    if (isStreaming) {
+      const partialTagMatch = displayContent.match(/\[(?:QUIZ(?:_QUESTION)?|CREATE(?:_EXAM|_FLASHCARDS)?|LESSON(?:_NAV)?|UPGRADE(?:_PAYWALL)?)[^\]\n]*$/);
+      if (partialTagMatch && partialTagMatch.index !== undefined) {
+        const rawTag = partialTagMatch[0];
+        if (rawTag.startsWith('[QUIZ')) isGeneratingQuiz = true;
+        else if (rawTag.startsWith('[CREATE_EXAM')) isGeneratingExam = true;
+        else if (rawTag.startsWith('[CREATE_FLASH')) isGeneratingFlashcards = true;
+        else if (rawTag.startsWith('[LESSON')) isGeneratingLessonNav = true;
+        displayContent = displayContent.slice(0, partialTagMatch.index).trim();
+      }
+    }
+
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
-        {displayContent.trim() && <MarkdownMessage content={displayContent} />}
+        {displayContent.trim() && <MarkdownMessage content={displayContent} isStreaming={isStreaming} />}
         {isPaywall && <MotivationalPaywallCard onGoToSubscriptions={onGoToSubscriptions} />}
+
+        {/* In-stream element generation placeholders */}
+        {isGeneratingQuiz && (
+          <GeneratingElementCard type="interactive_question" label="جاري إعداد السؤال التفاعلي..." />
+        )}
+        {isGeneratingExam && (
+          <GeneratingElementCard type="quiz" label="جاري توليد الاختبار..." />
+        )}
+        {isGeneratingFlashcards && (
+          <GeneratingElementCard type="flashcards" label="جاري إنشاء كروت الاستذكار..." />
+        )}
+        {isGeneratingLessonNav && (
+          <GeneratingElementCard type="lesson_nav" label="جاري تنظيم خطة الدرس..." />
+        )}
+
         {quizData && <InteractiveQuizCard quiz={quizData} onAnswerSubmit={onAnswerSubmit} onGoToExams={examData ? () => onGoToExams(examData) : undefined} />}
         {examData && <InteractiveExamInviteCard exam={examData} onGoToExams={() => onGoToExams(examData)} />}
         {flashcardsData && (
@@ -1407,13 +1952,161 @@ const ThoughtBlock = ({
             </button>
           </div>
         )}
+
+        {/* Dedicated Lesson Progression & Assistance Card */}
+        {lessonNavData && !isStreaming && (
+          <div className="lesson-nav-card animate-fade-in">
+            <div className="lesson-nav-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div className="lesson-nav-icon-badge">
+                  <BookOpen size={16} />
+                </div>
+                <div>
+                  <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                    {lessonNavData.is_completed 
+                      ? `اكتمل شرح درس: ${lessonNavData.lesson_title || 'الدرس'}`
+                      : (lessonNavData.current_point && lessonNavData.total_points 
+                          ? `النقطة ${lessonNavData.current_point} من ${lessonNavData.total_points}${lessonNavData.current_point_title ? ` (${lessonNavData.current_point_title})` : ''}`
+                          : (lessonNavData.current_point_title || 'نقطة من الدرس'))
+                    }
+                  </span>
+                </div>
+              </div>
+              {lessonNavData.total_points && lessonNavData.current_point && (
+                <span className="lesson-nav-progress-badge">
+                  {Math.round((lessonNavData.current_point / lessonNavData.total_points) * 100)}% مكتمل
+                </span>
+              )}
+            </div>
+
+            {!lessonNavData.is_completed ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const nextTitle = lessonNavData.next_point_title ? ` ${lessonNavData.next_point_title}` : '';
+                    onSparkPrompt?.(`فهمت النقطة الحالية تماماً، انقل للنقطة التالية وتابع الشرح:${nextTitle}`);
+                  }}
+                  className="lesson-nav-next-btn"
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <ArrowLeft size={16} />
+                    <span>
+                      {lessonNavData.next_point_title
+                        ? `الانتقال إلى النقطة التالية: ${lessonNavData.next_point_title}`
+                        : 'الانتقال إلى النقطة التالية في الدرس'}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: '0.75rem', opacity: 0.85 }}>متابعة الشرح ←</span>
+                </button>
+
+                <div className="lesson-nav-help-section">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)' }}>
+                    <HelpCircle size={14} style={{ color: 'var(--accent-amber, #FFB703)' }} />
+                    <span>لو في أي جزئية مش واضحة أو محتاج توضيح إضافي:</span>
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                    <button
+                      type="button"
+                      onClick={() => onSparkPrompt?.('لم أفهم هذه النقطة جيداً، ممكن توضحها بأسلوب أسهل وبمثال إضافي قبل الانتقال؟')}
+                      className="lesson-nav-help-btn"
+                    >
+                      <Lightbulb size={13} style={{ color: 'var(--accent-amber, #FFB703)' }} />
+                      <span>لم أفهم، وضح بمثال إضافي</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onSparkPrompt?.('استمر في شرح هذه النقطة ووضح لي أهم الأسئلة التي تأتي عليها في الامتحان.')}
+                      className="lesson-nav-help-btn"
+                    >
+                      <MessageSquare size={13} style={{ color: 'var(--accent-cyan, #00B4D8)' }} />
+                      <span>استمر في الشرح وتفصيل هذه النقطة</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-muted)' }}>
+                  تم استعراض وشرح جميع محاور ونقاط هذا الدرس بالكامل. يمكنك الآن بدء اختبار تدريبي لتثبيت المعلومات أو مراجعة الكروت التعليمية!
+                </p>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '4px' }}>
+                  <button
+                    type="button"
+                    onClick={() => onSparkPrompt?.('اعطني اختباراً تدريبياً سريعاً على هذا الدرس لقياس مدى فهمي.')}
+                    className="lesson-nav-next-btn"
+                    style={{ width: 'auto', padding: '8px 16px', fontSize: '0.82rem' }}
+                  >
+                    <Zap size={14} />
+                    <span>اختبار تدريبي على الدرس</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSparkPrompt?.('لخص لي أهم القوانين والملاحظات التي يجب حفظها في هذا الدرس.')}
+                    className="lesson-nav-help-btn"
+                  >
+                    <FileText size={13} />
+                    <span>ملخص قوانين الدرس</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Post-Answer Continuity Sparks ("The Rabbit Hole") */}
+        {sender === 'ai' && !isPaywall && !isStreaming && !lessonNavData && displayContent.trim().length > 60 && (
+          <div className="animate-fade-in" style={{
+            background: 'var(--alpha-white-2)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '12px',
+            padding: '10px 14px',
+            marginTop: '2px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.76rem', fontWeight: 800, color: 'var(--primary-color)' }}>
+              <Sparkles size={13} />
+              <span>خطوتك التالية للتفوق في هذا الدرس:</span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              <button
+                type="button"
+                onClick={() => onSparkPrompt?.('ما الفكرة الخادعة أو السؤال الأكثر تكراراً في الامتحانات حول هذه النقطة؟')}
+                className="continuity-spark-btn"
+              >
+                <Zap size={12} />
+                <span>فكرة خادعة تتكرر في الامتحانات</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onSparkPrompt?.('اعطني مسألة تدريبية مماثلة من كتاب خارجي مع الحل بالخطوات والقوانين.')}
+                className="continuity-spark-btn"
+              >
+                <BookOpen size={12} />
+                <span>مسألة مماثلة من الكتب الخارجية</span>
+              </button>
+              {onSaveToNotebook && (
+                <button
+                  type="button"
+                  onClick={() => onSaveToNotebook(displayContent)}
+                  className="continuity-spark-btn"
+                >
+                  <Bookmark size={12} />
+                  <span>حفظ أهم قانون في دفتري الذكي</span>
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   };
 
   // ─── v2: SearchStepsPanel — shows RAG search process to the student ──────
   const SearchStepsPanel = ({ steps, isSearching }: { steps?: SearchStep[]; isSearching?: boolean }) => {
-    const [collapsed, setCollapsed] = React.useState(false);
+    const [collapsed, setCollapsed] = React.useState(true);
 
     const renderSearchStepIcon = (icon: string) => {
       if (!icon) return <Search size={16} style={{ color: 'var(--primary-color)' }} />;
@@ -1421,6 +2114,7 @@ const ThoughtBlock = ({
       if (icon.includes('🧠') || icon.includes('brain')) return <Brain size={16} style={{ color: 'var(--primary-color)' }} />;
       if (icon.includes('🕸️') || icon.includes('graph') || icon.includes('network')) return <Network size={16} style={{ color: 'var(--accent-cyan, #00B4D8)' }} />;
       if (icon.includes('⚡') || icon.includes('fusion')) return <Layers size={16} style={{ color: 'var(--accent-amber, #FFB703)' }} />;
+      if (icon.includes('📷') || icon.includes('camera')) return <Camera size={16} style={{ color: 'var(--primary-color)' }} />;
       if (icon.includes('🖼️') || icon.includes('image') || icon.includes('scan')) return <ImageIcon size={16} style={{ color: 'var(--primary-color)' }} />;
       if (icon.includes('📖') || icon.includes('📚')) return <BookOpen size={16} style={{ color: 'var(--primary-color)' }} />;
       if (icon.includes('✅') || icon.includes('✔️')) return <Check size={16} style={{ color: 'var(--success-color)' }} />;
@@ -1461,7 +2155,7 @@ const ThoughtBlock = ({
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--primary-color)' }}>
-              {isSearching && allSteps.length === 0 ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+              {isSearching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
             </span>
             <span style={{ fontWeight: 700, color: 'var(--primary-color)', fontSize: '0.8rem' }}>
               {isSearching && allSteps.length === 0 ? 'جاري البحث في المنهج...' : 'خطوات البحث الذكي'}
@@ -1765,6 +2459,544 @@ const ImageEditorModal = ({
           >
             استخدام بدون تعديل
           </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Camera Capture Modal (Direct In-Site Camera + Native Fallback) ───────────
+const CameraCaptureModal = ({
+  isOpen,
+  onCapture,
+  onClose,
+  onFallbackToNative,
+}: {
+  isOpen: boolean;
+  onCapture: (dataUrl: string) => void;
+  onClose: () => void;
+  onFallbackToNative: () => void;
+}) => {
+  const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let currentStream: MediaStream | null = null;
+    let isMounted = true;
+
+    async function initCamera() {
+      setLoading(true);
+      setError(null);
+      setCapturedPhoto(null);
+
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        setError('المتصفح لا يدعم الوصول المباشر للكاميرا. يمكنك استخدام كاميرا هاتفك عبر الخيار البديل أدناه.');
+        setLoading(false);
+        return;
+      }
+
+      try {
+        try {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const videoInputs = devices.filter(d => d.kind === 'videoinput');
+          if (isMounted) setHasMultipleCameras(videoInputs.length > 1);
+        } catch {
+          if (isMounted) setHasMultipleCameras(true);
+        }
+
+        const constraints: MediaStreamConstraints = {
+          video: {
+            facingMode: { ideal: facingMode },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 }
+          },
+          audio: false
+        };
+
+        const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+        if (!isMounted) {
+          mediaStream.getTracks().forEach(t => t.stop());
+          return;
+        }
+
+        currentStream = mediaStream;
+        setStream(mediaStream);
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = mediaStream;
+          videoRef.current.play().catch(() => {});
+        }
+        setLoading(false);
+      } catch (err: any) {
+        if (!isMounted) return;
+        setLoading(false);
+        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+          setError('تم رفض إذن الكاميرا من المتصفح. يرجى تفعيل إذن الكاميرا أو التقاط الصورة عبر تطبيق الكاميرا بالهاتف مباشرة.');
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          setError('لم يتم العثور على كاميرا في هذا الجهاز.');
+        } else {
+          setError('تعذر تشغيل الكاميرا في المتصفح. يمكنك التقاط الصورة مباشرة عبر كاميرا الهاتف.');
+        }
+      }
+    }
+
+    initCamera();
+
+    return () => {
+      isMounted = false;
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+      }
+    };
+  }, [isOpen, facingMode]);
+
+  const handleClose = () => {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+    }
+    onClose();
+  };
+
+  const toggleFacingMode = () => {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+    }
+    setFacingMode(prev => (prev === 'environment' ? 'user' : 'environment'));
+  };
+
+  const handleSnap = () => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const width = video.videoWidth || 1280;
+    const height = video.videoHeight || 720;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, width, height);
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
+    setCapturedPhoto(dataUrl);
+  };
+
+  const handleRetake = () => {
+    setCapturedPhoto(null);
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(() => {});
+    }
+  };
+
+  const handleConfirm = () => {
+    if (!capturedPhoto) return;
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+    }
+    onCapture(capturedPhoto);
+  };
+
+  if (!isOpen) return null;
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 120,
+        background: 'rgba(0, 0, 0, 0.88)',
+        backdropFilter: 'blur(10px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '12px',
+        direction: 'rtl'
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label="التقاط صورة مباشرة"
+    >
+      <div
+        className="glass-strong animate-scale-in"
+        style={{
+          width: '100%',
+          maxWidth: '560px',
+          maxHeight: '94vh',
+          background: 'var(--card-bg)',
+          borderRadius: 'var(--radius-xl)',
+          border: '1px solid var(--border-color)',
+          boxShadow: 'var(--shadow-xl)',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column'
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '14px 18px',
+            borderBottom: '1px solid var(--border-color)',
+            background: 'var(--sidebar-bg)'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div
+              style={{
+                width: '32px',
+                height: '32px',
+                borderRadius: '8px',
+                background: 'var(--primary-light)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--primary-color)'
+              }}
+            >
+              <Camera size={18} />
+            </div>
+            <div>
+              <h3 style={{ fontSize: '0.95rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
+                التقاط صورة مباشرة
+              </h3>
+              <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: 0 }}>
+                وجّه الكاميرا نحو السؤال أو المسألة
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleClose}
+            style={{
+              background: 'var(--alpha-white-4)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '50%',
+              width: '32px',
+              height: '32px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer'
+            }}
+            title="إغلاق"
+            aria-label="إغلاق"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        {/* Viewfinder / Preview Body */}
+        <div
+          style={{
+            position: 'relative',
+            width: '100%',
+            minHeight: '300px',
+            maxHeight: '58vh',
+            height: '420px',
+            background: '#070C12',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            overflow: 'hidden'
+          }}
+        >
+          {capturedPhoto ? (
+            <img
+              src={capturedPhoto}
+              alt="معاينة الصورة الملتقطة"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            />
+          ) : error ? (
+            <div
+              style={{
+                padding: '24px 20px',
+                textAlign: 'center',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: '14px',
+                maxWidth: '420px'
+              }}
+            >
+              <div
+                style={{
+                  width: '48px',
+                  height: '48px',
+                  borderRadius: '50%',
+                  background: 'rgba(230, 57, 70, 0.15)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: '#E63946'
+                }}
+              >
+                <AlertCircle size={24} />
+              </div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: '1.6', margin: 0 }}>
+                {error}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  handleClose();
+                  onFallbackToNative();
+                }}
+                className="btn-primary"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '10px 18px',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.85rem',
+                  fontWeight: 700
+                }}
+              >
+                <Smartphone size={16} />
+                <span>فتح كاميرا الهاتف مباشرة</span>
+              </button>
+            </div>
+          ) : (
+            <>
+              <video
+                ref={videoRef}
+                playsInline
+                autoPlay
+                muted
+                style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+              />
+
+              {loading && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    background: 'rgba(7, 12, 18, 0.8)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '10px',
+                    color: 'var(--text-main)'
+                  }}
+                >
+                  <Loader2 size={28} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+                  <span style={{ fontSize: '0.82rem' }}>جاري تشغيل الكاميرا...</span>
+                </div>
+              )}
+
+              {/* Viewfinder question frame guideline */}
+              {!loading && (
+                <>
+                  <div
+                    style={{
+                      position: 'absolute',
+                      inset: '20px',
+                      border: '2px dashed rgba(255, 183, 3, 0.45)',
+                      borderRadius: '16px',
+                      pointerEvents: 'none',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      padding: '12px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'center' }}>
+                      <span
+                        style={{
+                          fontSize: '0.72rem',
+                          color: '#FFFFFF',
+                          background: 'rgba(13, 27, 42, 0.75)',
+                          padding: '3px 12px',
+                          borderRadius: '12px',
+                          border: '1px solid rgba(255, 255, 255, 0.12)'
+                        }}
+                      >
+                        ضع السؤال داخل الإطار
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Switch Camera Button (front/back) */}
+                  {hasMultipleCameras && (
+                    <button
+                      type="button"
+                      onClick={toggleFacingMode}
+                      style={{
+                        position: 'absolute',
+                        top: '14px',
+                        left: '14px',
+                        background: 'rgba(13, 27, 42, 0.75)',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        borderRadius: '50%',
+                        width: '38px',
+                        height: '38px',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#FFFFFF',
+                        cursor: 'pointer',
+                        backdropFilter: 'blur(6px)',
+                        boxShadow: 'var(--shadow-md)'
+                      }}
+                      title="تبديل الكاميرا (أمامية / خلفية)"
+                      aria-label="تبديل الكاميرا"
+                    >
+                      <RotateCcw size={17} />
+                    </button>
+                  )}
+                </>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* Footer Controls */}
+        <div
+          style={{
+            padding: '14px 18px',
+            background: 'var(--card-bg)',
+            borderTop: '1px solid var(--border-color)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px'
+          }}
+        >
+          {capturedPhoto ? (
+            <>
+              <button
+                type="button"
+                onClick={handleRetake}
+                className="btn-secondary"
+                style={{
+                  flex: 1,
+                  padding: '10px 14px',
+                  borderRadius: 'var(--radius-md)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontSize: '0.85rem',
+                  fontWeight: 700
+                }}
+              >
+                <RotateCcw size={16} />
+                <span>إعادة الالتقاط</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                className="btn-primary"
+                style={{
+                  flex: 1.4,
+                  padding: '10px 14px',
+                  borderRadius: 'var(--radius-md)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  fontSize: '0.85rem',
+                  fontWeight: 700
+                }}
+              >
+                <Check size={16} />
+                <span>استخدام وتعديل الصورة</span>
+              </button>
+            </>
+          ) : !error && !loading ? (
+            <>
+              {/* Fallback to native phone camera */}
+              <button
+                type="button"
+                onClick={() => {
+                  handleClose();
+                  onFallbackToNative();
+                }}
+                className="btn-secondary"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '9px 12px',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
+                  color: 'var(--text-secondary)'
+                }}
+                title="التقاط باستخدام تطبيق الكاميرا بهاتفك"
+              >
+                <Smartphone size={15} />
+                <span>كاميرا الهاتف</span>
+              </button>
+
+              {/* Shutter capture button */}
+              <button
+                type="button"
+                onClick={handleSnap}
+                style={{
+                  width: '56px',
+                  height: '56px',
+                  borderRadius: '50%',
+                  background: 'var(--primary-color)',
+                  color: 'var(--text-on-primary)',
+                  border: '4px solid var(--sidebar-bg)',
+                  outline: '2px solid var(--primary-color)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  boxShadow: 'var(--shadow-lg)',
+                  transition: 'var(--transition-fast)'
+                }}
+                title="التقاط الآن"
+                aria-label="التقاط الآن"
+              >
+                <Camera size={24} />
+              </button>
+
+              {/* Cancel button */}
+              <button
+                type="button"
+                onClick={handleClose}
+                className="btn-secondary"
+                style={{
+                  padding: '9px 14px',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.78rem',
+                  fontWeight: 600
+                }}
+              >
+                إلغاء
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={handleClose}
+              className="btn-secondary"
+              style={{
+                width: '100%',
+                padding: '10px',
+                borderRadius: 'var(--radius-md)',
+                fontSize: '0.85rem',
+                fontWeight: 700
+              }}
+            >
+              إغلاق
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -2308,7 +3540,7 @@ export default function App() {
   const [tasksSubject, setTasksSubject] = useState<string>('');
 
   // Points / Coins & Model States
-  const [coins, setCoins] = useState<number>(15.0);
+  const [coins, setCoins] = useState<number>(20.0);
   const [points, setPoints] = useState<number>(0);
   const [pointsBonusAnim, setPointsBonusAnim] = useState<number | null>(null);
 
@@ -2319,7 +3551,6 @@ export default function App() {
     }, 1800);
   };
 
-  const [selectedModel, setSelectedModel] = useState<'flash' | 'pro'>('flash');
   const [thinkingEnabled, setThinkingEnabled] = useState<boolean>(false);
   const [chatMode, setChatMode] = useState<'socratic' | 'detailed' | 'summary' | 'step_by_step'>('detailed');
 
@@ -2361,8 +3592,11 @@ export default function App() {
   const [activeNotifications, setActiveNotifications] = useState<any[]>([]);
   const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
   const [showNotifCenter, setShowNotifCenter] = useState(false);
+  const isNotifLoadingRef = useRef(false);
 
   const loadNotifications = async (authToken?: string | null) => {
+    if (isNotifLoadingRef.current) return;
+    isNotifLoadingRef.current = true;
     try {
       const tok = authToken !== undefined ? authToken : (token || (typeof window !== 'undefined' ? localStorage.getItem('egs_token') : null));
       const headers: Record<string, string> = {};
@@ -2376,6 +3610,8 @@ export default function App() {
       }
     } catch (e) {
       // Non-blocking
+    } finally {
+      isNotifLoadingRef.current = false;
     }
   };
 
@@ -2405,13 +3641,12 @@ export default function App() {
     setShowGoogleGradeModal(false);
     setShowSubjectSheet(false);
     setShowModeSheet(false);
-    setShowModelSheet(false);
     setShowUpgradeSheet(false);
+    setShowTeacherConfigSheet(false);
     setShowExamCreateModal(false);
     setShowFlashcardCreateModal(false);
     setShowIosInstallModal(false);
     setShowNotifCenter(false);
-    setShowModelMenu(false);
     setShowModeMenu(false);
     setSidebarOpen(false);
 
@@ -2473,6 +3708,8 @@ export default function App() {
   const [revealedAnswers, setRevealedAnswers] = useState<Record<string, boolean>>({});
   const [deckFilter, setDeckFilter] = useState<string | null>(null);
   const [doneCards, setDoneCards] = useState<any[]>([]);
+  const [reviewedCardRatings, setReviewedCardRatings] = useState<Record<string, number>>({});
+  const [reviewingCardId, setReviewingCardId] = useState<string | null>(null);
   const [editingCard, setEditingCard] = useState<any | null>(null);
   const [showFlashcardCreateModal, setShowFlashcardCreateModal] = useState(false);
   const [flashcardCreateMode, setFlashcardCreateMode] = useState<'ai' | 'manual'>('ai');
@@ -2525,13 +3762,45 @@ export default function App() {
     user &&
     user.plan_type &&
     user.plan_type !== 'free' &&
-    user.subscription_status === 'active' &&
+    (user.subscription_status === 'active' || !user.subscription_status) &&
     (!user.subscription_end_date || new Date(user.subscription_end_date).getTime() > Date.now())
   );
 
-  const remainingDays = user?.subscription_end_date
-    ? Math.max(0, Math.ceil((new Date(user.subscription_end_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
-    : (isUserSubscribed ? 30 : 0);
+  const planDurationDays = (user?.plan_type === 'pro_3m' || user?.plan_type === 'max')
+    ? 90
+    : (user?.plan_type === 'pro_2m' ? 60 : 30);
+
+  const subscriptionStartMs = user?.subscription_start_date
+    ? new Date(user.subscription_start_date).getTime()
+    : (user?.created_at ? new Date(user.created_at).getTime() : Date.now());
+
+  let effectiveEndMs: number | null = null;
+  if (user?.subscription_end_date) {
+    const rawEndMs = new Date(user.subscription_end_date).getTime();
+    const spanDays = subscriptionStartMs > 0 ? Math.round((rawEndMs - subscriptionStartMs) / (24 * 60 * 60 * 1000)) : 0;
+    if (planDurationDays > 30 && spanDays > 0 && spanDays <= 35) {
+      effectiveEndMs = subscriptionStartMs + planDurationDays * 24 * 60 * 60 * 1000;
+    } else {
+      effectiveEndMs = rawEndMs;
+    }
+  } else if (isUserSubscribed) {
+    effectiveEndMs = subscriptionStartMs + planDurationDays * 24 * 60 * 60 * 1000;
+  }
+
+  const remainingDays = effectiveEndMs
+    ? Math.max(0, Math.ceil((effectiveEndMs - Date.now()) / (1000 * 60 * 60 * 24)))
+    : (isUserSubscribed ? planDurationDays : 0);
+
+  const formatRemainingSubscription = (days: number): string => {
+    if (days <= 0) return 'انتهت مدة الاشتراك';
+    if (days === 1) return 'يوم واحد متبقٍ';
+    if (days === 2) return 'يومان متبقيان';
+    if (days >= 3 && days <= 10) return `${days} أيام متبقية`;
+    if (days >= 75) return `3 أشهر (${days} يوماً متبقياً)`;
+    if (days >= 45) return `شهران (${days} يوماً متبقياً)`;
+    if (days >= 20) return `شهر واحد (${days} يوماً متبقياً)`;
+    return `${days} يوماً متبقياً`;
+  };
 
   const handleSubscribe = async (planId: string) => {
     if (!user || !token) {
@@ -2579,7 +3848,6 @@ export default function App() {
   const [verifiedCurrencyData, setVerifiedCurrencyData] = useState<any>(null);
   const [isVerifyingCurrency, setIsVerifyingCurrency] = useState<boolean>(false);
   const [currencyVerificationToast, setCurrencyVerificationToast] = useState<string | null>(null);
-  const [renewalCountdown, setRenewalCountdown] = useState<string>('00:00:00');
 
   const handleVerifyCurrency = async () => {
     if (!token || !user) return;
@@ -2620,33 +3888,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    const updateCountdown = () => {
-      if (verifiedCurrencyData?.dailyRenewal?.nextRenewalIso) {
-        const diffMs = new Date(verifiedCurrencyData.dailyRenewal.nextRenewalIso).getTime() - Date.now();
-        if (diffMs > 0) {
-          const totalSec = Math.floor(diffMs / 1000);
-          const h = Math.floor(totalSec / 3600);
-          const m = Math.floor((totalSec % 3600) / 60);
-          const s = totalSec % 60;
-          setRenewalCountdown(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
-          return;
-        }
-      }
-      const now = new Date();
-      const nextUtcMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0));
-      const diff = Math.max(0, Math.floor((nextUtcMidnight.getTime() - now.getTime()) / 1000));
-      const hours = Math.floor(diff / 3600);
-      const mins = Math.floor((diff % 3600) / 60);
-      const secs = diff % 60;
-      setRenewalCountdown(`${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
-    };
-
-    updateCountdown();
-    const interval = setInterval(updateCountdown, 1000);
-    return () => clearInterval(interval);
-  }, [verifiedCurrencyData]);
-
   // Multi-Device Management State (Max 3 Devices) & Session Invalidation
   const [userDevices, setUserDevices] = useState<any[]>([]);
   const [loadingDevices, setLoadingDevices] = useState<boolean>(false);
@@ -2668,7 +3909,7 @@ export default function App() {
     setSessions([]);
     setUserDevices([]);
     if (modalType === 'revoked') {
-      setCoins(15.0);
+      setCoins(20.0);
       setSessionRevokedModal(true);
     } else {
       setCoins(5.0);
@@ -2890,6 +4131,7 @@ export default function App() {
         setFlashcardViewMode('grid');
         setRevealedAnswers({});
         setDeckFilter(null);
+        setReviewedCardRatings({});
         setSelectedFlashcardSubject(subjectName);
       }
     } catch (e) {
@@ -2913,24 +4155,53 @@ export default function App() {
     }, 420);
   };
 
-  const submitSubjectCardReview = async (cardId: string, rating: number) => {
+  const submitSubjectCardReview = async (cardId: string, rating: number, isGridMode: boolean = false) => {
     if (!token) return;
+    setReviewingCardId(cardId);
     try {
-      const currentCard = subjectCards[activeStackIndex];
-      fetch('/api/flashcards/review', {
+      const res = await fetch('/api/flashcards/review', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({ card_id: cardId, rating })
-      }).catch(err => console.error(err));
-      if (currentCard) {
-        setDoneCards(prev => [...prev, currentCard]);
+      });
+      let data: any = null;
+      try {
+        const text = await res.text();
+        if (text) {
+          data = JSON.parse(text);
+        }
+      } catch (parseErr) {
+        console.error('Failed to parse response from /api/flashcards/review:', parseErr);
       }
-      advancePlayingCard();
+
+      if (!res.ok || !data) {
+        if (data) checkAuthError(res.status, data);
+        alert((data && data.error) || 'حدث خطأ أثناء حفظ تقييم الاستدعاء');
+        return;
+      }
+      if (data.success && data.card) {
+        const updated = data.card;
+        setSubjectCards(prev => prev.map(c => c.id === cardId ? { ...c, box: updated.box, next_review_at: updated.next_review_at } : c));
+        setReviewedCardRatings(prev => ({ ...prev, [cardId]: rating }));
+
+        if (isGridMode) {
+          // Standard/Grid mode: Keep user in place, immediate visual feedback on card & box level
+        } else {
+          // Interactive stack mode: record in doneCards and advance smoothly
+          const targetCard = subjectCards.find(c => c.id === cardId) || subjectCards[activeStackIndex];
+          if (targetCard) {
+            setDoneCards(prev => [...prev, { ...targetCard, box: updated.box, next_review_at: updated.next_review_at }]);
+          }
+          advancePlayingCard();
+        }
+      }
     } catch (e) {
-      console.error(e);
+      console.error('submitSubjectCardReview error:', e);
+    } finally {
+      setReviewingCardId(null);
     }
   };
 
@@ -3130,10 +4401,18 @@ export default function App() {
           count: flashcardCount
         })
       });
-      const data = await res.json();
+      let data: any = {};
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+        } catch {
+          data = {};
+        }
+      }
       if (!res.ok) {
         if (!checkAuthError(res.status, data)) return;
-        alert(data.error || 'فشل توليد الكروت');
+        alert(data?.error || 'فشل توليد الكروت');
         return;
       }
       if (data.success) {
@@ -3209,7 +4488,7 @@ export default function App() {
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputMessage, setInputMessage] = useState('');
-  const [chatSubject, setChatSubject] = useState('');
+  const [chatSubject, setChatSubject] = useState('الرياضيات');
   const [chatGrade, setChatGrade] = useState('1_high'); // for guests
   const [showSubjectSheet, setShowSubjectSheet] = useState(false); // mobile material picker
   const [chatLoading, setChatLoading] = useState(false);
@@ -3229,7 +4508,7 @@ export default function App() {
   const [expandedRoadmapUnits, setExpandedRoadmapUnits] = useState<Record<string, boolean>>({});
 
   // Daily Quests State
-  const [dailyQuestsData, setDailyQuestsData] = useState<any | null>(null);
+  const [dailyQuestsData, setDailyQuestsData] = useState<any | null>(DEFAULT_DAILY_QUESTS_DATA);
   const [loadingDailyQuests, setLoadingDailyQuests] = useState(false);
   const [claimingQuestId, setClaimingQuestId] = useState<string | null>(null);
 
@@ -3239,6 +4518,8 @@ export default function App() {
   const [loadingNotebook, setLoadingNotebook] = useState(false);
   const [notebookFilterSubject, setNotebookFilterSubject] = useState<string>('all');
   const [bookmarkedMsgIndexes, setBookmarkedMsgIndexes] = useState<Record<number, boolean>>({});
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const targetChatMsgRef = useRef<{ messageId?: string | null; content?: string | null } | null>(null);
 
   // Ministry Exam Booklet Simulator Mode
   const [isBookletMode, setIsBookletMode] = useState(false);
@@ -3247,6 +4528,7 @@ export default function App() {
   const [sessions, setSessions] = useState<any[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [previousConversationsOpen, setPreviousConversationsOpen] = useState(false);
 
   // Report State
   const [reportTarget, setReportTarget] = useState<{ content: string; userQuery: string } | null>(null);
@@ -3255,7 +4537,7 @@ export default function App() {
   const [reportDone, setReportDone] = useState(false);
 
   // Admin State
-  const [adminSection, setAdminSection] = useState<'overview' | 'customer_service' | 'users' | 'notifications' | 'reports' | 'versions'>('overview');
+  const [adminSection, setAdminSection] = useState<'overview' | 'customer_service' | 'users' | 'curriculum' | 'notifications' | 'reports' | 'versions'>('overview');
   const [customerServiceTab, setCustomerServiceTab] = useState<'ai_complaints' | 'student_management' | 'support_messages'>('ai_complaints');
 
   // Customer Service: AI Complaints State
@@ -3265,17 +4547,54 @@ export default function App() {
   const [csAiActionModal, setCsAiActionModal] = useState<{ report: any; actionTaken: string; status: string } | null>(null);
   const [csAiActionSaving, setCsAiActionSaving] = useState(false);
 
-  // Customer Service: Student Management State
+  // Customer Service & Student Management State
   const [csStudents, setCsStudents] = useState<any[]>([]);
   const [csStudentSearch, setCsStudentSearch] = useState('');
   const [csStudentsLoading, setCsStudentsLoading] = useState(false);
+  const [adminStudentTierFilter, setAdminStudentTierFilter] = useState<'all' | 'subscribed' | 'free' | 'expired' | 'pwa'>('all');
+  const [adminStudentGradeFilter, setAdminStudentGradeFilter] = useState<string>('all');
+  const [adminStudentCounts, setAdminStudentCounts] = useState<{ total: number; subscribed: number; free: number; expired: number; pwa?: number }>({ total: 0, subscribed: 0, free: 0, expired: 0, pwa: 0 });
   const [selectedCsStudent, setSelectedCsStudent] = useState<any | null>(null);
   const [selectedCsStudentLoading, setSelectedCsStudentLoading] = useState(false);
   const [csCoinsToAdd, setCsCoinsToAdd] = useState<string>('50');
+  const [csCoinsToDeduct, setCsCoinsToDeduct] = useState<string>('20');
   const [csActionLoading, setCsActionLoading] = useState(false);
   const [csActionFeedback, setCsActionFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [csDeleteConfirmModal, setCsDeleteConfirmModal] = useState(false);
   const [csCancelSubModal, setCsCancelSubModal] = useState(false);
+
+  // Admin: View Student AI Conversation History
+  const [csConversationsModalOpen, setCsConversationsModalOpen] = useState(false);
+  const [csConversationsLoading, setCsConversationsLoading] = useState(false);
+  const [csConversationsData, setCsConversationsData] = useState<{
+    sessions: any[];
+    messages: any[];
+    student: any;
+    opted_out?: boolean;
+    error?: string;
+  } | null>(null);
+  const [csSelectedSessionId, setCsSelectedSessionId] = useState<string | null>(null);
+  const [csConversationSearch, setCsConversationSearch] = useState('');
+  const [csConversationSubjectFilter, setCsConversationSubjectFilter] = useState('all');
+  const [adminStudentOptInFilter, setAdminStudentOptInFilter] = useState<'all' | 'opted_in' | 'opted_out'>('all');
+
+  // New Admin Features: Manual Grant, Edit Profile, Direct Notification Modals
+  const [csGrantSubModal, setCsGrantSubModal] = useState(false);
+  const [csGrantSubPlan, setCsGrantSubPlan] = useState<'pro_1m' | 'pro_2m' | 'pro_3m'>('pro_3m');
+  const [csGrantSubDays, setCsGrantSubDays] = useState<number>(90);
+  const [csGrantSubNote, setCsGrantSubNote] = useState<string>('');
+
+  const [csEditProfileModal, setCsEditProfileModal] = useState(false);
+  const [csEditName, setCsEditName] = useState<string>('');
+  const [csEditPhone, setCsEditPhone] = useState<string>('');
+  const [csEditEmail, setCsEditEmail] = useState<string>('');
+  const [csEditGrade, setCsEditGrade] = useState<string>('1_high');
+  const [csEditTrack, setCsEditTrack] = useState<string>('');
+
+  const [csDirectNotifModal, setCsDirectNotifModal] = useState(false);
+  const [csDirectNotifTitle, setCsDirectNotifTitle] = useState<string>('');
+  const [csDirectNotifBody, setCsDirectNotifBody] = useState<string>('');
+  const [csDirectNotifType, setCsDirectNotifType] = useState<'info' | 'success' | 'warning'>('info');
 
   // Customer Service: Technical Support Messages State
   const [csSupportMessages, setCsSupportMessages] = useState<any[]>([]);
@@ -3284,7 +4603,7 @@ export default function App() {
   const [csSupportCategoryFilter, setCsSupportCategoryFilter] = useState<string>('all');
   const [csSupportNotesModal, setCsSupportNotesModal] = useState<{ message: any; notes: string; status: string } | null>(null);
   const [csSupportSaving, setCsSupportSaving] = useState(false);
-  const [curriculums, setCurriculums] = useState<Curriculum[]>([]);
+  const [curriculums, setCurriculums] = useState<Curriculum[]>(DEFAULT_STATIC_CURRICULUMS as Curriculum[]);
   const [uploadGrade, setUploadGrade] = useState('1_high');
   const [uploadSubject, setUploadSubject] = useState('');
   const [uploadMode, setUploadMode] = useState<'file' | 'placeholder'>('file');
@@ -3299,6 +4618,15 @@ export default function App() {
   const [adminMessage, setAdminMessage] = useState({ text: '', type: '' });
   const [renamingCurriculumId, setRenamingCurriculumId] = useState<string | null>(null);
   const [renameSubjectValue, setRenameSubjectValue] = useState('');
+  const [embeddingModal, setEmbeddingModal] = useState<{
+    curriculumId: string;
+    subjectName: string;
+    total: number;
+    completed: number;
+    percentage: number;
+    isRunning: boolean;
+    error: string;
+  } | null>(null);
 
   // Admin: Users Management State
   const [adminUsers, setAdminUsers] = useState<any[]>([]);
@@ -3361,6 +4689,7 @@ export default function App() {
   const [profileOtpStep, setProfileOtpStep] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileMessage, setProfileMessage] = useState({ text: '', type: '' });
+  const [improveAiLoading, setImproveAiLoading] = useState(false);
 
   // Responsive Layout & PWA Detection
   const [isMobile, setIsMobile] = useState(false);
@@ -3421,7 +4750,7 @@ export default function App() {
     essay_count?: number;
   }) => {
     if (coins <= 0) {
-      const isSubscribed = user && user.plan_type && user.plan_type !== 'free' && user.subscription_status === 'active';
+      const isSubscribed = user && user.plan_type && user.plan_type !== 'free' && (user.subscription_status === 'active' || !user.subscription_status);
       if (isSubscribed) {
         setPaymentErrorToast('ليس لديك رصيد كافٍ من العملات لإنشاء الامتحان. سيتجدد رصيدك تلقائياً غداً.');
         setTimeout(() => setPaymentErrorToast(null), 5000);
@@ -3451,10 +4780,18 @@ export default function App() {
         })
       });
 
-      const data = await res.json();
+      let data: any = {};
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+        } catch {
+          data = {};
+        }
+      }
       if (!res.ok) {
         if (!checkAuthError(res.status, data)) return;
-        throw new Error(data.error || 'فشل توليد الامتحان');
+        throw new Error(data?.error || 'تعذر توليد الامتحان في الوقت الحالي، يرجى المحاولة مرة أخرى.');
       }
 
       await loadExamsData();
@@ -3511,10 +4848,18 @@ export default function App() {
         })
       });
 
-      const data = await res.json();
+      let data: any = {};
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        try {
+          data = await res.json();
+        } catch {
+          data = {};
+        }
+      }
       if (!res.ok) {
         if (!checkAuthError(res.status, data)) return;
-        throw new Error(data.error || 'فشل تصحيح الامتحان');
+        throw new Error(data?.error || 'فشل تصحيح الامتحان');
       }
 
       setExamResult(data);
@@ -3619,14 +4964,12 @@ export default function App() {
       const hasSeenTour = localStorage.getItem(`egs_tour_completed_${currentScreen}`) === 'true';
       if (!hasSeenTour) {
         if (currentScreen === 'chat') {
-          const justRegistered = localStorage.getItem('egs_just_registered') === 'true';
-          if (justRegistered) {
-            localStorage.removeItem('egs_just_registered');
-            const timer = setTimeout(() => {
-              startTour('chat');
-            }, 600);
-            return () => clearTimeout(timer);
-          }
+          // Trigger platform introductory walkthrough on first page access
+          if (typeof window !== 'undefined') localStorage.removeItem('egs_just_registered');
+          const timer = setTimeout(() => {
+            startTour('chat');
+          }, 600);
+          return () => clearTimeout(timer);
         } else if (user) {
           const timer = setTimeout(() => {
             startTour(currentScreen);
@@ -3646,9 +4989,12 @@ export default function App() {
     const plan = urlParams.get('plan');
 
     if (paymentResult === 'success') {
-      const planTitle = plan === 'pro_3m' ? 'اشتراك 3 أشهر' : (plan === 'pro_2m' ? 'اشتراك شهرين' : 'اشتراك شهر (Pro)');
-      const bonusCoins = plan === 'pro_3m' ? 2500 : (plan === 'pro_2m' ? 1000 : 500);
-      const amount = plan === 'pro_3m' ? 250 : (plan === 'pro_2m' ? 100 : 50);
+      const isSponsor = urlParams.get('sponsor') === 'true';
+      const planTitle = isSponsor
+        ? (plan === 'pro_3m' ? 'كفالة باقة 3 أشهر (120 نقطة يومياً)' : (plan === 'pro_2m' ? 'كفالة باقة شهرين (90 نقطة يومياً)' : 'كفالة باقة شهر (80 نقطة يومياً)'))
+        : (plan === 'pro_3m' ? 'باقة 3 أشهر (120 نقطة يومياً)' : (plan === 'pro_2m' ? 'باقة شهرين (90 نقطة يومياً)' : 'باقة شهر (80 نقطة يومياً)'));
+      const bonusCoins = plan === 'pro_3m' ? 120 : (plan === 'pro_2m' ? 90 : 80);
+      const amount = plan === 'pro_3m' ? 140 : (plan === 'pro_2m' ? 110 : 60);
 
       setPaymentSuccessData({
         planTitle,
@@ -3712,11 +5058,12 @@ export default function App() {
   const [isDescribingImage, setIsDescribingImage] = useState(false);
   const [editingImage, setEditingImage] = useState<{ dataUrl: string; mimeType: string } | null>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
-  const [showModelMenu, setShowModelMenu] = useState(false);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const [showCameraModal, setShowCameraModal] = useState(false);
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModeSheet, setShowModeSheet] = useState(false);
-  const [showModelSheet, setShowModelSheet] = useState(false);
   const [showUpgradeSheet, setShowUpgradeSheet] = useState(false);
+  const [showTeacherConfigSheet, setShowTeacherConfigSheet] = useState(false);
 
   // Helper for suggestions clicking
   const handleSuggestionClick = (text: string) => {
@@ -3925,6 +5272,7 @@ export default function App() {
       const data = await res.json();
       if (data.success && data.quests) {
         setDailyQuestsData(data);
+        try { localStorage.setItem('egs_daily_quests', JSON.stringify(data)); } catch (e) {}
       }
     } catch (e) {
       console.error('Failed to load daily quests:', e);
@@ -4007,7 +5355,9 @@ export default function App() {
           grade_level: currentGrade,
           title: cleanTitle,
           content: msg.message,
-          note_type: 'formula'
+          note_type: 'formula',
+          session_id: activeSessionId || msg.session_id || null,
+          message_id: msg.id || null
         })
       });
       const data = await res.json();
@@ -4030,6 +5380,105 @@ export default function App() {
       });
     } catch (e) {
       console.error('Failed to delete note:', e);
+    }
+  };
+
+  // Scroll to and highlight a specific message in the chat
+  const scrollToMessage = (messageId?: string | null, content?: string | null) => {
+    setTimeout(() => {
+      let targetEl: HTMLElement | null = null;
+
+      if (messageId) {
+        targetEl = document.getElementById(`chat-msg-${messageId}`);
+      }
+
+      if (!targetEl && content) {
+        const aiBubbles = document.querySelectorAll('.message-row-ai');
+        const snippet = content.trim().slice(0, 40);
+        for (let i = 0; i < aiBubbles.length; i++) {
+          if (aiBubbles[i].textContent?.includes(snippet)) {
+            targetEl = aiBubbles[i] as HTMLElement;
+            break;
+          }
+        }
+      }
+
+      if (!targetEl && content) {
+        const allRows = document.querySelectorAll('.message-row');
+        const snippet = content.trim().slice(0, 30);
+        for (let i = 0; i < allRows.length; i++) {
+          if (allRows[i].textContent?.includes(snippet)) {
+            targetEl = allRows[i] as HTMLElement;
+            break;
+          }
+        }
+      }
+
+      if (targetEl) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const highlightId = targetEl.getAttribute('data-msg-id') || targetEl.id || 'target-highlight';
+        setHighlightedMessageId(highlightId);
+        setTimeout(() => {
+          setHighlightedMessageId(null);
+        }, 4000);
+      }
+    }, 180);
+  };
+
+  // Navigate directly to the note's originating conversation and scroll to the AI message
+  const handleViewConversationInChat = async (note: any) => {
+    setShowNotebookModal(false);
+    if (isMobile) setSidebarOpen(false);
+    setActiveTab('chat');
+
+    if (note.subject_name && note.subject_name !== 'ملاحظات عامة') {
+      setChatSubject(note.subject_name);
+    }
+
+    let targetSessionId = note.session_id;
+    let targetMessageId = note.message_id;
+
+    if (!targetSessionId) {
+      try {
+        const storedToken = localStorage.getItem('egs_token') || token;
+        const res = await fetch(`/api/user/study-notebook?action=resolve&note_id=${encodeURIComponent(note.id)}`, {
+          headers: { ...(storedToken ? { 'Authorization': `Bearer ${storedToken}` } : {}) }
+        });
+        const data = await res.json();
+        if (data.success && data.session_id) {
+          targetSessionId = data.session_id;
+          targetMessageId = data.message_id || targetMessageId;
+        }
+      } catch (e) {
+        console.error('Failed to resolve conversation for note:', e);
+      }
+    }
+
+    if (!targetSessionId) {
+      const matchSubjSession = sessions.find(s => s.subject_name === note.subject_name);
+      if (matchSubjSession) {
+        targetSessionId = matchSubjSession.id;
+      } else if (sessions.length > 0) {
+        targetSessionId = sessions[0].id;
+      }
+    }
+
+    if (!targetSessionId) {
+      const inCurrent = messages.find(m => m.sender === 'ai' && (m.id === targetMessageId || (note.content && m.message.includes(note.content.slice(0, 40)))));
+      if (inCurrent) {
+        scrollToMessage(inCurrent.id, note.content);
+        return;
+      }
+      alert('لم نتمكن من العثور على المحادثة الأصلية لهذه الملاحظة.');
+      return;
+    }
+
+    targetChatMsgRef.current = { messageId: targetMessageId, content: note.content };
+
+    if (activeSessionId === targetSessionId) {
+      scrollToMessage(targetMessageId, note.content);
+    } else {
+      setActiveSessionId(targetSessionId);
     }
   };
 
@@ -4452,6 +5901,17 @@ export default function App() {
                     <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: 'auto', paddingTop: '6px' }}>
                       {new Date(note.created_at).toLocaleDateString('ar-EG')}
                     </span>
+
+                    <button
+                      type="button"
+                      onClick={() => handleViewConversationInChat(note)}
+                      className="notebook-view-chat-btn"
+                      title="View Conversation in Chat"
+                      aria-label="View Conversation in Chat"
+                    >
+                      <MessageSquare size={13} />
+                      <span>View Conversation in Chat</span>
+                    </button>
                   </div>
                 ))}
               </div>
@@ -4465,7 +5925,13 @@ export default function App() {
   // Helper to render subject selector pills bar
   const renderSubjectSelectorBar = () => {
     const targetGrade = user ? user.grade_level : chatGrade;
-    const activeSubjects = getActiveSubjectsForGrade(targetGrade);
+    let activeSubjects = getActiveSubjectsForGrade(targetGrade);
+    if (activeSubjects.length === 0) {
+      activeSubjects = (DEFAULT_STATIC_CURRICULUMS as Curriculum[]).filter(c => c.grade_level === targetGrade);
+      if (activeSubjects.length === 0) {
+        activeSubjects = (DEFAULT_STATIC_CURRICULUMS as Curriculum[]).filter(c => c.grade_level === '1_high');
+      }
+    }
     if (activeSubjects.length === 0) return null;
 
     return (
@@ -4483,6 +5949,7 @@ export default function App() {
                     setPlaceholderModalCurriculum(s);
                   } else {
                     setChatSubject(s.subject_name);
+                    try { localStorage.setItem('egs_last_subject', s.subject_name); } catch (e) {}
                     if (textareaRef.current) textareaRef.current.focus();
                   }
                 }}
@@ -4521,7 +5988,7 @@ export default function App() {
     const percent = totalLessonCount > 0 ? Math.round((completedLessonCount / totalLessonCount) * 100) : 0;
 
     // Daily Quests Stats
-    const quests = dailyQuestsData?.quests || [];
+    const quests = dailyQuestsData?.quests || DEFAULT_DAILY_QUESTS;
     const completedQuestsCount = quests.filter((q: any) => q.completed).length;
     const totalQuestsCount = quests.length;
     const totalRewardPoints = quests.reduce((acc: number, q: any) => acc + (q.rewardPoints || 0), 0);
@@ -5071,7 +6538,9 @@ export default function App() {
     }
 
     if (filtered.length > 0) return filtered;
-    return curriculums.filter(c => c.grade_level === grade);
+    const fallback = curriculums.filter(c => c.grade_level === grade);
+    if (fallback.length > 0) return fallback;
+    return (DEFAULT_STATIC_CURRICULUMS as Curriculum[]).filter(c => c.grade_level === grade);
   };
 
   useEffect(() => {
@@ -5086,7 +6555,7 @@ export default function App() {
     } else {
       setChatSubject('');
     }
-  }, [user, chatGrade, curriculums, activeCurriculumIds, selectedTrack, selectedElective]);
+  }, [user?.grade_level, chatGrade, curriculums, activeCurriculumIds, selectedTrack, selectedElective]);
 
   useEffect(() => {
     const targetGrade = user ? user.grade_level : chatGrade;
@@ -5186,15 +6655,12 @@ export default function App() {
     const hasCurriculum = !!currentSubjectObj;
     const isPlaceholderSubject = !!currentSubjectObj?.is_placeholder;
 
-    const guestLimitReached = !user && guestMessagesCount >= 5;
-
     let isDisabled = chatLoading || isDescribingImage;
-    let placeholderText = chatSubject ? `اسألني عن أي شيء في منهج ${chatSubject}...` : 'اسألني عن أي شيء...';
+    let placeholderText = chatSubject 
+      ? (!user ? `سجل حسابك مجاناً لتجربة EGS AI في منهج ${chatSubject}...` : `اسألني عن أي شيء في منهج ${chatSubject}...`)
+      : (!user ? 'سجل حسابك مجاناً لتجربة EGS AI وبدء المذاكرة...' : 'اسألني عن أي شيء في المنهج...');
 
-    if (guestLimitReached) {
-      isDisabled = true;
-      placeholderText = "لقد استنفدت الرسائل الـ 5 المجانية المتاحة لك كزائر. يرجى تسجيل الدخول للمتابعة!";
-    } else if (!isSessionCourseValid) {
+    if (!isSessionCourseValid) {
       isDisabled = true;
       placeholderText = "يرجى بدء محادثة جديدة لأن المنهج قد تم تعديله أو حذفه.";
     } else if (isPlaceholderSubject) {
@@ -5204,28 +6670,6 @@ export default function App() {
       isDisabled = true;
       placeholderText = "المنهج الدراسي غير متوفر حالياً.";
     }
-
-    const toggleModelMenu = () => {
-      if (isTourOpen) return;
-      if (isMobile) {
-        setShowModelSheet(true);
-      } else {
-        setShowModelMenu(prev => !prev);
-      }
-    };
-
-    const handleModelSelect = (model: 'flash' | 'pro') => {
-      // Pro model unlocked for registered users
-      if (model === 'pro' && !user) {
-        setAuthTab('register');
-        setShowAuthModal(true);
-      } else {
-        setSelectedModel(model);
-      }
-      setShowModelMenu(false);
-      setShowModelSheet(false);
-    };
-
     const CHAT_MODES: { key: 'socratic' | 'detailed' | 'summary' | 'step_by_step'; label: string; icon: React.ReactNode }[] = [
       { key: 'detailed', label: 'شرح مفصل', icon: <GraduationCap size={15} /> },
       { key: 'step_by_step', label: 'خطوة بخطوة', icon: <Sliders size={15} /> },
@@ -5398,8 +6842,8 @@ export default function App() {
           </div>
         )}
 
-        {/* Quick Fill Prompt Tags Directly Above Text Box (Dynamic Subject Suggestions) */}
-        {isCentered && (
+        {/* Quick Fill Prompt Tags Directly Above Text Box (Desktop only — on mobile the Diagnostic Cockpit provides focused triggers) */}
+        {isCentered && !isMobile && (
           <div className="composer-prompt-tags-wrapper">
             <span className="composer-prompt-tags-hint">
               اقتراحات ذكية للبدء:
@@ -5409,6 +6853,11 @@ export default function App() {
                 key={idx}
                 type="button"
                 onClick={() => {
+                  if (!user) {
+                    setAuthTab('register');
+                    setShowAuthModal(true);
+                    return;
+                  }
                   const targetGrade = user ? user.grade_level : chatGrade;
                   const activeSubjs = getActiveSubjectsForGrade(targetGrade);
                   const currentSubj = activeSubjs.find(s => s.subject_name === chatSubject);
@@ -5433,6 +6882,39 @@ export default function App() {
           {/* Main Input + Buttons Row */}
           <div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', direction: 'rtl' }}>
             
+            {/* Direct Camera capture button */}
+            <button
+              type="button"
+              disabled={isDisabled}
+              onClick={() => {
+                if (!user) {
+                  setAuthTab('register');
+                  setShowAuthModal(true);
+                  return;
+                }
+                setShowCameraModal(true);
+              }}
+              style={{
+                width: isMobile ? '40px' : '38px',
+                height: isMobile ? '40px' : '38px',
+                borderRadius: '12px',
+                background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: isDisabled ? 'not-allowed' : 'pointer',
+                opacity: isDisabled ? 0.5 : 1,
+                flexShrink: 0,
+                transition: 'var(--transition-fast)'
+              }}
+              title="التقاط صورة مباشرة بالكاميرا"
+              aria-label="التقاط صورة مباشرة بالكاميرا"
+            >
+              <Camera size={isMobile ? 18 : 17} />
+            </button>
+
             {/* Image attachment button */}
             <button
               type="button"
@@ -5446,8 +6928,8 @@ export default function App() {
                 imageInputRef.current?.click();
               }}
               style={{
-                width: isMobile ? '42px' : '38px',
-                height: isMobile ? '42px' : '38px',
+                width: isMobile ? '40px' : '38px',
+                height: isMobile ? '40px' : '38px',
                 borderRadius: '12px',
                 background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
                 border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
@@ -5461,8 +6943,9 @@ export default function App() {
                 transition: 'var(--transition-fast)'
               }}
               title="إرفاق صورة مسألة أو سؤال"
+              aria-label="إرفاق صورة مسألة أو سؤال"
             >
-              <ImageIcon size={isMobile ? 19 : 17} />
+              <ImageIcon size={isMobile ? 18 : 17} />
             </button>
             <input
               type="file"
@@ -5471,12 +6954,32 @@ export default function App() {
               accept="image/*"
               style={{ display: 'none' }}
             />
+            <input
+              type="file"
+              ref={cameraInputRef}
+              onChange={handleImageSelect}
+              accept="image/*"
+              capture="environment"
+              style={{ display: 'none' }}
+            />
 
             {/* Auto-growing Textarea */}
             <textarea
               ref={textareaRef}
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
+              onClick={() => {
+                if (!user) {
+                  setAuthTab('register');
+                  setShowAuthModal(true);
+                }
+              }}
+              onFocus={() => {
+                if (!user) {
+                  setAuthTab('register');
+                  setShowAuthModal(true);
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -5494,9 +6997,9 @@ export default function App() {
                 resize: 'none',
                 fontSize: '16px',
                 lineHeight: '1.5',
-                minHeight: '38px',
+                minHeight: isMobile ? '36px' : '38px',
                 maxHeight: '160px',
-                padding: '8px 4px',
+                padding: isMobile ? '6px 4px' : '8px 4px',
                 color: 'var(--text-main)',
                 direction: 'rtl',
                 textAlign: 'right',
@@ -5511,8 +7014,8 @@ export default function App() {
               disabled={isDisabled || (!hasMessage && !pendingImage)}
               className={`send-button ${(hasMessage || pendingImage) && !isDisabled ? 'active' : ''}`}
               style={{
-                width: isMobile ? '42px' : '38px',
-                height: isMobile ? '42px' : '38px',
+                width: isMobile ? '40px' : '38px',
+                height: isMobile ? '40px' : '38px',
                 borderRadius: '12px',
                 flexShrink: 0,
                 display: 'flex',
@@ -5525,92 +7028,114 @@ export default function App() {
             </button>
           </div>
 
-          {/* Quick-Controls Scrollable Feature Toolbar */}
-          <div className="composer-features-toolbar">
-            
-            {/* Feature 1: Mode / Template Selector */}
-            <button
-              type="button"
-              onClick={() => { if (!isTourOpen) setShowModeSheet(true); }}
-              className={`composer-feature-pill ${chatMode !== 'detailed' ? 'active' : ''}`}
-              title="تغيير نمط الشرح والتدريس"
-            >
-              {activeModeInfo.icon}
-              <span>{activeModeInfo.label}</span>
-              <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
-            </button>
-
-            {/* Feature 2: Deep Thinking (CoT) Toggle */}
-            <button
-              id="tour-thinking-controls"
-              type="button"
-              onClick={() => {
-                if (isTourOpen) {
-                  setThinkingEnabled(!thinkingEnabled);
-                  return;
-                }
-                if (!user) {
-                  setAuthTab('register');
-                  setShowAuthModal(true);
-                } else {
-                  setThinkingEnabled(!thinkingEnabled);
-                }
-              }}
-              className={`composer-feature-pill ${thinkingEnabled ? 'active-glow' : ''}`}
-              title="تفعيل ميزة التفكير العميق لتحليل أدق المسائل"
-            >
-              <Brain size={15} />
-              <span>{thinkingEnabled ? 'التفكير مفعل' : 'تفكير عميق'}</span>
-              {!user && !isTourOpen && <Lock size={12} style={{ opacity: 0.6 }} />}
-            </button>
-
-            {/* Feature 3: AI Model Selector */}
-            <button
-              id="tour-model-selector"
-              type="button"
-              onClick={() => { if (!isTourOpen) setShowModelSheet(true); }}
-              className={`composer-feature-pill ${selectedModel === 'pro' ? 'active-gold' : ''}`}
-              title="تبديل نموذج الذكاء الاصطناعي"
-            >
-              {selectedModel === 'pro' ? <Sparkles size={15} /> : <Zap size={15} />}
-              <span>{selectedModel === 'pro' ? 'Pro فائق' : 'Fast سريع'}</span>
-              <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
-            </button>
-
-            {/* Feature 4: Subject Selection */}
-            {messages.length === 0 ? (
+          {/* Quick Controls: Distraction-Free Mobile Strip or Desktop Toolbar */}
+          {isMobile ? (
+            <div className="composer-compact-control-bar">
+              {/* Unified Teacher Config Pill (Mode) */}
               <button
                 type="button"
-                onClick={() => { if (!isTourOpen) setShowSubjectSheet(true); }}
-                className="composer-feature-pill"
-                title="تحديد المادة الدراسية"
+                onClick={() => { if (!isTourOpen) setShowTeacherConfigSheet(true); }}
+                className="composer-compact-config-pill"
+                title="تخصيص طريقة ونمط الشرح"
               >
-                {getSubjectIcon(chatSubject, 15)}
-                <span>{chatSubject || 'المادة الدراسية'}</span>
-                <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
+                <Sliders size={13} style={{ color: 'var(--primary-color)' }} />
+                <span>{activeModeInfo.label}</span>
+                <span style={{ fontSize: '0.62rem', opacity: 0.6 }}>▾</span>
               </button>
-            ) : (
-              <div className="composer-feature-pill" style={{ cursor: 'default', opacity: 0.9 }}>
-                {getSubjectIcon(chatSubject, 15)}
-                <span>{chatSubject}</span>
-              </div>
-            )}
 
-            {/* Feature 5: Grade (for guests) */}
-            {!user && messages.length === 0 && (
+              {/* Quick 1-Tap Thinking Toggle (Subscribers Only) */}
+              <button
+                id="tour-thinking-controls"
+                type="button"
+                onClick={() => {
+                  if (isTourOpen) {
+                    setThinkingEnabled(!thinkingEnabled);
+                    return;
+                  }
+                  if (!user) {
+                    setAuthTab('register');
+                    setShowAuthModal(true);
+                  } else if (user.plan_type === 'free' || !user.subscription_status || user.subscription_status !== 'active') {
+                    if (user.role !== 'admin' && !user.unlimited_credit) {
+                      setShowUpgradeSheet(true);
+                      return;
+                    }
+                    setThinkingEnabled(!thinkingEnabled);
+                  } else {
+                    setThinkingEnabled(!thinkingEnabled);
+                  }
+                }}
+                className={`composer-mini-toggle-pill ${thinkingEnabled ? 'active-glow' : ''}`}
+                title="تفعيل ميزة التفكير العميق (متاحة للمشتركين)"
+              >
+                <Brain size={13} />
+                <span>{thinkingEnabled ? 'التفكير مفعل' : 'تفكير عميق'}</span>
+                {(!user || (user.plan_type === 'free' && user.role !== 'admin' && !user.unlimited_credit)) && (
+                  <Lock size={10} style={{ opacity: 0.6 }} />
+                )}
+              </button>
+            </div>
+          ) : (
+            <div className="composer-features-toolbar">
+              {/* Feature 1: Mode / Template Selector */}
               <button
                 type="button"
-                onClick={() => { if (!isTourOpen) setShowSubjectSheet(true); }}
-                className="composer-feature-pill"
-                title="تحديد الصف الدراسي"
+                onClick={() => { if (!isTourOpen) setShowModeSheet(true); }}
+                className={`composer-feature-pill ${chatMode !== 'detailed' ? 'active' : ''}`}
+                title="تغيير نمط الشرح والتدريس"
               >
-                <GraduationCap size={15} />
-                <span>{GRADE_NAMES[chatGrade] || 'الصف'}</span>
+                {activeModeInfo.icon}
+                <span>{activeModeInfo.label}</span>
                 <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
               </button>
-            )}
 
-          </div>
+              {/* Feature 2: Deep Thinking (CoT) Toggle (Subscribers Only) */}
+              <button
+                id="tour-thinking-controls"
+                type="button"
+                onClick={() => {
+                  if (isTourOpen) {
+                    setThinkingEnabled(!thinkingEnabled);
+                    return;
+                  }
+                  if (!user) {
+                    setAuthTab('register');
+                    setShowAuthModal(true);
+                  } else if (user.plan_type === 'free' || !user.subscription_status || user.subscription_status !== 'active') {
+                    if (user.role !== 'admin' && !user.unlimited_credit) {
+                      setShowUpgradeSheet(true);
+                      return;
+                    }
+                    setThinkingEnabled(!thinkingEnabled);
+                  } else {
+                    setThinkingEnabled(!thinkingEnabled);
+                  }
+                }}
+                className={`composer-feature-pill ${thinkingEnabled ? 'active-glow' : ''}`}
+                title="تفعيل ميزة التفكير العميق لتحليل أدق المسائل (متاحة للمشتركين)"
+              >
+                <Brain size={15} />
+                <span>{thinkingEnabled ? 'التفكير مفعل' : 'تفكير عميق'}</span>
+                {(!user || (user.plan_type === 'free' && user.role !== 'admin' && !user.unlimited_credit)) && (
+                  <Lock size={12} style={{ opacity: 0.6 }} />
+                )}
+              </button>
+
+              {/* Feature 3: Subject Selection on Desktop (Landing state only) */}
+              {messages.length === 0 && (
+                <button
+                  type="button"
+                  onClick={() => { if (!isTourOpen) setShowSubjectSheet(true); }}
+                  className="composer-feature-pill"
+                  title="تحديد المادة الدراسية"
+                >
+                  {getSubjectIcon(chatSubject, 15)}
+                  <span>{chatSubject || 'المادة الدراسية'}</span>
+                  <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </form>
     );
@@ -5721,97 +7246,194 @@ export default function App() {
     );
   };
 
-  // AI model picker modal & sheet
-  const renderModelSheet = () => {
-    if (!showModelSheet || isTourOpen) return null;
+  // Unified Teacher Settings Modal & Bottom Sheet (Clean, distraction-free mobile hub)
+  const renderTeacherConfigSheet = () => {
+    if (!showTeacherConfigSheet || isTourOpen) return null;
+
+    const CHAT_MODES: { key: 'detailed' | 'step_by_step' | 'socratic' | 'summary'; label: string; desc: string; icon: React.ReactNode; badge: string }[] = [
+      {
+        key: 'detailed',
+        label: 'شرح وتفصيل شامل (الافتراضي)',
+        desc: 'شرح أكاديمي منهجي متكامل مع تبسيط القوانين والأمثلة التوضيحية لضمان أعلى استيعاب.',
+        icon: <GraduationCap size={20} />,
+        badge: 'موصى به'
+      },
+      {
+        key: 'step_by_step',
+        label: 'حل المسائل خطوة بخطوة',
+        desc: 'تقسيم حل المسائل المعقدة إلى: معطيات، قوانين مستخدمة، تعويض، وناتج نهائي.',
+        icon: <Sliders size={20} />,
+        badge: 'مسائل وتمارين'
+      },
+      {
+        key: 'socratic',
+        label: 'الحوار السقراطي التفاعلي',
+        desc: 'توجيه ذكي بالأسئلة المتدرجة لتصل إلى الحل بنفسك وتنمي التفكير العلمي.',
+        icon: <MessageCircleQuestion size={20} />,
+        badge: 'تفكير نقدي'
+      },
+      {
+        key: 'summary',
+        label: 'ملخص وتركيز سريع',
+        desc: 'كبسولات مركزة لأهم القوانين والمفاهيم للمراجعة السريعة قبل الامتحانات.',
+        icon: <ListChecks size={20} />,
+        badge: 'مراجعة نهائية'
+      }
+    ];
 
     return (
-      <div className="bottom-sheet-overlay" onClick={() => setShowModelSheet(false)}>
-        <div className="bottom-sheet-body" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px', width: '100%' }}>
+      <div className="bottom-sheet-overlay" onClick={() => setShowTeacherConfigSheet(false)}>
+        <div className="bottom-sheet-body" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px', width: '100%', maxHeight: '88vh' }}>
           <div className="sheet-handle" />
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', paddingBottom: '10px', borderBottom: '1px solid var(--border-color)' }}>
+          
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', paddingBottom: '10px', borderBottom: '1px solid var(--border-color)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Zap size={20} style={{ color: 'var(--primary-color)' }} />
-              <span style={{ fontSize: '1.05rem', fontWeight: 800 }}>اختر نموذج الذكاء الاصطناعي</span>
+              <div style={{ width: '32px', height: '32px', borderRadius: '10px', background: 'var(--primary-light)', color: 'var(--primary-color)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Sliders size={18} />
+              </div>
+              <div>
+                <div style={{ fontSize: '1rem', fontWeight: 900, color: 'var(--text-main)' }}>إعدادات وطريقة الشرح</div>
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>تخصيص طريقة الشرح وميزة التفكير الذكي</div>
+              </div>
             </div>
-            <button type="button" onClick={() => setShowModelSheet(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}>
+            <button
+              type="button"
+              onClick={() => setShowTeacherConfigSheet(false)}
+              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '6px' }}
+            >
               <X size={18} />
             </button>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {[
-              {
-                key: 'flash',
-                title: 'Fast سريع (DeepSeek Flash)',
-                desc: 'استجابة فورية فائقة السرعة للأسئلة المباشرة وشرح المفاهيم العامة.',
-                icon: <Zap size={22} />,
-                badge: 'سرعة فائقة'
-              },
-              {
-                key: 'pro',
-                title: 'Pro محترف (DeepSeek Reasoner)',
-                desc: 'أعلى دقة أكاديمية وتحليل مستفيض خطوة بخطوة لأصعب مسائل الثانوية والإعدادية.',
-                icon: <Sparkles size={22} />,
-                badge: 'دقة قصوى'
-              }
-            ].map((m) => {
-              const isSelected = selectedModel === m.key;
-              return (
-                <div
-                  key={m.key}
-                  onClick={() => {
-                    if (m.key === 'pro' && !user) {
-                      setAuthTab('register');
-                      setShowAuthModal(true);
-                      setShowModelSheet(false);
-                    } else {
-                      setSelectedModel(m.key as any);
-                      setShowModelSheet(false);
-                    }
-                  }}
-                  style={{
-                    padding: '14px',
-                    borderRadius: '14px',
-                    border: isSelected ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
-                    background: isSelected ? 'var(--primary-light)' : 'var(--sidebar-bg)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: '12px',
-                    transition: 'var(--transition-fast)'
-                  }}
-                >
-                  <div style={{
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '10px',
-                    background: isSelected ? 'var(--primary-color)' : 'var(--alpha-white-4)',
-                    color: isSelected ? 'var(--text-on-primary)' : 'var(--primary-color)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0
-                  }}>
-                    {m.icon}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <span style={{ fontWeight: 800, fontSize: '0.92rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                        {m.title}
-                      </span>
-                      <span style={{ fontSize: '0.68rem', fontWeight: 800, background: 'var(--alpha-white-5)', padding: '2px 8px', borderRadius: 'var(--radius-full)', color: 'var(--text-muted)' }}>
-                        {m.badge}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.5' }}>
-                      {m.desc}
-                    </p>
-                  </div>
+          {/* Deep Thinking Toggle (Subscribers Only) */}
+          <div style={{
+            background: 'var(--alpha-white-3)',
+            border: '1px solid var(--border-color)',
+            borderRadius: '12px',
+            padding: '12px 14px',
+            marginBottom: '16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{
+                width: '32px',
+                height: '32px',
+                borderRadius: '8px',
+                background: thinkingEnabled ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                color: thinkingEnabled ? 'var(--primary-color)' : 'var(--text-muted)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}>
+                <Brain size={18} />
+              </div>
+              <div>
+                <div style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>ميزة التفكير العميق (Deep Thinking)</span>
+                  <span style={{ fontSize: '0.62rem', fontWeight: 800, background: 'rgba(255, 183, 3, 0.15)', color: '#FFB703', padding: '1px 5px', borderRadius: '4px' }}>
+                    للمشتركين
+                  </span>
                 </div>
-              );
-            })}
+                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                  تحليل مسار الحل وصياغة القوانين خطوة بخطوة قبل كتابة الإجابة.
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (!user && !isTourOpen) {
+                  setAuthTab('register');
+                  setShowAuthModal(true);
+                  setShowTeacherConfigSheet(false);
+                } else if (user && (user.plan_type === 'free' || !user.subscription_status || user.subscription_status !== 'active') && user.role !== 'admin' && !user.unlimited_credit) {
+                  setShowTeacherConfigSheet(false);
+                  setShowUpgradeSheet(true);
+                } else {
+                  setThinkingEnabled(!thinkingEnabled);
+                }
+              }}
+              style={{
+                padding: '6px 14px',
+                borderRadius: 'var(--radius-full)',
+                border: thinkingEnabled ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                background: thinkingEnabled ? 'var(--primary-color)' : 'transparent',
+                color: thinkingEnabled ? 'var(--text-on-primary)' : 'var(--text-muted)',
+                fontSize: '0.78rem',
+                fontWeight: 800,
+                cursor: 'pointer',
+                transition: 'var(--transition-fast)'
+              }}
+            >
+              {thinkingEnabled ? 'مفعل' : 'معطل'}
+            </button>
           </div>
+
+          {/* Section 3: Teaching Style / Mode */}
+          <div>
+            <div style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-muted)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <GraduationCap size={14} style={{ color: 'var(--primary-color)' }} />
+              <span>أسلوب وطريقة الشرح:</span>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {CHAT_MODES.map((m) => {
+                const isSelected = chatMode === m.key;
+                return (
+                  <div
+                    key={m.key}
+                    onClick={() => {
+                      setChatMode(m.key);
+                      localStorage.setItem('egs_chat_mode', m.key);
+                      setShowTeacherConfigSheet(false);
+                    }}
+                    style={{
+                      padding: '10px 12px',
+                      borderRadius: '12px',
+                      border: isSelected ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                      background: isSelected ? 'var(--primary-light)' : 'var(--sidebar-bg)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '10px',
+                      transition: 'var(--transition-fast)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <div style={{
+                        color: isSelected ? 'var(--primary-color)' : 'var(--text-muted)'
+                      }}>
+                        {m.icon}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: '0.84rem', fontWeight: 800, color: isSelected ? 'var(--primary-color)' : 'var(--text-main)' }}>
+                          {m.label}
+                        </div>
+                        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                          {m.desc}
+                        </div>
+                      </div>
+                    </div>
+                    {isSelected && <CheckCircle size={16} color="var(--primary-color)" />}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Close & Confirm Button */}
+          <button
+            type="button"
+            onClick={() => setShowTeacherConfigSheet(false)}
+            className="btn-primary"
+            style={{ width: '100%', padding: '10px', borderRadius: '10px', marginTop: '16px', fontWeight: 800, fontSize: '0.88rem' }}
+          >
+            <span>حفظ والعودة للمذاكرة</span>
+          </button>
         </div>
       </div>
     );
@@ -5843,9 +7465,9 @@ export default function App() {
           {/* 3 Quick Plans */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
             {[
-              { id: 'pro_1m', title: 'باقة شهر (1 Month)', price: '60', period: 'شهرياً', points: '80 نقطة يومياً', micro: 'أقل من 2 ج.م / اليوم', featured: true },
-              { id: 'pro_2m', title: 'باقة شهرين (2 Months)', price: '100', period: 'شهرين', points: '90 نقطة يومياً', micro: '1.6 ج.م / اليوم (وفر 20 ج.م)', featured: false },
-              { id: 'pro_3m', title: 'باقة 3 أشهر (3 Months)', price: '140', period: '3 أشهر', points: '120 نقطة يومياً', micro: '1.5 ج.م / اليوم (أعلى توفير)', featured: false },
+              { id: 'pro_1m', title: 'باقة شهر (1 Month)', price: '60', period: 'شهرياً', points: '80 نقطة يومياً', micro: '2 ج.م / اليوم', featured: false, badge: 'الباقة التمهيدية' },
+              { id: 'pro_2m', title: 'باقة شهرين (2 Months)', price: '110', period: 'شهرين', points: '90 نقطة يومياً', micro: '1.83 ج.م / اليوم (وفر 10 ج.م)', featured: false, badge: 'الباقة المرنة' },
+              { id: 'pro_3m', title: 'باقة 3 أشهر (3 Months)', price: '140', period: '3 أشهر', points: '120 نقطة يومياً', micro: 'فقط 1.5 ج.م / اليوم (أعلى توفير للترم)', featured: true, badge: 'خيار 85% من المتفوقين' },
             ].map((p) => (
               <div
                 key={p.id}
@@ -5857,15 +7479,16 @@ export default function App() {
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'space-between',
-                  gap: '12px'
+                  gap: '12px',
+                  boxShadow: p.featured ? '0 4px 16px rgba(255, 183, 3, 0.15)' : 'none'
                 }}
               >
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <span style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--text-main)' }}>{p.title}</span>
-                    {p.featured && (
-                      <span style={{ background: 'var(--primary-color)', color: '#fff', fontSize: '0.65rem', fontWeight: 800, padding: '1px 6px', borderRadius: 'var(--radius-full)' }}>
-                        الأكثر طلباً
+                    {p.badge && (
+                      <span style={{ background: p.featured ? 'var(--primary-color)' : 'var(--alpha-white-5)', color: p.featured ? '#fff' : 'var(--text-muted)', fontSize: '0.65rem', fontWeight: 800, padding: '1px 6px', borderRadius: 'var(--radius-full)' }}>
+                        {p.badge}
                       </span>
                     )}
                   </div>
@@ -5912,7 +7535,7 @@ export default function App() {
           {user && (
             <a
               href={`https://wa.me/?text=${encodeURIComponent(
-                `السلام عليكم يا بابا/ماما، أنا بستخدم منصة EGS AI لمذاكرة المنهج والامتحانات، وباقة الشهر بـ 60 جنيه فقط بتفتح كل المواد وشرح المسائل بالخطوات. ممكن تشترك لي من الرابط ده: ${typeof window !== 'undefined' ? `${window.location.origin}/sponsor?student_id=${user?.id || ''}&plan=pro_1m` : ''}`
+                `السلام عليكم يا بابا / يا ماما 🌸\nأنا بذاكر حالياً على منصة EGS AI لمناهج مرحلتي الدراسية، وحققت إنجاز ممتاز النهاردة في حل المسائل ونماذج الامتحانات.\n\nعشان أقدر أواصل المذاكرة ليلة الامتحان ونماذج البوكليت بنموذج التفكير المعمق، حابب أشترك في "باقة الترم الدراسي الكامل (3 أشهر)" بـ 140 جنيه فقط (شاملة الـ 3 شهور كلها، يعني 1.5 جنيه في اليوم فقط، وأوفر بكتير جداً من الدروس الخصوصية).\n\nتقدر تفعّل لي الاشتراك فوراً وبكل أمان بضغطة واحدة عبر فودافون كاش أو انستاباي أو كروت ميزة من الرابط ده:\n${typeof window !== 'undefined' ? `${window.location.origin}/sponsor?student_id=${user?.id || ''}&plan=pro_3m` : ''}\n\nشكراً لدعمك ليا في دراستي ❤️`
               )}`}
               target="_blank"
               rel="noopener noreferrer"
@@ -5935,7 +7558,7 @@ export default function App() {
               }}
             >
               <MessageCircle size={17} />
-              <span>أرسل لولي أمرك للاشتراك عبر واتساب (60 ج.م)</span>
+              <span>أرسل لولي أمرك للاشتراك في باقة الترم عبر واتساب (140 ج.م)</span>
             </a>
           )}
 
@@ -6090,7 +7713,11 @@ export default function App() {
   }, [inputMessage]);
 
 
+  const isConfigLoadingRef = useRef(false);
+
   const loadSystemConfig = (devIdVal?: string, tokenVal?: string | null) => {
+    if (isConfigLoadingRef.current) return;
+    isConfigLoadingRef.current = true;
     const targetDevId = devIdVal || deviceId;
     const headers: Record<string, string> = {};
     if (targetDevId) {
@@ -6111,27 +7738,40 @@ export default function App() {
           }
         }
         if (data.website_link) setWebsiteLink(data.website_link);
-        if (data.active_grade_levels) {
+        if (data.active_grade_levels && data.active_grade_levels.length > 0) {
           setActiveGradeLevels(data.active_grade_levels);
-          if (data.active_grade_levels.length > 0) {
-            setGradeLevel(data.active_grade_levels[0]);
-            setChatGrade(data.active_grade_levels[0]);
-          }
+          try { localStorage.setItem('egs_active_grade_levels', JSON.stringify(data.active_grade_levels)); } catch (e) {}
+          setGradeLevel(prev => prev || data.active_grade_levels[0]);
+          setChatGrade(prev => prev || data.active_grade_levels[0]);
         }
-        if (data.active_curriculum_ids) setActiveCurriculumIds(data.active_curriculum_ids);
-        if (data.all_curriculums) setCurriculums(data.all_curriculums);
-        if (data.guest_messages_count !== undefined) {
-          setGuestMessagesCount(data.guest_messages_count);
+        if (data.active_curriculum_ids) {
+          setActiveCurriculumIds(data.active_curriculum_ids);
+          try { localStorage.setItem('egs_active_curriculum_ids', JSON.stringify(data.active_curriculum_ids)); } catch (e) {}
         }
-        if (data.guest_coins !== undefined) {
-          setCoins(data.guest_coins);
+        if (data.all_curriculums) {
+          setCurriculums(data.all_curriculums);
+          try { localStorage.setItem('egs_curriculums_cache', JSON.stringify(data.all_curriculums)); } catch (e) {}
+        }
+        if (data.daily_quests) {
+          setDailyQuestsData(data.daily_quests);
+          try { localStorage.setItem('egs_daily_quests', JSON.stringify(data.daily_quests)); } catch (e) {}
         }
         if (data.user) {
-          setUser(data.user);
+          setUser((prev: any) => {
+            if (prev && JSON.stringify(prev) === JSON.stringify(data.user)) return prev;
+            return data.user;
+          });
           localStorage.setItem('egs_user', JSON.stringify(data.user));
           setCoins(data.user.coins === undefined ? 50.0 : data.user.coins);
           setPoints(data.user.points || 0);
+        } else {
+          setGuestMessagesCount(0);
+          setCoins(0);
         }
+      })
+      .catch(() => {})
+      .finally(() => {
+        isConfigLoadingRef.current = false;
       });
   };
 
@@ -6178,6 +7818,22 @@ export default function App() {
       setShowMobileInstallBanner(true);
     }
 
+    if (standaloneMode || localStorage.getItem('egs_pwa_installed') === 'true') {
+      try {
+        const p = isIos ? 'ios' : isMob ? 'android' : 'desktop';
+        localStorage.setItem('egs_pwa_installed', 'true');
+        localStorage.setItem('egs_pwa_platform', p);
+        const storedToken = localStorage.getItem('egs_token');
+        if (storedToken) {
+          fetch('/api/pwa/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${storedToken}` },
+            body: JSON.stringify({ platform: p })
+          }).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
     if (typeof window !== 'undefined') {
       if ((window as any).__egsPwaPrompt) {
         setDeferredPrompt((window as any).__egsPwaPrompt);
@@ -6202,6 +7858,19 @@ export default function App() {
       if (typeof window !== 'undefined') {
         (window as any).__egsPwaPrompt = null;
       }
+      try {
+        const p = isIos ? 'ios' : isMob ? 'android' : 'desktop';
+        localStorage.setItem('egs_pwa_installed', 'true');
+        localStorage.setItem('egs_pwa_platform', p);
+        const storedToken = localStorage.getItem('egs_token');
+        if (storedToken) {
+          fetch('/api/pwa/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${storedToken}` },
+            body: JSON.stringify({ platform: p })
+          }).catch(() => {});
+        }
+      } catch (_) {}
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -6265,6 +7934,42 @@ export default function App() {
       setToken(storedToken);
     }
 
+    // Synchronous recovery of cached curriculums, quests, and last subject
+    try {
+      const cachedCurrs = localStorage.getItem('egs_curriculums_cache');
+      if (cachedCurrs) {
+        const parsedCurrs = JSON.parse(cachedCurrs);
+        if (Array.isArray(parsedCurrs) && parsedCurrs.length > 0) {
+          setCurriculums(parsedCurrs);
+        }
+      }
+      const cachedGrades = localStorage.getItem('egs_active_grade_levels');
+      if (cachedGrades) {
+        const parsedGrades = JSON.parse(cachedGrades);
+        if (Array.isArray(parsedGrades) && parsedGrades.length > 0) {
+          setActiveGradeLevels(parsedGrades);
+        }
+      }
+      const cachedCurriculumIds = localStorage.getItem('egs_active_curriculum_ids');
+      if (cachedCurriculumIds) {
+        const parsedIds = JSON.parse(cachedCurriculumIds);
+        if (Array.isArray(parsedIds)) {
+          setActiveCurriculumIds(parsedIds);
+        }
+      }
+      const cachedQuests = localStorage.getItem('egs_daily_quests');
+      if (cachedQuests) {
+        const parsedQuests = JSON.parse(cachedQuests);
+        if (parsedQuests && Array.isArray(parsedQuests.quests) && parsedQuests.quests.length > 0) {
+          setDailyQuestsData(parsedQuests);
+        }
+      }
+      const savedSubj = localStorage.getItem('egs_last_subject');
+      if (savedSubj) {
+        setChatSubject(savedSubj);
+      }
+    } catch (e) {}
+
     // 5. Load system configuration & active syllabus
     loadSystemConfig(devId, storedToken);
 
@@ -6280,9 +7985,13 @@ export default function App() {
       setIsInitialLoading(false);
     }, 120);
 
-    // 8. Tab Focus & Periodic Heartbeat for Live Session Invalidation
+    // 8. Tab Focus & Periodic Heartbeat for Live Session Invalidation (throttled)
+    let lastVisibilityCheckTime = Date.now();
     const handleVisibilityCheck = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        const now = Date.now();
+        if (now - lastVisibilityCheckTime < 60000) return; // 60s cooldown to eliminate tab-switching and DevTools spam
+        lastVisibilityCheckTime = now;
         const currentTok = localStorage.getItem('egs_token');
         if (currentTok) {
           loadSystemConfig(devId, currentTok);
@@ -6291,7 +8000,6 @@ export default function App() {
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityCheck);
-    window.addEventListener('focus', handleVisibilityCheck);
 
     const sessionHeartbeat = setInterval(() => {
       const currentTok = localStorage.getItem('egs_token');
@@ -6305,7 +8013,6 @@ export default function App() {
       clearTimeout(initTimer);
       clearInterval(sessionHeartbeat);
       document.removeEventListener('visibilitychange', handleVisibilityCheck);
-      window.removeEventListener('focus', handleVisibilityCheck);
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
       window.removeEventListener('appinstalled', handleAppInstalled);
@@ -6321,6 +8028,19 @@ export default function App() {
         const choiceResult = await promptToUse.userChoice;
         if (choiceResult && choiceResult.outcome === 'accepted') {
           setShowMobileInstallBanner(false);
+          try {
+            const p = isIosDevice ? 'ios' : isMobileDevice ? 'android' : 'desktop';
+            localStorage.setItem('egs_pwa_installed', 'true');
+            localStorage.setItem('egs_pwa_platform', p);
+            const activeToken = token || localStorage.getItem('egs_token');
+            if (activeToken) {
+              fetch('/api/pwa/install', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeToken}` },
+                body: JSON.stringify({ platform: p })
+              }).catch(() => {});
+            }
+          } catch (_) {}
         }
         setDeferredPrompt(null);
         if (typeof window !== 'undefined') {
@@ -6409,6 +8129,8 @@ export default function App() {
                 }
                 
                 return {
+                  id: h.id,
+                  session_id: h.session_id,
                   sender: 'ai',
                   message: content,
                   thought: thought,
@@ -6420,6 +8142,8 @@ export default function App() {
             }
           }
           return {
+            id: h.id,
+            session_id: h.session_id,
             sender: h.sender,
             message: h.message,
             created_at: h.created_at
@@ -6521,6 +8245,15 @@ export default function App() {
     }
   }, [activeSessionId]);
 
+  // Auto-scroll to targeted note message when messages update
+  useEffect(() => {
+    if (targetChatMsgRef.current && messages.length > 0) {
+      const { messageId, content } = targetChatMsgRef.current;
+      targetChatMsgRef.current = null;
+      scrollToMessage(messageId, content);
+    }
+  }, [messages]);
+
   // Fetch admin curriculums
   useEffect(() => {
     if (activeTab === 'admin' && token && user?.role === 'admin') {
@@ -6568,7 +8301,7 @@ export default function App() {
         localStorage.setItem('egs_user', JSON.stringify(data.user));
         setToken(data.token);
         setUser(data.user);
-        setCoins(data.user.coins === undefined ? 15.0 : data.user.coins);
+        setCoins(data.user.coins === undefined ? 20.0 : data.user.coins);
         setPoints(data.user.points || 0);
         setShowAuthModal(false);
         resetAuthForm();
@@ -6633,7 +8366,7 @@ export default function App() {
           localStorage.setItem('egs_registered_before', 'true');
           setToken(data.token);
           setUser(data.user);
-          setCoins(data.user.coins === undefined ? 15.0 : data.user.coins);
+          setCoins(data.user.coins === undefined ? 20.0 : data.user.coins);
           setPoints(data.user.points || 0);
           setShowAuthModal(false);
           resetAuthForm();
@@ -6698,7 +8431,7 @@ export default function App() {
         setUser(data.user);
         if (data.user?.track_id) setSelectedTrack(data.user.track_id);
         if (data.user?.elective_subject) setSelectedElective(data.user.elective_subject);
-        setCoins(data.user.coins === undefined ? 15.0 : data.user.coins);
+        setCoins(data.user.coins === undefined ? 20.0 : data.user.coins);
         setPoints(data.user.points || 0);
         setShowAuthModal(false);
         setShowGoogleGradeModal(false);
@@ -6718,11 +8451,12 @@ export default function App() {
           }
         } else if (data.is_new_user) {
           if (typeof window !== 'undefined') {
-            localStorage.setItem('egs_just_registered', 'true');
+            localStorage.removeItem('egs_just_registered');
+            localStorage.setItem('egs_welcome_seen', 'true');
           }
           setTimeout(() => {
             startTour('chat');
-          }, 500);
+          }, 400);
         }
       }
     } catch (err: any) {
@@ -6777,13 +8511,13 @@ export default function App() {
 
       setShowOnboardingModal(false);
 
-      // First-time registered user: trigger Chat tour
       if (typeof window !== 'undefined') {
-        localStorage.setItem('egs_just_registered', 'true');
+        localStorage.removeItem('egs_just_registered');
+        localStorage.setItem('egs_welcome_seen', 'true');
       }
       setTimeout(() => {
         startTour('chat');
-      }, 500);
+      }, 400);
     } catch (err: any) {
       const msg = err.message === 'Failed to fetch'
         ? 'تعذر الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت أو تشغيل الخادم والمحاولة ثانية.'
@@ -6823,7 +8557,7 @@ export default function App() {
               (window as any).google.accounts.id.renderButton(btnContainer, {
                 theme: "outline",
                 size: "large",
-                width: "100%",
+                width: 320,
                 text: "signin_with"
               });
             }
@@ -6925,6 +8659,9 @@ export default function App() {
       if (imageInputRef.current) {
         imageInputRef.current.value = '';
       }
+      if (cameraInputRef.current) {
+        cameraInputRef.current.value = '';
+      }
     };
     reader.readAsDataURL(file);
   };
@@ -6944,7 +8681,7 @@ export default function App() {
       handleTourClose(true);
     }
 
-    // Guest registration prompt gate: Unregistered students cannot submit questions
+    // Registration required: free trial is granted after registration to prevent misuse
     if (!user) {
       setAuthTab('register');
       setShowAuthModal(true);
@@ -6961,7 +8698,7 @@ export default function App() {
 
     // Client-side coins check
     if (coins <= 0) {
-      const isSubscribed = user && user.plan_type && user.plan_type !== 'free' && user.subscription_status === 'active';
+      const isSubscribed = user && user.plan_type && user.plan_type !== 'free' && (user.subscription_status === 'active' || !user.subscription_status);
       setMessages(prev => [...prev, {
         sender: 'ai',
         message: isSubscribed
@@ -6971,22 +8708,6 @@ export default function App() {
       if (!isSubscribed) {
         setShowUpgradeSheet(true);
       }
-      if (!user) {
-        setTimeout(() => {
-          setAuthTab('register');
-          setShowAuthModal(true);
-        }, 3000);
-      }
-      return;
-    }
-
-    // Beta: Pro model + Thinking are unlocked for all registered users (no payment tiers yet).
-    // Guests cannot reach these controls via the UI, but guard defensively.
-    if (!user && (selectedModel === 'pro' || thinkingEnabled)) {
-      setMessages(prev => [...prev, {
-        sender: 'ai',
-        message: '**تنبيه: يلزم تسجيل الدخول**\n\nنموذج المحترفين وميزة التفكير متاحة فقط للمستخدمين المسجلين.'
-      }]);
       return;
     }
 
@@ -7069,7 +8790,6 @@ export default function App() {
           grade_level: user ? user.grade_level : chatGrade,
           subject_name: chatSubject,
           session_id: activeSessionId,
-          model: selectedModel,
           thinking: thinkingEnabled,
           mode: chatMode,
           history: !user ? messages.map(m => ({ sender: m.sender, message: m.message })) : undefined
@@ -7093,21 +8813,10 @@ export default function App() {
             message: `[UPGRADE_PAYWALL]\n\n${data.message || ''}`
           }]);
           setShowUpgradeSheet(true);
-          if (!token) {
-            setTimeout(() => {
-              setAuthTab('register');
-              setShowAuthModal(true);
-            }, 3000);
-          }
         } else {
           throw new Error(data.message || data.error || 'حدث خطأ أثناء إرسال الرسالة.');
         }
         return;
-      }
-
-      // Increment local guest count if not logged in
-      if (!token) {
-        setGuestMessagesCount(prev => prev + 1);
       }
 
       // Add a placeholder message for the AI stream response (with empty searchSteps array)
@@ -7117,7 +8826,8 @@ export default function App() {
         thought: '',
         isThinking: true,
         duration: 0,
-        searchSteps: []
+        searchSteps: [],
+        isStreaming: true
       }]);
 
       let currentThought = '';
@@ -7178,7 +8888,8 @@ export default function App() {
                       if (next.length > 0 && next[next.length - 1].sender === 'ai') {
                         next[next.length - 1] = {
                           ...next[next.length - 1],
-                          searchSteps: [...currentSearchSteps]
+                          searchSteps: [...currentSearchSteps],
+                          isStreaming: true
                         };
                       }
                       return next;
@@ -7190,7 +8901,8 @@ export default function App() {
                       if (next.length > 0 && next[next.length - 1].sender === 'ai') {
                         next[next.length - 1] = {
                           ...next[next.length - 1],
-                          thought: currentThought
+                          thought: currentThought,
+                          isStreaming: true
                         };
                       }
                       return next;
@@ -7207,7 +8919,8 @@ export default function App() {
                         next[next.length - 1] = {
                           ...next[next.length - 1],
                           message: currentContent,
-                          isThinking: false
+                          isThinking: false,
+                          isStreaming: true
                         };
                       }
                       return next;
@@ -7225,6 +8938,7 @@ export default function App() {
                           ...next[next.length - 1],
                           message: `⚠️ **حدث خطأ!**\n\n${errMessage}`,
                           isThinking: false,
+                          isStreaming: false,
                           hasError: true
                         };
                       }
@@ -7243,10 +8957,13 @@ export default function App() {
                       if (next.length > 0 && next[next.length - 1].sender === 'ai') {
                         next[next.length - 1] = {
                           ...next[next.length - 1],
+                          id: dataObj.message_id || next[next.length - 1].id,
+                          session_id: dataObj.session_id || next[next.length - 1].session_id,
                           message: currentContent,
                           thought: currentThought,
                           duration: currentDuration,
-                          isThinking: false
+                          isThinking: false,
+                          isStreaming: false
                         };
                       }
                       return next;
@@ -7305,13 +9022,85 @@ export default function App() {
     } catch (err: any) {
       setMessages(prev => [...prev, {
         sender: 'ai',
-        message: `حدث خطأ في الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى. (التفاصيل: ${err.message})`
+        message: `حدث خطأ في الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى. (التفاصيل: ${err.message})`,
+        isStreaming: false
       }]);
     } finally {
       setChatLoading(false);
+      setMessages(prev => {
+        if (prev.length > 0 && (prev[prev.length - 1].isStreaming || prev[prev.length - 1].isThinking)) {
+          const next = [...prev];
+          next[next.length - 1] = { ...next[next.length - 1], isStreaming: false, isThinking: false };
+          return next;
+        }
+        return prev;
+      });
     }
   };
 
+
+  // Progressive vector embeddings generator for curriculum chunks
+  const runProgressiveEmbedding = async (curriculumId: string, subjectName: string, initialTotal: number = 0) => {
+    setEmbeddingModal({
+      curriculumId,
+      subjectName,
+      total: initialTotal,
+      completed: 0,
+      percentage: 0,
+      isRunning: true,
+      error: ''
+    });
+
+    try {
+      let isDone = false;
+      let totalChildren = initialTotal;
+      let currentCompleted = 0;
+
+      while (!isDone) {
+        const res = await fetch('/api/admin/curriculum/embed', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            curriculumId,
+            limit: 30
+          })
+        });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || 'فشلت معالجة حزمة المتجهات');
+        }
+
+        const batchData = await res.json();
+        if (batchData.totalChildren) totalChildren = batchData.totalChildren;
+        const remaining = typeof batchData.remaining === 'number' ? batchData.remaining : 0;
+        currentCompleted = Math.max(0, totalChildren - remaining);
+        const percentage = batchData.percentage || (totalChildren > 0 ? Math.round((currentCompleted / totalChildren) * 100) : 100);
+
+        setEmbeddingModal(prev => prev ? {
+          ...prev,
+          total: totalChildren,
+          completed: currentCompleted,
+          percentage,
+          isRunning: !batchData.complete
+        } : null);
+
+        if (batchData.complete || remaining === 0) {
+          isDone = true;
+          break;
+        }
+
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      loadCurriculums();
+    } catch (err: any) {
+      setEmbeddingModal(prev => prev ? { ...prev, isRunning: false, error: err.message || 'حدث خطأ أثناء معالجة المتجهات.' } : null);
+    }
+  };
 
   // Admin Operations
   const handleUploadCurriculum = async (e: React.FormEvent) => {
@@ -7381,6 +9170,10 @@ export default function App() {
           const data = await res.json();
           if (res.ok) {
             setAdminMessage({ text: data.message, type: 'success' });
+            const currId = data.curriculum?.id;
+            const pendingCount = data.stats?.pendingEmbeddingCount || 0;
+            const savedSubject = uploadSubject;
+
             setUploadSubject('');
             setUploadFile(null);
             setUploadTrackId('');
@@ -7391,6 +9184,10 @@ export default function App() {
             if (fileInput) fileInput.value = '';
 
             loadCurriculums();
+
+            if (currId && pendingCount > 0) {
+              runProgressiveEmbedding(currId, savedSubject, pendingCount);
+            }
             return;
           } else {
             errorMessage = data.error || errorMessage;
@@ -7431,9 +9228,17 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         alert(data.message || 'تم رفع ومعالجة ملف المنهج بنجاح وتفعيل المادة.');
+        const currId = attachCurriculumModal.id;
+        const subject = attachCurriculumModal.subject_name;
+        const pendingCount = data.stats?.pendingEmbeddingCount || 0;
+
         setAttachCurriculumModal(null);
         setAttachFile(null);
         loadCurriculums();
+
+        if (currId && pendingCount > 0) {
+          runProgressiveEmbedding(currId, subject, pendingCount);
+        }
       } else {
         alert(data.error || 'فشل رفع الملف للمنهج.');
       }
@@ -7577,10 +9382,10 @@ export default function App() {
 
   // Trigger dashboard stats reload when admin tab is opened
   useEffect(() => {
-    if (activeTab === 'admin' && token && user?.role === 'admin') {
+    if (activeTab === 'admin' && (adminSection === 'overview' || !adminSection) && token && user?.role === 'admin') {
       loadDashboardStats();
     }
-  }, [activeTab, token, user]);
+  }, [activeTab, adminSection, token, user?.role]);
 
   // Rename curriculum
   const handleRenameCurriculum = async (id: string) => {
@@ -7660,18 +9465,34 @@ export default function App() {
     }
   };
 
-  const loadCsStudents = async () => {
-    setCsStudentsLoading(true);
+  const loadCsStudents = async (tierOverride?: string, gradeOverride?: string, searchOverride?: string, silent = false) => {
+    if (!silent) setCsStudentsLoading(true);
     try {
-      const res = await fetch(`/api/admin/users${csStudentSearch ? `?search=${encodeURIComponent(csStudentSearch)}` : ''}`, {
+      const activeTier = tierOverride !== undefined ? tierOverride : adminStudentTierFilter;
+      const activeGrade = gradeOverride !== undefined ? gradeOverride : adminStudentGradeFilter;
+      const activeSearch = searchOverride !== undefined ? searchOverride : csStudentSearch;
+
+      const params = new URLSearchParams();
+      if (activeSearch && activeSearch.trim()) params.append('search', activeSearch.trim());
+      if (activeTier && activeTier !== 'all') params.append('tier', activeTier);
+      if (activeGrade && activeGrade !== 'all') params.append('grade_level', activeGrade);
+
+      const res = await fetch(`/api/admin/users?${params.toString()}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
       if (data.success) {
         setCsStudents(data.users || []);
+        if (data.counts) {
+          setAdminStudentCounts(data.counts);
+        }
         if (selectedCsStudent) {
           const updated = (data.users || []).find((u: any) => u.id === selectedCsStudent.id);
-          if (updated) selectCsStudent(updated.id);
+          if (updated) {
+            setSelectedCsStudent((prev: any) => prev ? { ...prev, ...updated } : updated);
+          }
+        } else if (data.users && data.users.length > 0) {
+          selectCsStudent(data.users[0].id);
         }
       }
     } catch (e) {
@@ -7808,6 +9629,200 @@ export default function App() {
     }
   };
 
+  const handleCsGrantSubscription = async () => {
+    if (!selectedCsStudent) return;
+    setCsActionLoading(true);
+    setCsActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/customer-service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'grant_subscription',
+          userId: selectedCsStudent.id,
+          plan_id: csGrantSubPlan,
+          duration_days: csGrantSubDays,
+          note: csGrantSubNote.trim()
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setCsActionFeedback({ type: 'success', message: data.message || 'تم تفعيل الاشتراك بنجاح.' });
+      setCsGrantSubModal(false);
+      selectCsStudent(selectedCsStudent.id);
+      loadCsStudents(undefined, undefined, undefined, true);
+    } catch (e: any) {
+      setCsActionFeedback({ type: 'error', message: e.message || 'فشل تفعيل الاشتراك.' });
+    } finally {
+      setCsActionLoading(false);
+    }
+  };
+
+  const handleCsUpdateProfile = async () => {
+    if (!selectedCsStudent) return;
+    setCsActionLoading(true);
+    setCsActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/customer-service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'update_student_profile',
+          userId: selectedCsStudent.id,
+          name: csEditName.trim(),
+          phone: csEditPhone.trim(),
+          email: csEditEmail.trim(),
+          grade_level: csEditGrade,
+          track_id: csEditTrack || null
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setCsActionFeedback({ type: 'success', message: 'تم تحديث بيانات الطالب بنجاح.' });
+      setCsEditProfileModal(false);
+      selectCsStudent(selectedCsStudent.id);
+      loadCsStudents(undefined, undefined, undefined, true);
+    } catch (e: any) {
+      setCsActionFeedback({ type: 'error', message: e.message || 'فشل تحديث بيانات الطالب.' });
+    } finally {
+      setCsActionLoading(false);
+    }
+  };
+
+  const handleCsToggleBan = async () => {
+    if (!selectedCsStudent) return;
+    const isCurrentlyBanned = selectedCsStudent.subscription_status === 'suspended';
+    const actionText = isCurrentlyBanned ? 'رفع التجميد عن' : 'تجميد';
+    if (!confirm(`هل أنت متأكد من رغبتك في ${actionText} حساب الطالب ${selectedCsStudent.name}؟`)) return;
+
+    setCsActionLoading(true);
+    setCsActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/customer-service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'toggle_account_status',
+          userId: selectedCsStudent.id,
+          is_banned: !isCurrentlyBanned
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setCsActionFeedback({ type: 'success', message: data.message || 'تم تحديث حالة الحساب بنجاح.' });
+      selectCsStudent(selectedCsStudent.id);
+      loadCsStudents(undefined, undefined, undefined, true);
+    } catch (e: any) {
+      setCsActionFeedback({ type: 'error', message: e.message || 'فشل تحديث حالة الحساب.' });
+    } finally {
+      setCsActionLoading(false);
+    }
+  };
+
+  const handleCsSendDirectNotification = async () => {
+    if (!selectedCsStudent) return;
+    if (!csDirectNotifTitle.trim() || !csDirectNotifBody.trim()) {
+      alert('يرجى كتابة عنوان الإشعار ومحتواه.');
+      return;
+    }
+    setCsActionLoading(true);
+    setCsActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/customer-service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'send_direct_notification',
+          userId: selectedCsStudent.id,
+          title: csDirectNotifTitle.trim(),
+          body: csDirectNotifBody.trim(),
+          type: csDirectNotifType
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setCsActionFeedback({ type: 'success', message: 'تم إرسال الإشعار المباشر بنجاح للطالب.' });
+      setCsDirectNotifModal(false);
+      setCsDirectNotifTitle('');
+      setCsDirectNotifBody('');
+    } catch (e: any) {
+      setCsActionFeedback({ type: 'error', message: e.message || 'فشل إرسال الإشعار.' });
+    } finally {
+      setCsActionLoading(false);
+    }
+  };
+
+  const handleCsDeductCoins = async (amountToDeduct?: number) => {
+    if (!selectedCsStudent) return;
+    const amount = amountToDeduct !== undefined ? amountToDeduct : parseFloat(csCoinsToDeduct);
+    if (isNaN(amount) || amount <= 0) {
+      alert('يرجى إدخال عدد نقاط موجب صحيح.');
+      return;
+    }
+    setCsActionLoading(true);
+    setCsActionFeedback(null);
+    try {
+      const res = await fetch('/api/admin/customer-service', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          action: 'deduct_coins',
+          userId: selectedCsStudent.id,
+          amount
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+      setCsActionFeedback({ type: 'success', message: data.message || `تم خصم ${amount} نقطة بنجاح.` });
+      selectCsStudent(selectedCsStudent.id);
+      loadCsStudents(undefined, undefined, undefined, true);
+    } catch (e: any) {
+      setCsActionFeedback({ type: 'error', message: e.message || 'فشل خصم النقاط.' });
+    } finally {
+      setCsActionLoading(false);
+    }
+  };
+
+  const handleExportStudentsCsv = () => {
+    if (!csStudents || csStudents.length === 0) {
+      alert('لا توجد بيانات طلاب للتصدير حالياً.');
+      return;
+    }
+    const headers = ['الاسم', 'رقم الهاتف', 'البريد الإلكتروني', 'الصف الدراسي', 'الباقة', 'حالة الاشتراك', 'النقاط', 'نقاط الترتيب', 'الأجهزة النشطة', 'تطبيق PWA مثبت', 'منصة PWA', 'تاريخ تثبيت PWA', 'الرسائل المرسلة', 'أيام التفاعل (AI)', 'مجموعات البطاقات', 'إجمالي البطاقات', 'الاختبارات المنشأة', 'الاختبارات المنجزة', 'تاريخ التسجيل'];
+    const rows = csStudents.map(u => [
+      `"${(u.name || '').replace(/"/g, '""')}"`,
+      `"${(u.phone || '').replace(/"/g, '""')}"`,
+      `"${(u.email || '').replace(/"/g, '""')}"`,
+      `"${(GRADE_NAMES[u.grade_level] || u.grade_level || '').replace(/"/g, '""')}"`,
+      `"${(u.plan_type === 'pro_1m' ? 'شهر برو' : u.plan_type === 'pro_2m' ? 'شهرين' : u.plan_type === 'pro_3m' ? '3 أشهر' : u.plan_type === 'max' ? 'ماكس' : 'مجاني')}"`,
+      `"${(u.subscription_status === 'active' ? 'مشترك نشط' : u.subscription_status === 'expired' ? 'منتهي' : u.subscription_status === 'suspended' ? 'مجمد' : 'مجاني')}"`,
+      `"${(u.coins ?? 0).toFixed(1)}"`,
+      `"${u.points ?? 0}"`,
+      `"${u.active_devices_count ?? 0}"`,
+      `"${u.pwa_installed ? 'نعم' : 'لا'}"`,
+      `"${(u.pwa_platform === 'ios' ? 'iOS' : u.pwa_platform === 'android' ? 'أندرويد' : u.pwa_platform === 'desktop' ? 'كمبيوتر' : u.pwa_platform || '')}"`,
+      `"${u.pwa_installed_at ? new Date(u.pwa_installed_at).toLocaleDateString('ar-EG') : ''}"`,
+      `"${u.messages_sent_count ?? 0}"`,
+      `"${u.active_chat_days_count ?? 0}"`,
+      `"${u.flashcard_decks_count ?? 0}"`,
+      `"${u.flashcards_created_count ?? 0}"`,
+      `"${u.exams_created_count ?? 0}"`,
+      `"${u.exams_completed_count ?? 0}"`,
+      `"${u.created_at ? new Date(u.created_at).toLocaleDateString('ar-EG') : ''}"`
+    ]);
+
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `egs_students_${adminStudentTierFilter}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const loadCsSupportMessages = async () => {
     setCsSupportMessagesLoading(true);
     try {
@@ -7861,16 +9876,20 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeTab === 'admin' && adminSection === 'customer_service' && token && user?.role === 'admin') {
-      if (customerServiceTab === 'ai_complaints') {
-        loadCsAiComplaints();
-      } else if (customerServiceTab === 'student_management') {
+    if (activeTab === 'admin' && (adminSection === 'customer_service' || (adminSection as any) === 'students') && token && user?.role === 'admin') {
+      if (adminSection === 'customer_service') {
+        if (customerServiceTab === 'ai_complaints') {
+          loadCsAiComplaints();
+        } else if (customerServiceTab === 'student_management') {
+          loadCsStudents();
+        } else if (customerServiceTab === 'support_messages') {
+          loadCsSupportMessages();
+        }
+      } else if ((adminSection as any) === 'students') {
         loadCsStudents();
-      } else if (customerServiceTab === 'support_messages') {
-        loadCsSupportMessages();
       }
     }
-  }, [activeTab, adminSection, customerServiceTab, csAiComplaintsFilter, csSupportStatusFilter, csSupportCategoryFilter, token, user]);
+  }, [activeTab, adminSection, customerServiceTab, adminStudentTierFilter, adminStudentGradeFilter, csAiComplaintsFilter, csSupportStatusFilter, csSupportCategoryFilter, token, user?.role]);
 
   // ─── Admin: Users Management ────────────────────────────────────────────────
   const loadAdminUsers = async () => {
@@ -7921,9 +9940,9 @@ export default function App() {
 
   useEffect(() => {
     if (activeTab === 'admin' && adminSection === 'users' && token && user?.role === 'admin') {
-      loadAdminUsers();
+      loadCsStudents();
     }
-  }, [activeTab, adminSection, token, user]);
+  }, [activeTab, adminSection, adminStudentTierFilter, adminStudentGradeFilter, token, user?.role]);
 
   // ─── Admin: Notifications Management ────────────────────────────────────────
   const loadAdminNotifications = async () => {
@@ -7998,7 +10017,7 @@ export default function App() {
     if (activeTab === 'admin' && adminSection === 'notifications' && token && user?.role === 'admin') {
       loadAdminNotifications();
     }
-  }, [activeTab, adminSection, token, user]);
+  }, [activeTab, adminSection, token, user?.role]);
 
   // ─── Admin: Reports Review ──────────────────────────────────────────────────
   const loadAdminReports = async () => {
@@ -8049,7 +10068,7 @@ export default function App() {
     if (activeTab === 'admin' && adminSection === 'reports' && token && user?.role === 'admin') {
       loadAdminReports();
     }
-  }, [activeTab, adminSection, token, user, reportsStatusFilter]);
+  }, [activeTab, adminSection, token, user?.role, reportsStatusFilter]);
 
   // ─── Admin: App Versions Management ─────────────────────────────────────────
   const loadAdminVersions = async () => {
@@ -8118,7 +10137,7 @@ export default function App() {
     if (activeTab === 'admin' && adminSection === 'versions' && token && user?.role === 'admin') {
       loadAdminVersions();
     }
-  }, [activeTab, adminSection, token, user]);
+  }, [activeTab, adminSection, token, user?.role]);
 
   // Load curriculum detail for editing
   const handleEditCurriculum = async (currId: string) => {
@@ -8170,10 +10189,19 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'فشل حفظ التعديلات.');
 
-      alert('تم تحديث محتوى المنهج الدراسي بنجاح وإعادة فهرسته.');
+      const currId = editCurriculumId;
+      const subject = editSubject;
+      const pendingCount = data.stats?.pendingEmbeddingCount || 0;
+
       setEditCurriculumId(null);
       loadCurriculums();
       loadSystemConfig();
+
+      if (currId && pendingCount > 0) {
+        runProgressiveEmbedding(currId, subject, pendingCount);
+      } else {
+        alert('تم تحديث محتوى المنهج الدراسي بنجاح.');
+      }
     } catch (err: any) {
       setEditModalError(err.message || 'فشل الحفظ.');
     } finally {
@@ -8399,6 +10427,109 @@ export default function App() {
       setProfileMessage({ text: err.message || 'حدث خطأ أثناء تحديث الاسم.', type: 'danger' });
     } finally {
       setProfileLoading(false);
+    }
+  };
+
+  const handleToggleImproveAi = async () => {
+    if (!user || improveAiLoading) return;
+    const currentVal = user.improve_ai_opt_in !== false;
+    const nextVal = !currentVal;
+    setImproveAiLoading(true);
+    setProfileMessage({ text: '', type: '' });
+
+    // Optimistically update user state and localStorage
+    const optimisticUser = { ...user, improve_ai_opt_in: nextVal };
+    setUser(optimisticUser);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('egs_user', JSON.stringify(optimisticUser));
+    }
+
+    try {
+      const res = await fetch('/api/auth/update-profile', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          action: 'update-improve-ai',
+          improve_ai_opt_in: nextVal
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        // Rollback on failure
+        const rolledBack = { ...user, improve_ai_opt_in: currentVal };
+        setUser(rolledBack);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('egs_user', JSON.stringify(rolledBack));
+        }
+        if (!checkAuthError(res.status, data)) return;
+        throw new Error(data.error || 'فشل تحديث إعداد تحسين الذكاء الاصطناعي.');
+      }
+
+      const updatedUser = { ...user, ...data.user, improve_ai_opt_in: nextVal };
+      setUser(updatedUser);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('egs_user', JSON.stringify(updatedUser));
+      }
+
+      setProfileMessage({
+        text: nextVal
+          ? 'تم تفعيل خيار المساعدة في تحسين استجابات الذكاء الاصطناعي بنجاح.'
+          : 'تم إيقاف مشاركة المحادثات لتحسين الذكاء الاصطناعي بنجاح.',
+        type: 'success'
+      });
+    } catch (err: any) {
+      setProfileMessage({ text: err.message || 'حدث خطأ أثناء تحديث الإعداد.', type: 'danger' });
+    } finally {
+      setImproveAiLoading(false);
+    }
+  };
+
+  const handleOpenStudentConversations = async (studentId: string) => {
+    setCsConversationsModalOpen(true);
+    setCsConversationsLoading(true);
+    setCsConversationsData(null);
+    setCsSelectedSessionId(null);
+    setCsConversationSearch('');
+    setCsConversationSubjectFilter('all');
+    try {
+      const res = await fetch(`/api/admin/users/conversations?userId=${studentId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (res.status === 403 && data.opted_out) {
+        setCsConversationsData({
+          sessions: [],
+          messages: [],
+          student: data.student || selectedCsStudent,
+          opted_out: true,
+          error: data.error
+        });
+      } else if (!res.ok) {
+        throw new Error(data.error || 'فشل استرجاع سجل المحادثات.');
+      } else {
+        setCsConversationsData({
+          sessions: data.sessions || [],
+          messages: data.messages || [],
+          student: data.student || selectedCsStudent,
+          opted_out: false
+        });
+        if (data.sessions && data.sessions.length > 0) {
+          setCsSelectedSessionId(data.sessions[0].id);
+        }
+      }
+    } catch (e: any) {
+      setCsConversationsData({
+        sessions: [],
+        messages: [],
+        student: selectedCsStudent,
+        error: e.message || 'حدث خطأ أثناء استرجاع سجل محادثات الطالب.'
+      });
+    } finally {
+      setCsConversationsLoading(false);
     }
   };
 
@@ -8641,6 +10772,231 @@ export default function App() {
             <span>محادثة دراسية جديدة</span>
           </button>
 
+          {/* Section: Previous Conversations (Top of Sidebar, Click to Open) */}
+          <div className="sidebar-section-container" style={{ marginTop: '0px' }}>
+            <button
+              type="button"
+              onClick={() => setPreviousConversationsOpen(prev => !prev)}
+              className={`sidebar-nav-btn ${previousConversationsOpen ? 'active' : ''}`}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '9px 12px',
+                borderRadius: '12px',
+                border: previousConversationsOpen ? '1.5px solid var(--border-primary)' : '1px solid var(--border-color)',
+                background: previousConversationsOpen ? 'var(--primary-light)' : 'var(--card-bg)',
+                color: previousConversationsOpen ? 'var(--primary-color)' : 'var(--text-main)',
+                cursor: 'pointer',
+                transition: 'var(--transition-fast)',
+                fontWeight: 700,
+                fontSize: '0.84rem'
+              }}
+              title={previousConversationsOpen ? "إغلاق قائمة المحادثات السابقة" : "فتح قائمة المحادثات السابقة"}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <History size={16} style={{ color: 'var(--primary-color)', flexShrink: 0 }} />
+                <span>المحادثات السابقة</span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {user && sessions.length > 0 && (
+                  <span
+                    className="sidebar-badge"
+                    style={{
+                      fontSize: '0.72rem',
+                      padding: '2px 7px',
+                      borderRadius: '10px',
+                      background: previousConversationsOpen ? 'var(--primary-color)' : 'var(--alpha-white-8)',
+                      color: previousConversationsOpen ? '#ffffff' : 'var(--text-muted)',
+                      fontWeight: 700
+                    }}
+                  >
+                    {sessions.length}
+                  </span>
+                )}
+                {previousConversationsOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+              </div>
+            </button>
+
+            {previousConversationsOpen && (
+              <div
+                className="animate-fade-in-fast"
+                style={{
+                  background: 'var(--alpha-white-3)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: '12px',
+                  padding: '8px',
+                  marginTop: '4px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px'
+                }}
+              >
+                {/* Search input (visible when user is logged in and sessions exist) */}
+                {user && sessions.length > 0 && (
+                  <div style={{ position: 'relative', width: '100%' }}>
+                    <input
+                      type="text"
+                      placeholder="البحث في المحادثات..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      style={{
+                        width: '100%',
+                        padding: '6px 10px 6px 28px',
+                        fontSize: '0.78rem',
+                        borderRadius: '8px',
+                        border: '1px solid var(--border-color)',
+                        background: 'var(--input-bg)',
+                        color: 'var(--text-main)',
+                        outline: 'none',
+                        direction: 'rtl'
+                      }}
+                    />
+                    {searchQuery ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery('')}
+                        style={{
+                          position: 'absolute',
+                          left: '6px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--text-muted)',
+                          cursor: 'pointer',
+                          padding: '2px',
+                          display: 'flex',
+                          alignItems: 'center'
+                        }}
+                        title="مسح البحث"
+                      >
+                        <X size={12} />
+                      </button>
+                    ) : (
+                      <Search
+                        size={13}
+                        style={{
+                          position: 'absolute',
+                          left: '8px',
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          color: 'var(--text-muted)',
+                          pointerEvents: 'none'
+                        }}
+                      />
+                    )}
+                  </div>
+                )}
+
+                {/* Sessions list */}
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '3px',
+                    maxHeight: '260px',
+                    overflowY: 'auto'
+                  }}
+                  className="custom-scrollbar"
+                >
+                  {sessionsLoading ? (
+                    <div style={{ display: 'flex', justifyContent: 'center', padding: '14px' }}>
+                      <Loader2 size={16} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+                    </div>
+                  ) : !user ? (
+                    <div style={{ padding: '12px 8px', textAlign: 'center' }}>
+                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                        سجل الدخول لحفظ واستعراض محادثاتك السابقة
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthTab('login');
+                          setShowAuthModal(true);
+                          if (isMobile) setSidebarOpen(false);
+                        }}
+                        className="btn-primary"
+                        style={{ padding: '6px 12px', fontSize: '0.78rem', borderRadius: '8px', border: 'none', cursor: 'pointer' }}
+                      >
+                        تسجيل الدخول
+                      </button>
+                    </div>
+                  ) : sessions.filter(s => !searchQuery || s.title?.toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
+                    <div style={{ padding: '12px 8px', textAlign: 'center' }}>
+                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, opacity: 0.7 }}>
+                        {searchQuery ? 'لا توجد نتائج مطابقة' : 'لا توجد محادثات سابقة'}
+                      </p>
+                    </div>
+                  ) : (
+                    sessions
+                      .filter(s => !searchQuery || s.title?.toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase()))
+                      .map((s) => (
+                        <div
+                          key={s.id}
+                          onClick={() => {
+                            if (user && s.grade_level !== user.grade_level) {
+                              alert("لا يمكنك متابعة هذه المحادثة لأنها تنتمي لصف دراسي آخر.");
+                              return;
+                            }
+                            setActiveSessionId(s.id);
+                            setActiveTab('chat');
+                            if ((s as any).mode === 'socratic' || (s as any).mode === 'detailed' || (s as any).mode === 'summary') {
+                              setChatMode((s as any).mode);
+                            }
+                            if (isMobile) setSidebarOpen(false);
+                          }}
+                          className={`sidebar-session-item ${activeSessionId === s.id ? 'active' : ''}`}
+                          style={{
+                            padding: '7px 10px',
+                            borderRadius: '8px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            cursor: 'pointer',
+                            transition: 'var(--transition-fast)'
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, overflow: 'hidden' }}>
+                            <MessageSquare size={13} style={{ opacity: 0.6, flexShrink: 0 }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>
+                              {s.title}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                            <span style={{ fontSize: '0.62rem', background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '1px 6px', borderRadius: '6px', whiteSpace: 'nowrap', fontWeight: 600 }}>
+                              {s.subject_name}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => handleDeleteSession(s.id, e)}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--danger-color)',
+                                cursor: 'pointer',
+                                padding: '3px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                borderRadius: '4px',
+                                transition: 'var(--transition-fast)',
+                                opacity: 0.7
+                              }}
+                              className="session-delete-btn"
+                              title="حذف المحادثة"
+                            >
+                              <Trash size={12} />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* Navigation Category 1: Study & AI Tools */}
           <div className="sidebar-section-container">
             <div className="sidebar-category-header">
@@ -8745,87 +11101,6 @@ export default function App() {
               </button>
             ))}
           </div>
-
-          {user && (
-            <>
-              <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', margin: '0 -4px' }} />
-              
-              {showSearch && (
-                <div style={{ padding: '0 4px', marginBottom: '8px' }}>
-                  <input
-                    type="text"
-                    placeholder="البحث في الدردشات..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    style={{
-                      width: '100%',
-                      padding: '7px 10px',
-                      fontSize: '0.8rem',
-                      borderRadius: 'var(--radius-sm)',
-                      border: '1px solid var(--border-color)',
-                      background: 'var(--input-bg)',
-                      color: 'var(--text-main)',
-                      outline: 'none',
-                    }}
-                  />
-                </div>
-              )}
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', flex: 1, overflowY: 'auto', minHeight: '100px' }} className="custom-scrollbar">
-                <h4 style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '4px', letterSpacing: '0.05em', textTransform: 'uppercase', padding: '0 2px' }}>المحادثات السابقة</h4>
-                {sessionsLoading ? (
-                  <div style={{ display: 'flex', justifyContent: 'center', padding: '14px' }}>
-                    <Loader2 size={16} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
-                  </div>
-                ) : sessions.filter(s => !searchQuery || s.title.toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
-                  <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', textAlign: 'center', padding: '12px 6px', opacity: 0.7 }}>
-                    {searchQuery ? 'لا توجد نتائج مطابقة' : 'لا يوجد محادثات سابقة'}
-                  </p>
-                ) : (
-                  sessions
-                    .filter(s => !searchQuery || s.title.toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name.toLowerCase().includes(searchQuery.toLowerCase()))
-                    .map((s) => (
-                      <div
-                        key={s.id}
-                        onClick={() => {
-                          if (user && s.grade_level !== user.grade_level) {
-                            alert("لا يمكنك متابعة هذه المحادثة لأنها تنتمي لصف دراسي آخر.");
-                            return;
-                          }
-                          setActiveSessionId(s.id);
-                          if ((s as any).mode === 'socratic' || (s as any).mode === 'detailed' || (s as any).mode === 'summary') {
-                            setChatMode((s as any).mode);
-                          }
-                          if (isMobile) setSidebarOpen(false);
-                        }}
-                        className={`sidebar-session-item ${activeSessionId === s.id ? 'active' : ''}`}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, overflow: 'hidden' }}>
-                          <MessageSquare size={13} style={{ opacity: 0.5, flexShrink: 0 }} />
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>{s.title}</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-                          <span style={{ fontSize: '0.62rem', background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '1px 6px', borderRadius: '6px', whiteSpace: 'nowrap', fontWeight: 600 }}>
-                            {s.subject_name}
-                          </span>
-                          <button
-                            onClick={(e) => handleDeleteSession(s.id, e)}
-                            style={{ background: 'transparent', border: 'none', color: 'var(--danger-color)', cursor: 'pointer', opacity: 0, padding: '3px', display: 'flex', alignItems: 'center', borderRadius: '4px', transition: 'var(--transition-fast)' }}
-                            onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-                            onMouseLeave={(e) => e.currentTarget.style.opacity = '0'}
-                            className="session-delete-btn"
-                          >
-                            <Trash size={11} />
-                          </button>
-                        </div>
-                      </div>
-                    ))
-                )}
-              </div>
-            </>
-          )}
-
-
 
         </div>
 
@@ -9217,7 +11492,7 @@ export default function App() {
               style={{
                 flex: 1,
                 overflowY: 'auto',
-                padding: isMobile ? '16px 12px' : '24px 20px',
+                padding: isMobile ? '14px 10px 24px' : '24px 20px',
                 paddingBottom: isMobile && messages.length === 0 ? 'calc(24px + 60px + env(safe-area-inset-bottom, 0px))' : '24px',
                 display: 'flex',
                 flexDirection: 'column',
@@ -9302,14 +11577,14 @@ export default function App() {
                             border: '1px solid var(--border-primary)',
                             boxShadow: 'var(--shadow-glow)'
                           }}>
-                            <LogIn size={isMobile ? 18 : 22} />
+                            <Sparkles size={isMobile ? 18 : 22} />
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: isMobile ? '0.86rem' : '0.96rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', lineHeight: '1.3' }}>
-                              <span>سجل حسابك مجاناً لبدء المذاكرة والتفاعل</span>
+                              <span>أنشئ حسابك الآن مجاناً وابدأ تجربة EGS AI</span>
                             </div>
                             <div style={{ fontSize: isMobile ? '0.72rem' : '0.78rem', color: 'var(--text-secondary)', marginTop: '3px', lineHeight: '1.45' }}>
-                              اطرح أسئلتك في المنهج الدراسي، حل المسائل المعقدة، وولد امتحانات تقييمية ذكية فورية مع EGS AI.
+                              سجل حسابك مجاناً للحصول على رصيدك التجريبي الكامل وبدء المذاكرة وحل أصعب مسائل المنهج المصري فوراً.
                             </div>
                           </div>
                         </div>
@@ -9339,7 +11614,7 @@ export default function App() {
                             }}
                           >
                             <Sparkles size={15} />
-                            <span>إنشاء حساب جديد</span>
+                            <span>إنشاء حساب مجاناً</span>
                           </button>
                           <button
                             type="button"
@@ -9389,29 +11664,54 @@ export default function App() {
                       {renderInputForm(true)}
                     </div>
 
-                    {/* Quick Link to Dedicated Tasks Page */}
-                    {user && dailyQuestsData?.quests && (
-                      <div 
-                        onClick={() => setActiveTab('tasks')}
-                        className="chat-tasks-quick-pill animate-fade-in"
-                        role="button"
-                        title="انقر لفتح صفحة المهام والإنجاز اليومي"
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <CheckCircle2 size={16} color="var(--primary-color)" />
-                          <span style={{ fontSize: '0.82rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                            مهام المذاكرة اليومية:
-                          </span>
-                          <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                            {dailyQuestsData.quests.filter((q: any) => q.completed).length} من {dailyQuestsData.quests.length} مكتملة
-                          </span>
+                    {/* In-Chat Daily Quests Circuit Tracker / Tasks Button */}
+                    {(() => {
+                      const questsList = dailyQuestsData?.quests || DEFAULT_DAILY_QUESTS;
+                      const rewardPoints = (dailyQuestsData?.quests ? dailyQuestsData.quests.length : questsList.length) * 5;
+                      return (
+                        <div 
+                          onClick={() => {
+                            setActiveTab('tasks');
+                            if (isMobile) setSidebarOpen(false);
+                          }}
+                          className="chat-quests-circuit-bar"
+                          role="button"
+                          title="انقر لفتح صفحة المهام والإنجاز اليومي"
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            <CheckCircle2 size={16} color="var(--primary-color)" />
+                            <span style={{ fontWeight: 800, color: 'var(--text-main)', fontSize: '0.82rem' }}>
+                              حلبة الإنجاز اليومي:
+                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                              {questsList.map((q: any, i: number) => (
+                                <span
+                                  key={q.id || i}
+                                  style={{
+                                    fontSize: '0.72rem',
+                                    padding: '2px 7px',
+                                    borderRadius: 'var(--radius-full)',
+                                    background: q.completed ? 'rgba(34, 197, 94, 0.15)' : 'var(--alpha-white-3)',
+                                    color: q.completed ? 'var(--success-color)' : 'var(--text-muted)',
+                                    fontWeight: 700,
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '3px'
+                                  }}
+                                >
+                                  {q.completed ? <CheckCircle size={10} /> : <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--text-muted)' }} />}
+                                  {q.title || `مهمة ${i+1}`}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, color: 'var(--primary-color)', flexShrink: 0 }}>
+                            <span>+{rewardPoints} نقطة</span>
+                            <ArrowLeft size={13} />
+                          </div>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', fontWeight: 700, color: 'var(--primary-color)' }}>
-                          <span>عرض المهام</span>
-                          <ArrowLeft size={13} />
-                        </div>
-                      </div>
-                    )}
+                      );
+                    })()}
                     
                     <p style={{ textAlign: 'center', fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '4px', lineHeight: '1.5', opacity: 0.85 }}>
                       EGS AI نظام ذكاء اصطناعي للمساعدة في المذاكرة — تحقق دائماً من الكتب المدرسية والمقررات الرسمية.
@@ -9420,35 +11720,50 @@ export default function App() {
                 </div>
               ) : (
                 <div style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: isMobile ? '14px' : '20px', width: '100%' }}>
-                  {messages.map((msg, index) => (
-                    <div
-                      key={index}
-                      className="message-row animate-fade-in"
-                      style={{
-                        flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row',
-                      }}
-                    >
-                      {/* Avatar */}
-                      {msg.sender === 'user' ? (
-                        <div className="message-avatar message-avatar-user">
-                          {user?.name ? user.name[0].toUpperCase() : 'أ'}
-                        </div>
-                      ) : (
-                        <div className="message-avatar message-avatar-ai" style={{ overflow: 'hidden', padding: 0 }}>
-                          <img src="/logo.png" alt="EGS AI Logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                        </div>
-                      )}
-
-                      {/* Bubble content */}
-                      <div 
-                        style={{ 
-                          display: 'flex', 
-                          flexDirection: 'column', 
-                          maxWidth: msg.sender === 'user' ? (isMobile ? '88%' : '80%') : (isMobile ? '94%' : '90%'), 
-                          alignItems: msg.sender === 'user' ? 'flex-end' : 'flex-start',
-                          flex: 1
+                  {messages.map((msg, index) => {
+                    const isMsgStreaming = Boolean(msg.isStreaming || (chatLoading && index === messages.length - 1));
+                    const isHighlighted = highlightedMessageId === (msg.id || `idx-${index}`) ||
+                                          highlightedMessageId === `chat-msg-${msg.id || `idx-${index}`}` ||
+                                          (highlightedMessageId && msg.id && highlightedMessageId === msg.id);
+                    return (
+                      <div
+                        key={index}
+                        id={`chat-msg-${msg.id || `idx-${index}`}`}
+                        data-msg-id={msg.id || `idx-${index}`}
+                        data-msg-index={index}
+                        className={`message-row animate-fade-in ${msg.sender === 'ai' ? 'message-row-ai' : 'message-row-user'} ${isHighlighted ? 'message-highlight-target' : ''}`}
+                        style={{
+                          flexDirection: msg.sender === 'user' ? 'row-reverse' : 'row',
+                          width: '100%',
+                          borderRadius: isHighlighted ? '16px' : undefined,
+                          padding: isHighlighted ? '6px' : undefined,
+                          background: isHighlighted ? 'rgba(0, 180, 216, 0.08)' : undefined,
+                          transition: 'background 0.3s ease, padding 0.3s ease'
                         }}
                       >
+                        {/* Avatar */}
+                        {msg.sender === 'user' ? (
+                          <div className="message-avatar message-avatar-user">
+                            {user?.name ? user.name[0].toUpperCase() : 'أ'}
+                          </div>
+                        ) : (
+                          <div className="message-avatar message-avatar-ai" style={{ overflow: 'hidden', padding: 0 }}>
+                            <img src="/logo.png" alt="EGS AI Logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                          </div>
+                        )}
+
+                        {/* Bubble content */}
+                        <div 
+                          className={`message-content-wrapper ${msg.sender === 'ai' ? 'message-content-ai' : 'message-content-user'}`}
+                          style={{ 
+                            display: 'flex', 
+                            flexDirection: 'column', 
+                            maxWidth: msg.sender === 'user' ? (isMobile ? '88%' : '80%') : (isMobile ? '100%' : '90%'), 
+                            width: msg.sender === 'ai' ? '100%' : 'auto',
+                            alignItems: msg.sender === 'user' ? 'flex-end' : (isMobile ? 'stretch' : 'flex-start'),
+                            flex: 1
+                          }}
+                        >
                         {/* Search Steps Panel — shows RAG search process */}
                         {msg.sender === 'ai' && (msg.searchSteps && msg.searchSteps.length > 0 || (msg.isThinking && (!msg.searchSteps || msg.searchSteps.length === 0))) && (
                           <SearchStepsPanel
@@ -9496,6 +11811,7 @@ export default function App() {
                               <FormattedChatMessage
                                 content={msg.message}
                                 sender="ai"
+                                isStreaming={isMsgStreaming}
                                 onGoToExams={async (exam: any) => {
                                   if (!exam.id) {
                                     try {
@@ -9574,6 +11890,12 @@ export default function App() {
                                   }
                                   if (isMobile) setSidebarOpen(false);
                                 }}
+                                onSparkPrompt={(sparkText: string) => {
+                                  handleSendMessage(undefined, sparkText);
+                                }}
+                                onSaveToNotebook={(cleanContent: string) => {
+                                  handleBookmarkMessage({ sender: 'ai', message: cleanContent, id: msg.id, session_id: msg.session_id || activeSessionId || undefined }, index);
+                                }}
                               />
                             </div>
                           ) : (
@@ -9588,8 +11910,8 @@ export default function App() {
                         )}
                         
                         {/* Actions below bubble */}
-                        {msg.sender === 'ai' && msg.message && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '6px' : '10px', marginTop: '8px', flexWrap: 'wrap' }}>
+                        {msg.sender === 'ai' && msg.message && !isMsgStreaming && (
+                          <div className="animate-fade-in" style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '6px' : '10px', marginTop: '8px', flexWrap: 'wrap' }}>
                             <button
                               type="button"
                               onClick={() => navigator.clipboard.writeText(msg.message)}
@@ -9678,7 +12000,8 @@ export default function App() {
                         )}
                       </div>
                     </div>
-                  ))}
+                  );
+                })}
                   {chatLoading && (messages.length === 0 || messages[messages.length - 1].sender !== 'ai') && (
                     <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
                       <div style={{ width: '36px', height: '36px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-color)', color: '#ffffff' }}>
@@ -9712,11 +12035,13 @@ export default function App() {
 
             {/* Input Bar */}
             {messages.length > 0 && (
-              <div style={{ padding: isMobile ? '10px 14px calc(10px + 64px + env(safe-area-inset-bottom, 0px))' : '20px 24px', borderTop: '1px solid var(--border-color)', background: 'var(--sidebar-bg)' }}>
+              <div style={{ padding: isMobile ? '6px 10px calc(6px + 62px + env(safe-area-inset-bottom, 0px))' : '18px 24px', borderTop: '1px solid var(--border-color)', background: 'var(--sidebar-bg)' }}>
                 {renderInputForm(false)}
-                <p style={{ textAlign: 'center', fontSize: isMobile ? '0.68rem' : '0.72rem', color: 'var(--text-muted)', marginTop: isMobile ? '4px' : '8px', lineHeight: '1.5' }}>
-                  {isMobile ? 'EGS AI قد يخطئ — تحقق دائماً من المناهج والكتب المدرسية الرسمية' : 'EGS AI ذكاء اصطناعي وقد يرتكب أخطاءً — تحقق دائماً من المناهج والكتب المدرسية الرسمية. الإجابات مُولَّدة تلقائياً ولسنا مسؤولين عنها بشكل كامل.'}
-                </p>
+                {!isMobile && (
+                  <p style={{ textAlign: 'center', fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.5' }}>
+                    EGS AI ذكاء اصطناعي وقد يرتكب أخطاءً — تحقق دائماً من المناهج والكتب المدرسية الرسمية. الإجابات مُولَّدة تلقائياً ولسنا مسؤولين عنها بشكل كامل.
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -9812,7 +12137,7 @@ export default function App() {
                           تاريخ وساعة انتهاء الاشتراك
                         </span>
                         <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--primary-color)', marginTop: '4px' }}>
-                          {user?.subscription_end_date ? new Date(user.subscription_end_date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : 'سارٍ'}
+                          {effectiveEndMs ? new Date(effectiveEndMs).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : (user?.subscription_end_date ? new Date(user.subscription_end_date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : 'سارٍ')}
                         </div>
                       </div>
 
@@ -9822,7 +12147,7 @@ export default function App() {
                           المدة المتبقية
                         </span>
                         <div style={{ fontSize: '0.95rem', fontWeight: 800, color: 'var(--secondary-color)', marginTop: '4px' }}>
-                          {remainingDays} يوماً متبقياً
+                          {formatRemainingSubscription(remainingDays)}
                         </div>
                       </div>
                     </div>
@@ -9883,7 +12208,7 @@ export default function App() {
                           <div>
                             <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>موعد التجديد اليومي القادم</span>
                             <div style={{ fontSize: '1.05rem', fontWeight: 900, color: 'var(--text-main)', marginTop: '2px', fontFamily: 'monospace', direction: 'ltr' }}>
-                              {renewalCountdown}
+                              <RenewalCountdownDisplay targetIso={verifiedCurrencyData?.dailyRenewal?.nextRenewalIso} />
                             </div>
                             <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>عند منتصف الليل (12:00 ص بتوقيت القاهرة)</span>
                           </div>
@@ -9923,7 +12248,7 @@ export default function App() {
                     <div style={{ background: 'var(--primary-light)', border: '1px solid var(--border-primary)', borderRadius: '12px', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '24px' }}>
                       <AlertCircle size={18} color="var(--primary-color)" style={{ flexShrink: 0 }} />
                       <span style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
-                        لا يمكن الاشتراك في باقة إضافية أو إعادة التوجيه للدفع أثناء سريان اشتراكك الحالي. سيتاح لك الاشتراك وتجديد باقتك فور انتهاء المدة الحالية في {user?.subscription_end_date ? new Date(user.subscription_end_date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : 'نهاية الفترة'}.
+                        لا يمكن الاشتراك في باقة إضافية أو إعادة التوجيه للدفع أثناء سريان اشتراكك الحالي. سيتاح لك الاشتراك وتجديد باقتك فور انتهاء المدة الحالية في {effectiveEndMs ? new Date(effectiveEndMs).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : (user?.subscription_end_date ? new Date(user.subscription_end_date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : 'نهاية الفترة')}.
                       </span>
                     </div>
 
@@ -10021,20 +12346,20 @@ export default function App() {
                   <div id="tour-subscriptions-plans" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '20px' }}>
                     
                     {/* Plan 1: 1 Month (60 EGP) */}
-                    <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '2px solid var(--primary-color)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--primary-color)', color: '#FFFFFF', fontSize: '0.68rem', fontWeight: 900, padding: '3px 10px', borderRadius: 'var(--radius-full)' }}>
-                        الباقة الأكثر طلباً
+                    <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
+                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--alpha-white-4)', color: 'var(--text-muted)', fontSize: '0.68rem', fontWeight: 900, padding: '3px 10px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-color)' }}>
+                        الباقة التمهيدية
                       </div>
-                      <h3 style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--primary-color)', marginBottom: '6px' }}>باقة شهر (1 Month)</h3>
+                      <h3 style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '6px' }}>باقة شهر (1 Month)</h3>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', margin: '12px 0 8px' }}>
                         <span style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)' }}>60</span>
                         <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-muted)' }}>ج.م / شهرياً</span>
                       </div>
                       <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content' }}>
                         <Zap size={12} />
-                        <span>أقل من 2 جنيه / اليوم (أوفر من حصة درس واحدة)</span>
+                        <span>2.0 جنيه / اليوم (أوفر من ربع حصة درس)</span>
                       </div>
-                      <div style={{ background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center' }}>
+                      <div style={{ background: 'var(--alpha-white-2)', color: 'var(--text-main)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center', border: '1px solid var(--border-color)' }}>
                         80 نقطة يومياً تتجدد كل 24 ساعة
                       </div>
                       <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', marginBottom: '16px' }} />
@@ -10052,11 +12377,11 @@ export default function App() {
                           width: '100%',
                           padding: '12px',
                           borderRadius: 'var(--radius-md)',
-                          background: 'var(--primary-color)',
-                          color: 'var(--text-on-primary)',
+                          background: 'var(--card-bg)',
+                          border: '1.5px solid var(--border-color)',
+                          color: 'var(--text-main)',
                           fontWeight: 800,
                           fontSize: '0.9rem',
-                          border: 'none',
                           cursor: subscribingPlan !== null ? 'not-allowed' : 'pointer',
                           opacity: subscribingPlan !== null && subscribingPlan !== 'pro_1m' ? 0.6 : 1,
                           display: 'flex',
@@ -10074,7 +12399,7 @@ export default function App() {
                         ) : (
                           <>
                             <CreditCard size={16} />
-                            <span>اشترك الآن (كاشير Kashier)</span>
+                            <span>اشترك لشهر واحد</span>
                           </>
                         )}
                       </button>
@@ -10086,21 +12411,21 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Plan 2: 2 Months (100 EGP) */}
+                    {/* Plan 2: 2 Months (110 EGP - The Decoy) */}
                     <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--primary-light)', color: 'var(--primary-color)', fontSize: '0.68rem', fontWeight: 900, padding: '3px 10px', borderRadius: 'var(--radius-full)' }}>
-                        الباقة الأكثر شعبية
+                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--alpha-white-4)', color: 'var(--text-muted)', fontSize: '0.68rem', fontWeight: 900, padding: '3px 10px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-color)' }}>
+                        الباقة المرنة
                       </div>
                       <h3 style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '6px' }}>باقة شهرين (2 Months)</h3>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', margin: '12px 0 8px' }}>
-                        <span style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)' }}>100</span>
+                        <span style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)' }}>110</span>
                         <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-muted)' }}>ج.م / شهرين</span>
                       </div>
                       <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content' }}>
                         <Zap size={12} />
-                        <span>فقط 1.6 جنيه / اليوم (وفر 20 ج.م)</span>
+                        <span>1.83 جنيه / اليوم (وفر 10 ج.م)</span>
                       </div>
-                      <div style={{ background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center' }}>
+                      <div style={{ background: 'var(--alpha-white-2)', color: 'var(--text-main)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center', border: '1px solid var(--border-color)' }}>
                         90 نقطة يومياً تتجدد كل 24 ساعة
                       </div>
                       <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', marginBottom: '16px' }} />
@@ -10118,8 +12443,8 @@ export default function App() {
                           padding: '12px',
                           borderRadius: 'var(--radius-md)',
                           background: 'var(--card-bg)',
-                          border: '1px solid var(--primary-color)',
-                          color: 'var(--primary-color)',
+                          border: '1.5px solid var(--border-color)',
+                          color: 'var(--text-main)',
                           fontWeight: 800,
                           fontSize: '0.9rem',
                           cursor: subscribingPlan !== null ? 'not-allowed' : 'pointer',
@@ -10139,7 +12464,7 @@ export default function App() {
                         ) : (
                           <>
                             <CreditCard size={16} />
-                            <span>اشترك الآن (كاشير Kashier)</span>
+                            <span>اشترك لشهرين</span>
                           </>
                         )}
                       </button>
@@ -10151,44 +12476,44 @@ export default function App() {
                       </div>
                     </div>
 
-                    {/* Plan 3: 3 Months (140 EGP) */}
-                    <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--primary-light)', color: 'var(--primary-color)', fontSize: '0.68rem', fontWeight: 800, padding: '3px 10px', borderRadius: 'var(--radius-full)' }}>
-                        أفضل قيمة وأعلى توفير
+                    {/* Plan 3: 3 Months (140 EGP - The Hero Tier) */}
+                    <div className="pricing-hero-card glass">
+                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--primary-color)', color: 'var(--text-on-primary)', fontSize: '0.7rem', fontWeight: 900, padding: '4px 12px', borderRadius: 'var(--radius-full)', boxShadow: '0 2px 8px rgba(255, 183, 3, 0.3)' }}>
+                        خيار 85% من الطلاب المتفوقين
                       </div>
-                      <h3 style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '6px' }}>باقة 3 أشهر (3 Months)</h3>
+                      <h3 style={{ fontSize: '1.25rem', fontWeight: 900, color: 'var(--primary-color)', marginBottom: '6px' }}>باقة 3 أشهر (الترم بالكامل)</h3>
                       <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', margin: '12px 0 8px' }}>
-                        <span style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)' }}>140</span>
-                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-muted)' }}>ج.م / 3 أشهر</span>
+                        <span style={{ fontSize: '2.2rem', fontWeight: 900, color: 'var(--text-main)' }}>140</span>
+                        <span style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--primary-color)' }}>ج.م / الترم كاملاً</span>
                       </div>
-                      <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content' }}>
+                      <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content', background: 'rgba(255, 183, 3, 0.15)', borderColor: 'var(--primary-color)', color: 'var(--primary-color)' }}>
                         <Zap size={12} />
-                        <span>فقط 1.5 جنيه / اليوم (أعلى توفير للترم بالكامل)</span>
+                        <span>فقط 1.5 جنيه / اليوم (وفر 40 ج.م + ضمان الترم)</span>
                       </div>
-                      <div style={{ background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center' }}>
-                        120 نقطة يومياً تتجدد كل 24 ساعة
+                      <div style={{ background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.84rem', fontWeight: 900, marginBottom: '14px', textAlign: 'center', border: '1px solid var(--border-primary)' }}>
+                        120 نقطة يومياً تتجدد تلقائياً كل 24 ساعة
                       </div>
                       <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', marginBottom: '16px' }} />
                       <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 24px', display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> 120 نقطة يومياً تتجدد تلقائياً طوال 90 يوماً</li>
+                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700 }}><CheckCircle size={15} color="var(--primary-color)" /> 120 نقطة يومياً تتجدد تلقائياً طوال 90 يوماً</li>
                         <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> أولوية قصوى وسرعة فائقة في الإجابات والحلول</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> تغطية شاملة لترم كامل في الامتحانات والحلول</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> متابعة خاصة ودعم فني مخصص</li>
+                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> تغطية شاملة لترم كامل في الامتحانات ونماذج البوكليت</li>
+                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> درع حماية دائم لسلسلة المذاكرة (Streak Shield)</li>
+                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> متابعة خاصة ودعم فني مخصص للطلاب وأولياء الأمور</li>
                       </ul>
                       <button
                         onClick={() => handleSubscribe('pro_3m')}
                         disabled={subscribingPlan !== null}
+                        className="btn-primary"
                         style={{
                           width: '100%',
-                          padding: '12px',
+                          padding: '13px',
                           borderRadius: 'var(--radius-md)',
-                          background: 'var(--card-bg)',
-                          border: '1px solid var(--primary-color)',
-                          color: 'var(--primary-color)',
-                          fontWeight: 800,
-                          fontSize: '0.9rem',
+                          fontWeight: 900,
+                          fontSize: '0.95rem',
+                          border: 'none',
                           cursor: subscribingPlan !== null ? 'not-allowed' : 'pointer',
-                          opacity: subscribingPlan !== null && subscribingPlan !== 'pro_3m' ? 0.6 : 1,
+                          boxShadow: 'var(--shadow-glow)',
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'center',
@@ -10203,8 +12528,8 @@ export default function App() {
                           </>
                         ) : (
                           <>
-                            <CreditCard size={16} />
-                            <span>اشترك الآن (كاشير Kashier)</span>
+                            <Sparkles size={16} />
+                            <span>اشترك في باقة الترم بالكامل (140 ج.م)</span>
                           </>
                         )}
                       </button>
@@ -10380,9 +12705,10 @@ export default function App() {
               {/* Admin Section Tabs */}
               <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', borderBottom: '1px solid var(--border-color)', paddingBottom: '4px' }}>
                 {[
-                  { key: 'overview', label: 'المناهج والإحصائيات', icon: <BookOpen size={14} /> },
-                  { key: 'customer_service', label: 'خدمة العملاء', icon: <Headphones size={14} /> },
-                  { key: 'users', label: 'المستخدمون', icon: <User size={14} /> },
+                  { key: 'overview', label: 'الإحصائيات والتحليلات', icon: <BarChart3 size={14} /> },
+                  { key: 'users', label: 'الطلاب والاشتراكات', icon: <User size={14} /> },
+                  { key: 'curriculum', label: 'المناهج والمحتوى', icon: <BookOpen size={14} /> },
+                  { key: 'customer_service', label: 'خدمة العملاء والدعم', icon: <Headphones size={14} /> },
                   { key: 'notifications', label: 'الإشعارات', icon: <Sparkles size={14} /> },
                   { key: 'reports', label: 'البلاغات', icon: <AlertCircle size={14} /> },
                   { key: 'versions', label: 'إصدارات التطبيق', icon: <Globe size={14} /> },
@@ -10413,74 +12739,641 @@ export default function App() {
               </div>
 
               {adminSection === 'overview' && (
-              <>
-              {/* Statistics Dashboard */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '20px' }}>
-                {/* Total Users */}
-                <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600 }}>إجمالي الطلاب المسجلين</span>
-                  <span style={{ fontSize: '2rem', fontWeight: 800, color: 'var(--primary-color)' }}>
-                    {dashboardStats?.totalUsers || 0} طالب
-                  </span>
-                  <div style={{ borderTop: '1px solid var(--border-color)', marginTop: '10px', paddingTop: '8px', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                    <div style={{ fontWeight: 700, marginBottom: '4px', color: 'var(--text-main)' }}>توزيع الطلاب حسب الصف:</div>
-                    {Object.entries(GRADE_NAMES).map(([key, name]) => {
-                      const count = dashboardStats?.usersByGrade?.[key] || 0;
-                      return (
-                        <div key={key} style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0' }}>
-                          <span>{name}:</span>
-                          <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>{count}</span>
-                        </div>
-                      );
-                    })}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                {/* Header & Quick Action */}
+                <div className="glass" style={{ padding: '20px 24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '12px' }}>
+                  <div>
+                    <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--primary-color)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <BarChart3 size={22} />
+                      <span>لوحة الإحصائيات والتحليلات المتقدمة</span>
+                    </h3>
+                    <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                      مؤشرات الأداء المالي، معدلات تحويل المشتركين، والتفاعل الأكاديمي المباشر في المنصة.
+                    </p>
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      onClick={() => setAdminSection('users')}
+                      className="btn-primary"
+                      style={{ padding: '8px 16px', fontSize: '0.82rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}
+                    >
+                      <User size={14} />
+                      <span>إدارة الطلاب والاشتراكات</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={loadDashboardStats}
+                      title="تحديث البيانات"
+                      style={{ background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', color: 'var(--text-muted)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}
+                    >
+                      <RefreshCw size={14} className={dashboardLoading ? 'animate-spin' : ''} />
+                    </button>
                   </div>
                 </div>
 
-                {/* Highest Usage User */}
-                <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                {/* 1. Core KPIs Row */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
+                  
+                  {/* Total Students */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700 }}>إجمالي الطلاب المسجلين</span>
+                      <User size={18} color="var(--primary-color)" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: 'var(--text-main)' }}>
+                      {dashboardStats?.totalUsers || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      {dashboardStats?.subscribedUsersCount || 0} مشترك • {dashboardStats?.freeUsersCount || 0} مجاني
+                    </span>
+                  </div>
+
+                  {/* Active Subscribers */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid rgba(255, 183, 3, 0.4)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: '#FFB703', fontWeight: 800 }}>المشتركون الفعّالون</span>
+                      <Crown size={18} color="#FFB703" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: '#FFB703' }}>
+                      {dashboardStats?.subscribedUsersCount || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      معدل التحويل: {dashboardStats?.conversionRate || 0}%
+                    </span>
+                  </div>
+
+                  {/* Free Students */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700 }}>الطلاب المجانيون</span>
+                      <BookOpen size={18} color="var(--secondary-color)" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: 'var(--secondary-color)' }}>
+                      {dashboardStats?.freeUsersCount || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      مؤهلون للترقية لباقات برو
+                    </span>
+                  </div>
+
+                  {/* Estimated Revenue */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid rgba(34, 197, 94, 0.3)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: '#22C55E', fontWeight: 800 }}>إجمالي الإيرادات المحققة</span>
+                      <CreditCard size={18} color="#22C55E" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: '#22C55E' }}>
+                      {((dashboardStats?.totalRevenueEGP || 0)).toLocaleString('ar-EG')} ج.م
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      مدفوعات مؤكدة بالجنيه المصري
+                    </span>
+                  </div>
+
+                  {/* Active Today */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700 }}>النشطون اليوم</span>
+                      <Activity size={18} color="var(--primary-color)" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: 'var(--primary-color)' }}>
+                      {dashboardStats?.activeTodayCount || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      تفاعلوا خلال آخر 24 ساعة
+                    </span>
+                  </div>
+
+                  {/* Total Exams Completed */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700 }}>الامتحانات المنجزة</span>
+                      <Award size={18} color="#7209B7" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: '#7209B7' }}>
+                      {dashboardStats?.totalExamsCount || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      اختبار تدريبي وتقييمي تم حله
+                    </span>
+                  </div>
+
+                  {/* Total AI Messages */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700 }}>رسائل ومحادثات الذكاء الاصطناعي</span>
+                      <MessageSquare size={18} color="var(--primary-color)" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: 'var(--text-main)' }}>
+                      {dashboardStats?.totalMessagesCount || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      استفسار وشرح تم الرد عليه
+                    </span>
+                  </div>
+
+                  {/* Flashcards Created */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 700 }}>بطاقات الاستذكار (Flashcards)</span>
+                      <Layers size={18} color="#FFB703" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: '#FFB703' }}>
+                      {dashboardStats?.totalFlashcardsCount || 0}
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      {dashboardStats?.totalFlashcardDecksCount || 0} مجموعة • {dashboardStats?.flashcardsCreatedTodayCount || 0} منشأة اليوم
+                    </span>
+                  </div>
+
+                  {/* PWA App Downloads / Installations */}
+                  <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid rgba(0, 180, 216, 0.4)', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: '0.78rem', color: '#00B4D8', fontWeight: 800 }}>تطبيق الويب التقدمي (PWA)</span>
+                      <Smartphone size={18} color="#00B4D8" />
+                    </div>
+                    <span style={{ fontSize: '1.8rem', fontWeight: 900, color: '#00B4D8' }}>
+                      {dashboardStats?.totalPwaUsersCount || 0} طالب
+                    </span>
+                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                      معدل التثبيت: {dashboardStats?.pwaAdoptionRate || 0}% من الطلاب • أندرويد ({dashboardStats?.pwaUsersByPlatform?.android || 0}) • iOS ({dashboardStats?.pwaUsersByPlatform?.ios || 0})
+                    </span>
+                  </div>
+
+                </div>
+
+                {/* 2. Free vs Subscribed Ratio & Plans Breakdown */}
+                <div className="glass" style={{ padding: '22px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                    <h4 style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--text-main)', margin: 0 }}>
+                      معدل المشتركين والتحويل وتوزيع الباقات
+                    </h4>
+                    <span style={{ fontSize: '0.8rem', fontWeight: 800, color: 'var(--primary-color)' }}>
+                      معدل التحويل العام: {dashboardStats?.conversionRate || 0}%
+                    </span>
+                  </div>
+
+                  {/* Visual Progress Bar */}
                   <div>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block' }}>الطالب الأكثر استخداماً للرسائل</span>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem', fontWeight: 700, marginBottom: '6px' }}>
+                      <span style={{ color: '#FFB703' }}>المشتركون ({dashboardStats?.subscribedUsersCount || 0} طالب - {dashboardStats?.totalUsers ? Math.round(((dashboardStats.subscribedUsersCount || 0) / dashboardStats.totalUsers) * 100) : 0}%)</span>
+                      <span style={{ color: 'var(--secondary-color)' }}>المجانيون ({dashboardStats?.freeUsersCount || 0} طالب)</span>
+                    </div>
+                    <div style={{ height: '10px', borderRadius: 'var(--radius-full)', background: 'var(--alpha-white-2)', overflow: 'hidden', display: 'flex' }}>
+                      <div
+                        style={{
+                          width: `${dashboardStats?.totalUsers ? Math.round(((dashboardStats.subscribedUsersCount || 0) / dashboardStats.totalUsers) * 100) : 0}%`,
+                          background: 'linear-gradient(90deg, #FFB703 0%, #FFA000 100%)',
+                          borderRadius: 'var(--radius-full) 0 0 var(--radius-full)',
+                          transition: 'width 0.5s ease'
+                        }}
+                      />
+                      <div
+                        style={{
+                          width: `${dashboardStats?.totalUsers ? Math.round(((dashboardStats.freeUsersCount || 0) / dashboardStats.totalUsers) * 100) : 100}%`,
+                          background: 'var(--border-primary)',
+                          borderRadius: '0 var(--radius-full) var(--radius-full) 0',
+                          transition: 'width 0.5s ease'
+                        }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Plan Breakdown Grid */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginTop: '4px' }}>
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', fontWeight: 700 }}>باقة شهر برو (30 يوماً)</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                        <span style={{ fontSize: '1.3rem', fontWeight: 900, color: 'var(--text-main)' }}>
+                          {dashboardStats?.subscriptionsByPlan?.pro_1m || 0}
+                        </span>
+                        <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>60 ج.م • 80 نقطة/يوم</span>
+                      </div>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', fontWeight: 700 }}>باقة شهرين (60 يوماً)</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                        <span style={{ fontSize: '1.3rem', fontWeight: 900, color: 'var(--text-main)' }}>
+                          {dashboardStats?.subscriptionsByPlan?.pro_2m || 0}
+                        </span>
+                        <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>110 ج.م • 90 نقطة/يوم</span>
+                      </div>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.76rem', color: '#FFB703', fontWeight: 800 }}>باقة 3 أشهر (ترم كامل)</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                        <span style={{ fontSize: '1.3rem', fontWeight: 900, color: '#FFB703' }}>
+                          {dashboardStats?.subscriptionsByPlan?.pro_3m || 0}
+                        </span>
+                        <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>140 ج.م • 120 نقطة/يوم</span>
+                      </div>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.76rem', color: 'var(--danger-color)', fontWeight: 700 }}>الاشتراكات المنتهية</span>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                        <span style={{ fontSize: '1.3rem', fontWeight: 900, color: 'var(--danger-color)' }}>
+                          {dashboardStats?.expiredUsersCount || 0}
+                        </span>
+                        <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>بحاجة لتجديد</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Distribution & Engagement Cards */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '20px' }}>
+                  
+                  {/* Grade Level Distribution */}
+                  <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <span style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--primary-color)' }}>توزيع الطلاب حسب الصفوف</span>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {Object.entries(GRADE_NAMES).map(([key, name]) => {
+                        const count = dashboardStats?.usersByGrade?.[key] || 0;
+                        const pct = dashboardStats?.totalUsers ? Math.round((count / dashboardStats.totalUsers) * 100) : 0;
+                        return (
+                          <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.78rem' }}>
+                              <span style={{ color: 'var(--text-main)' }}>{name}</span>
+                              <span style={{ fontWeight: 800, color: 'var(--primary-color)' }}>{count} طالب ({pct}%)</span>
+                            </div>
+                            <div style={{ height: '4px', borderRadius: 'var(--radius-full)', background: 'var(--alpha-white-2)', overflow: 'hidden' }}>
+                              <div style={{ width: `${pct}%`, height: '100%', background: 'var(--primary-color)', borderRadius: 'var(--radius-full)' }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Most Active Student */}
+                  <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <span style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--text-main)' }}>الطالب الأكثر تفاعلاً</span>
                     {dashboardStats?.highestUsageUser ? (
-                      <div style={{ marginTop: '8px' }}>
-                        <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--text-main)', display: 'block' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <span style={{ fontSize: '1.25rem', fontWeight: 900, color: 'var(--primary-color)' }}>
                           {dashboardStats.highestUsageUser.name}
                         </span>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginTop: '2px' }}>
-                          البريد الإلكتروني: {dashboardStats.highestUsageUser.email || dashboardStats.highestUsageUser.phone}
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                          {dashboardStats.highestUsageUser.email || dashboardStats.highestUsageUser.phone}
                         </span>
-                        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block' }}>
-                          الصف: {GRADE_NAMES[dashboardStats.highestUsageUser.grade_level]}
-                        </span>
-                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--primary-color)', display: 'block', marginTop: '6px' }}>
-                          عدد الرسائل المرسلة: {dashboardStats.highestUsageUser.message_count} رسالة
-                        </span>
+                        <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+                          <span className="plan-badge plan-badge-free" style={{ fontSize: '0.72rem' }}>
+                            {GRADE_NAMES[dashboardStats.highestUsageUser.grade_level]}
+                          </span>
+                          <span className="plan-badge plan-badge-pro" style={{ fontSize: '0.72rem' }}>
+                            {dashboardStats.highestUsageUser.message_count} رسالة
+                          </span>
+                        </div>
                       </div>
                     ) : (
-                      <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginTop: '8px' }}>لا توجد رسائل مرسلة بعد</span>
+                      <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>لا توجد رسائل مسجلة بعد</span>
                     )}
                   </div>
-                </div>
 
-                {/* Highest Usage Grade */}
-                <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <div>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontWeight: 600, display: 'block' }}>الصف الأكثر نشاطاً</span>
+                  {/* Most Active Grade */}
+                  <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                    <span style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--text-main)' }}>الصف الدراسي الأكثر نشاطاً</span>
                     {dashboardStats?.highestUsageGrade ? (
-                      <div style={{ marginTop: '8px' }}>
-                        <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--primary-color)', display: 'block' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <span style={{ fontSize: '1.25rem', fontWeight: 900, color: 'var(--primary-color)' }}>
                           {GRADE_NAMES[dashboardStats.highestUsageGrade.grade_level]}
                         </span>
-                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginTop: '8px' }}>
-                          عدد رسائل الصف: {dashboardStats.highestUsageGrade.message_count} رسالة
+                        <span style={{ fontSize: '0.84rem', color: 'var(--text-secondary)' }}>
+                          إجمالي رسائل هذا الصف: {dashboardStats.highestUsageGrade.message_count} رسالة
                         </span>
                       </div>
                     ) : (
-                      <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-muted)', display: 'block', marginTop: '8px' }}>لا توجد رسائل مرسلة بعد</span>
+                      <span style={{ fontSize: '0.84rem', color: 'var(--text-muted)' }}>لا توجد رسائل مسجلة بعد</span>
                     )}
                   </div>
-                </div>
-              </div>
 
+                </div>
+
+                {/* 4. Flashcards Creation Analytics Section */}
+                <div className="glass" style={{ padding: '22px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Layers size={20} color="#FFB703" />
+                      <h4 style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--text-main)', margin: 0 }}>
+                        إحصائيات إنشاء بطاقات الاستذكار (Flashcards)
+                      </h4>
+                    </div>
+                    <span style={{ fontSize: '0.8rem', fontWeight: 700, color: '#FFB703' }}>
+                      المدرب الذكي والتكرار المتباعد
+                    </span>
+                  </div>
+
+                  {/* 4 Key Metric Sub-Cards */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>مجموعات البطاقات المنشأة</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: 'var(--primary-color)' }}>
+                        {dashboardStats?.totalFlashcardDecksCount || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>مجموعة دراسية كاملة</span>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>إجمالي البطاقات الفردية</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#FFB703' }}>
+                        {dashboardStats?.totalFlashcardsCount || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>سؤال وجواب تعليمي</span>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>معدل البطاقات لكل مجموعة</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#22C55E' }}>
+                        {dashboardStats?.averageCardsPerDeck || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>بطاقة / لكل مجموعة</span>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>المنشأة اليوم</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#00B4D8' }}>
+                        {dashboardStats?.flashcardsCreatedTodayCount || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>بتوقيت القاهرة</span>
+                    </div>
+                  </div>
+
+                  {/* Distribution By Subject and By Grade */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px', marginTop: '6px' }}>
+                    {/* By Subject */}
+                    <div style={{ padding: '16px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <BookOpen size={15} color="var(--primary-color)" />
+                        <span>توزيع البطاقات حسب المواد الأكثر طلباً</span>
+                      </span>
+                      {dashboardStats?.flashcardsBySubject && Object.keys(dashboardStats.flashcardsBySubject).length > 0 ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {Object.entries(dashboardStats.flashcardsBySubject as Record<string, number>)
+                            .sort((a, b) => b[1] - a[1])
+                            .slice(0, 8)
+                            .map(([subject, count]) => {
+                              const totalDecks = dashboardStats.totalFlashcardDecksCount || 1;
+                              const pct = Math.round((count / totalDecks) * 100);
+                              return (
+                                <div key={subject} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem' }}>
+                                    <span style={{ color: 'var(--text-main)', fontWeight: 600 }}>{subject}</span>
+                                    <span style={{ fontWeight: 800, color: 'var(--primary-color)' }}>{count} مجموعة ({pct}%)</span>
+                                  </div>
+                                  <div style={{ height: '5px', borderRadius: 'var(--radius-full)', background: 'var(--alpha-white-2)', overflow: 'hidden' }}>
+                                    <div style={{ width: `${pct}%`, height: '100%', background: 'linear-gradient(90deg, #00B4D8 0%, #FFB703 100%)', borderRadius: 'var(--radius-full)' }} />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                        </div>
+                      ) : (
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>لا توجد مجموعات بطاقات منشأة بعد</span>
+                      )}
+                    </div>
+
+                    {/* By Grade */}
+                    <div style={{ padding: '16px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <GraduationCap size={15} color="#FFB703" />
+                        <span>توزيع مجموعات البطاقات حسب الصفوف الدراسية</span>
+                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {Object.entries(GRADE_NAMES).map(([key, name]) => {
+                          const count = dashboardStats?.flashcardsByGrade?.[key] || 0;
+                          const totalDecks = dashboardStats?.totalFlashcardDecksCount || 1;
+                          const pct = count > 0 ? Math.round((count / totalDecks) * 100) : 0;
+                          return (
+                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem' }}>
+                                <span style={{ color: 'var(--text-main)' }}>{name}</span>
+                                <span style={{ fontWeight: 800, color: '#FFB703' }}>{count} مجموعة ({pct}%)</span>
+                              </div>
+                              <div style={{ height: '5px', borderRadius: 'var(--radius-full)', background: 'var(--alpha-white-2)', overflow: 'hidden' }}>
+                                <div style={{ width: `${pct}%`, height: '100%', background: '#FFB703', borderRadius: 'var(--radius-full)' }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 6. PWA Progressive Web App Adoption & Installation Analytics */}
+                <div className="glass" style={{ padding: '22px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <Smartphone size={20} color="#00B4D8" />
+                      <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text-main)', margin: 0 }}>
+                        إحصائيات تطبيق الويب التقدمي (PWA) وتثبيتات الطلاب
+                      </h3>
+                    </div>
+                    <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                      معدل التحميل والتثبيت العام: <strong>{dashboardStats?.pwaAdoptionRate || 0}%</strong>
+                    </span>
+                  </div>
+
+                  {/* Summary Metric Chips */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid rgba(0, 180, 216, 0.3)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>إجمالي المثبتين للتطبيق</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#00B4D8' }}>
+                        {dashboardStats?.totalPwaUsersCount || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>طالب قاموا بتثبيت PWA</span>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>نسبة الاعتماد العامة</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#22C55E' }}>
+                        {dashboardStats?.pwaAdoptionRate || 0}%
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>من إجمالي الطلاب المسجلين</span>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>أجهزة أندرويد (Android)</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#FFB703' }}>
+                        {dashboardStats?.pwaUsersByPlatform?.android || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>تثبيت عبر جوجل كروم</span>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', fontWeight: 700 }}>أجهزة آيفون (iOS Safari)</span>
+                      <span style={{ fontSize: '1.4rem', fontWeight: 900, color: '#7209B7' }}>
+                        {dashboardStats?.pwaUsersByPlatform?.ios || 0}
+                      </span>
+                      <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>إضافة للشاشة الرئيسية</span>
+                    </div>
+                  </div>
+
+                  {/* Distribution By Platform and By Grade */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '16px', marginTop: '4px' }}>
+                    {/* By Platform */}
+                    <div style={{ padding: '16px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <Smartphone size={15} color="#00B4D8" />
+                        <span>توزيع مستخدمي التطبيق حسب نظام التشغيل</span>
+                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {[
+                          { key: 'android', name: 'أجهزة أندرويد (Android)', count: dashboardStats?.pwaUsersByPlatform?.android || 0, color: '#FFB703' },
+                          { key: 'ios', name: 'أجهزة آبل (iOS / iPadOS)', count: dashboardStats?.pwaUsersByPlatform?.ios || 0, color: '#7209B7' },
+                          { key: 'desktop', name: 'أجهزة الكمبيوتر (Desktop)', count: dashboardStats?.pwaUsersByPlatform?.desktop || 0, color: '#00B4D8' },
+                        ].map((plat) => {
+                          const total = dashboardStats?.totalPwaUsersCount || 1;
+                          const pct = plat.count > 0 ? Math.round((plat.count / total) * 100) : 0;
+                          return (
+                            <div key={plat.key} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem' }}>
+                                <span style={{ color: 'var(--text-main)' }}>{plat.name}</span>
+                                <span style={{ fontWeight: 800, color: plat.color }}>{plat.count} طالب ({pct}%)</span>
+                              </div>
+                              <div style={{ height: '5px', borderRadius: 'var(--radius-full)', background: 'var(--alpha-white-2)', overflow: 'hidden' }}>
+                                <div style={{ width: `${pct}%`, height: '100%', background: plat.color, borderRadius: 'var(--radius-full)' }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* By Grade */}
+                    <div style={{ padding: '16px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <GraduationCap size={15} color="#22C55E" />
+                        <span>توزيع مستخدمي التطبيق حسب الصفوف الدراسية</span>
+                      </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {Object.entries(GRADE_NAMES).map(([key, name]) => {
+                          const count = dashboardStats?.pwaUsersByGrade?.[key] || 0;
+                          const totalPwa = dashboardStats?.totalPwaUsersCount || 1;
+                          const pct = count > 0 ? Math.round((count / totalPwa) * 100) : 0;
+                          return (
+                            <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem' }}>
+                                <span style={{ color: 'var(--text-main)' }}>{name}</span>
+                                <span style={{ fontWeight: 800, color: '#00B4D8' }}>{count} طالب ({pct}%)</span>
+                              </div>
+                              <div style={{ height: '5px', borderRadius: 'var(--radius-full)', background: 'var(--alpha-white-2)', overflow: 'hidden' }}>
+                                <div style={{ width: `${pct}%`, height: '100%', background: '#00B4D8', borderRadius: 'var(--radius-full)' }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Exact Student Roster (Who They Are) */}
+                  <div style={{ padding: '16px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '12px', marginTop: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                      <span style={{ fontSize: '0.88rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <User size={15} color="var(--primary-color)" />
+                        <span>قائمة الطلاب الذين قاموا بتثبيت التطبيق ({dashboardStats?.pwaUsersList?.length || 0})</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAdminSection('users');
+                          setAdminStudentTierFilter('pwa');
+                          loadCsStudents('pwa', undefined, undefined, false);
+                        }}
+                        className="btn-secondary"
+                        style={{ padding: '5px 12px', fontSize: '0.74rem', fontWeight: 700, display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                      >
+                        <span>فتح القائمة في دليل الطلاب</span>
+                        <ExternalLink size={12} />
+                      </button>
+                    </div>
+
+                    {dashboardStats?.pwaUsersList && dashboardStats.pwaUsersList.length > 0 ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '10px', maxHeight: '340px', overflowY: 'auto', paddingRight: '4px' }}>
+                        {dashboardStats.pwaUsersList.map((stu: any) => {
+                          const isSub = stu.subscription_status === 'active' && stu.plan_type !== 'free';
+                          return (
+                            <div
+                              key={stu.id}
+                              style={{
+                                padding: '12px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'var(--card-bg)',
+                                border: '1px solid var(--border-color)',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '6px'
+                              }}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <span style={{ fontWeight: 800, fontSize: '0.86rem', color: 'var(--text-main)' }}>{stu.name}</span>
+                                  {isSub && <Crown size={12} color="#FFB703" />}
+                                </div>
+                                <span style={{
+                                  padding: '2px 8px',
+                                  borderRadius: 'var(--radius-full)',
+                                  fontSize: '0.66rem',
+                                  fontWeight: 700,
+                                  background: stu.pwa_platform === 'ios' ? 'rgba(114, 9, 183, 0.15)' : stu.pwa_platform === 'android' ? 'rgba(255, 183, 3, 0.15)' : 'rgba(0, 180, 216, 0.15)',
+                                  color: stu.pwa_platform === 'ios' ? '#7209B7' : stu.pwa_platform === 'android' ? '#FFB703' : '#00B4D8'
+                                }}>
+                                  {stu.pwa_platform === 'ios' ? 'آيفون iOS' : stu.pwa_platform === 'android' ? 'أندرويد' : 'كمبيوتر'}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                                <span>{GRADE_NAMES[stu.grade_level] || stu.grade_level}</span>
+                                <span style={{ direction: 'ltr' }}>{stu.email || stu.phone}</span>
+                              </div>
+
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '2px', paddingTop: '4px', borderTop: '1px dashed var(--border-color)' }}>
+                                <span>{stu.pwa_installed_at ? `تاريخ التثبيت: ${new Date(stu.pwa_installed_at).toLocaleDateString('ar-EG')}` : 'مثبت'}</span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setAdminSection('users');
+                                    setAdminStudentTierFilter('pwa');
+                                    loadCsStudents('pwa', undefined, undefined, false);
+                                    selectCsStudent(stu.id);
+                                  }}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--primary-color)',
+                                    fontWeight: 800,
+                                    cursor: 'pointer',
+                                    padding: '2px 4px',
+                                    fontSize: '0.72rem'
+                                  }}
+                                >
+                                  عرض الملف
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.82rem', padding: '20px 0' }}>
+                        لم يتم تسجيل أي تثبيت لتطبيق الويب التقدمي (PWA) حتى الآن.
+                      </p>
+                    )}
+                  </div>
+
+                </div>
+
+              </div>
+              )}
+
+              {/* Curriculum & Content Management Section */}
+              {adminSection === 'curriculum' && (
+              <>
               {/* Grade Level Activations */}
               <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
                 <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--primary-color)', marginBottom: '12px' }}>
@@ -10911,6 +13804,28 @@ export default function App() {
                                   >
                                     تعديل المحتوى
                                   </button>
+                                  {!curr.is_placeholder && (
+                                    <button
+                                      onClick={() => runProgressiveEmbedding(curr.id, curr.subject_name)}
+                                      title="توليد أو استكمال متجهات البحث الدلالي الذكي"
+                                      style={{
+                                        background: 'rgba(0, 180, 216, 0.12)',
+                                        border: '1px solid rgba(0, 180, 216, 0.3)',
+                                        color: 'var(--accent-cyan)',
+                                        cursor: 'pointer',
+                                        padding: '4px 8px',
+                                        borderRadius: '4px',
+                                        fontSize: '0.75rem',
+                                        fontWeight: 700,
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px'
+                                      }}
+                                    >
+                                      <Cpu size={12} />
+                                      <span>المتجهات</span>
+                                    </button>
+                                  )}
                                   <button
                                     onClick={() => handleDeleteCurriculum(curr.id)}
                                     style={{
@@ -11216,438 +14131,23 @@ export default function App() {
 
                   {/* SUB-SECTION 2: Student Page & Operations */}
                   {customerServiceTab === 'student_management' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                      
-                      {/* Search Bar */}
-                      <div className="glass" style={{ padding: '16px 20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', gap: '10px' }}>
-                        <div style={{ position: 'relative', flex: 1 }}>
-                          <input
-                            type="text"
-                            value={csStudentSearch}
-                            onChange={(e) => setCsStudentSearch(e.target.value)}
-                            onKeyDown={(e) => { if (e.key === 'Enter') loadCsStudents(); }}
-                            placeholder="ابحث عن طالب بالاسم، البريد الإلكتروني، رقم الهاتف، أو الصف..."
-                            style={{
-                              width: '100%',
-                              padding: '11px 38px 11px 12px',
-                              borderRadius: 'var(--radius-sm)',
-                              border: '1px solid var(--border-color)',
-                              outline: 'none',
-                              background: 'var(--sidebar-bg)',
-                              color: 'var(--text-main)',
-                              fontSize: '0.88rem'
-                            }}
-                          />
-                          <Search size={16} style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={loadCsStudents}
-                          className="btn-primary"
-                          style={{ padding: '0 20px', fontSize: '0.85rem', fontWeight: 700 }}
-                        >
-                          بحث
-                        </button>
-                      </div>
-
-                      {/* 2-Column Responsive Layout */}
-                      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '320px 1fr', gap: '16px', alignItems: 'flex-start' }}>
-                        
-                        {/* Column 1: Students List */}
-                        <div className="glass" style={{ padding: '18px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', maxHeight: '640px', overflowY: 'auto' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                            <h4 style={{ fontSize: '0.92rem', fontWeight: 800, color: 'var(--primary-color)', margin: 0 }}>قائمة الطلاب ({csStudents.length})</h4>
-                            <button onClick={loadCsStudents} title="تحديث القائمة" style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
-                              <RefreshCw size={14} className={csStudentsLoading ? 'animate-spin' : ''} />
-                            </button>
-                          </div>
-
-                          {csStudentsLoading ? (
-                            <div style={{ display: 'flex', justifyContent: 'center', padding: '30px' }}>
-                              <Loader2 size={20} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
-                            </div>
-                          ) : csStudents.length === 0 ? (
-                            <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.82rem', padding: '20px 0' }}>لا يوجد طلاب مطابقون للبحث.</p>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                              {csStudents.map((u) => {
-                                const isSelected = selectedCsStudent?.id === u.id;
-                                const planName = u.plan_type === 'pro_1m' ? 'شهر برو' : u.plan_type === 'pro_2m' ? 'شهرين' : u.plan_type === 'pro_3m' ? '3 أشهر' : u.plan_type === 'pro' ? 'برو' : u.plan_type === 'max' ? 'ماكس' : 'مجاني';
-                                return (
-                                  <div
-                                    key={u.id}
-                                    onClick={() => selectCsStudent(u.id)}
-                                    style={{
-                                      padding: '12px',
-                                      borderRadius: 'var(--radius-sm)',
-                                      border: '1px solid',
-                                      borderColor: isSelected ? 'var(--primary-color)' : 'var(--border-color)',
-                                      background: isSelected ? 'var(--primary-light)' : 'var(--sidebar-bg)',
-                                      cursor: 'pointer',
-                                      transition: 'var(--transition)',
-                                      display: 'flex',
-                                      flexDirection: 'column',
-                                      gap: '4px'
-                                    }}
-                                  >
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                      <span style={{ fontWeight: 800, fontSize: '0.88rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                                        {u.name}
-                                      </span>
-                                      <span className={`plan-badge ${u.plan_type?.startsWith('pro') || u.plan_type === 'max' ? 'plan-badge-pro' : 'plan-badge-free'}`} style={{ fontSize: '0.68rem' }}>
-                                        {planName}
-                                      </span>
-                                    </div>
-                                    <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', direction: 'ltr', textAlign: 'right' }}>
-                                      {u.email || u.phone}
-                                    </span>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                                      <span>{GRADE_NAMES[u.grade_level] || u.grade_level}</span>
-                                      <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>{(u.coins ?? 0).toFixed(1)} نقطة</span>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-
-                        {/* Column 2: Selected Student Dossier & Customer Service Operations */}
-                        <div>
-                          {!selectedCsStudent ? (
-                            <div className="glass" style={{ padding: '60px 20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', textAlign: 'center', color: 'var(--text-muted)' }}>
-                              <User size={48} style={{ margin: '0 auto 12px', opacity: 0.4, color: 'var(--primary-color)' }} />
-                              <h4 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-main)', marginBottom: '6px' }}>اختر طالباً للبدء</h4>
-                              <p style={{ fontSize: '0.85rem', maxWidth: '400px', margin: '0 auto' }}>
-                                انقر على أي طالب من القائمة لعرض تفاصيل حسابه، وإلغاء الاشتراك، وإعادة احتساب النقاط، أو حذف حسابه نهائياً.
-                              </p>
-                            </div>
-                          ) : selectedCsStudentLoading ? (
-                            <div className="glass" style={{ padding: '60px 20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'center' }}>
-                              <Loader2 size={30} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
-                            </div>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                              
-                              {/* Action Feedback Alert */}
-                              {csActionFeedback && (
-                                <div style={{
-                                  padding: '12px 16px',
-                                  borderRadius: 'var(--radius-md)',
-                                  background: csActionFeedback.type === 'success' ? 'rgba(34, 197, 94, 0.12)' : 'rgba(230, 57, 70, 0.12)',
-                                  border: '1px solid',
-                                  borderColor: csActionFeedback.type === 'success' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(230, 57, 70, 0.3)',
-                                  color: csActionFeedback.type === 'success' ? 'var(--success-color)' : 'var(--danger-color)',
-                                  fontSize: '0.85rem',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '8px'
-                                }}>
-                                  {csActionFeedback.type === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
-                                  <span>{csActionFeedback.message}</span>
-                                </div>
-                              )}
-
-                              {/* Student Summary Card */}
-                              <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px' }}>
-                                  <div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                      <h3 style={{ fontSize: '1.3rem', fontWeight: 800, color: 'var(--primary-color)', margin: 0 }}>
-                                        {selectedCsStudent.name}
-                                      </h3>
-                                      {selectedCsStudent.role === 'admin' && (
-                                        <span className="plan-badge plan-badge-max" style={{ fontSize: '0.7rem' }}>مسؤول</span>
-                                      )}
-                                    </div>
-                                    <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', direction: 'ltr', display: 'inline-block', marginTop: '2px' }}>
-                                      {selectedCsStudent.email || selectedCsStudent.phone}
-                                    </span>
-                                  </div>
-
-                                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                                    <span className={`plan-badge ${selectedCsStudent.subscription_status === 'active' ? 'plan-badge-pro' : 'plan-badge-free'}`}>
-                                      {selectedCsStudent.subscription_status === 'active' ? 'اشتراك نشط' : selectedCsStudent.subscription_status === 'expired' ? 'اشتراك منتهي' : 'بدون اشتراك نشط'}
-                                    </span>
-                                    <span className="plan-badge plan-badge-free">
-                                      {selectedCsStudent.plan_type === 'pro_1m' ? 'باقة شهر' : selectedCsStudent.plan_type === 'pro_2m' ? 'باقة شهرين' : selectedCsStudent.plan_type === 'pro_3m' ? 'باقة 3 أشهر' : selectedCsStudent.plan_type === 'max' ? 'ماكس' : 'خطة مجانية'}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                {/* Key Metrics Grid */}
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '12px', marginBottom: '16px' }}>
-                                  <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
-                                    <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>رصيد النقاط الحالي</span>
-                                    <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--primary-color)' }}>
-                                      {(selectedCsStudent.coins ?? 0).toFixed(1)}
-                                    </span>
-                                  </div>
-
-                                  <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
-                                    <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>نقاط الترتيب (Merit)</span>
-                                    <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--primary-color)' }}>
-                                      {selectedCsStudent.points || 0}
-                                    </span>
-                                  </div>
-
-                                  <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
-                                    <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>الصف الدراسي</span>
-                                    <span style={{ fontSize: '0.88rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '4px', display: 'block' }}>
-                                      {GRADE_NAMES[selectedCsStudent.grade_level] || selectedCsStudent.grade_level}
-                                    </span>
-                                  </div>
-
-                                  <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
-                                    <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>الأجهزة النشطة</span>
-                                    <span style={{ fontSize: '1.1rem', fontWeight: 800, color: (selectedCsStudent.active_devices_count ?? 0) >= 3 ? '#E63946' : 'var(--text-main)' }}>
-                                      {selectedCsStudent.active_devices_count ?? 0} / 3
-                                    </span>
-                                  </div>
-                                </div>
-
-                                {selectedCsStudent.subscription_start_date && (
-                                  <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-sm)', background: 'var(--alpha-white-2)', border: '1px solid var(--border-color)', fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-                                    <div>
-                                      <strong>بدء الاشتراك: </strong>
-                                      <span>{new Date(selectedCsStudent.subscription_start_date).toLocaleDateString('ar-EG')}</span>
-                                      <span style={{ color: 'var(--text-muted)', marginRight: '6px' }}>
-                                        (مضى {selectedCsStudent.cancellation_metrics?.elapsed_hours || 0} ساعة)
-                                      </span>
-                                    </div>
-                                    {selectedCsStudent.subscription_end_date && (
-                                      <div>
-                                        <strong>انتهاء الاشتراك: </strong>
-                                        <span>{new Date(selectedCsStudent.subscription_end_date).toLocaleDateString('ar-EG')}</span>
-                                      </div>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* ACTION 1: Cancel Subscription Plan */}
-                              <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                                  <CreditCard size={18} style={{ color: 'var(--primary-color)' }} />
-                                  <h4 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
-                                    الإجراء الأول: إلغاء باقة الاشتراك (شهر / شهرين / 3 أشهر)
-                                  </h4>
-                                </div>
-                                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: '1.6' }}>
-                                  يُشترط لإلغاء الاشتراك واسترداد الباقة أن يكون قد مضى <strong>أقل من 3 أيام (72 ساعة)</strong> على تفعيل الاشتراك، وأن يكون الطالب <strong>لم يستهلك أي نقاط</strong> من باقة الاشتراك.
-                                </p>
-
-                                {selectedCsStudent.cancellation_metrics?.is_eligible ? (
-                                  <div style={{
-                                    padding: '12px 14px',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'rgba(34, 197, 94, 0.12)',
-                                    border: '1px solid rgba(34, 197, 94, 0.3)',
-                                    color: 'var(--success-color)',
-                                    fontSize: '0.84rem',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    gap: '8px',
-                                    marginBottom: '14px'
-                                  }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 800 }}>
-                                      <CheckCircle2 size={18} />
-                                      <span>الطالب مؤهل للإلغاء والاسترداد الفوري</span>
-                                    </div>
-                                    <span style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                                      مضى على الاشتراك {selectedCsStudent.cancellation_metrics.elapsed_hours} ساعة (أقل من 72 ساعة) والرصيد كامل {selectedCsStudent.coins} نقطة (لم يتم استهلاك أي نقاط).
-                                    </span>
-                                    <button
-                                      type="button"
-                                      disabled={csActionLoading}
-                                      onClick={() => setCsCancelSubModal(true)}
-                                      style={{
-                                        alignSelf: 'flex-start',
-                                        marginTop: '4px',
-                                        padding: '8px 16px',
-                                        borderRadius: 'var(--radius-sm)',
-                                        background: '#E63946',
-                                        color: '#FFFFFF',
-                                        border: 'none',
-                                        fontWeight: 800,
-                                        fontSize: '0.82rem',
-                                        cursor: 'pointer',
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '6px'
-                                      }}
-                                    >
-                                      <XCircle size={15} />
-                                      <span>تأكيد إلغاء الاشتراك الآن</span>
-                                    </button>
-                                  </div>
-                                ) : (
-                                  <div style={{
-                                    padding: '12px 14px',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'var(--primary-light)',
-                                    border: '1px solid var(--border-primary)',
-                                    color: 'var(--text-secondary)',
-                                    fontSize: '0.82rem',
-                                    display: 'flex',
-                                    alignItems: 'flex-start',
-                                    gap: '8px'
-                                  }}>
-                                    <AlertTriangle size={16} style={{ color: 'var(--primary-color)', flexShrink: 0, marginTop: '2px' }} />
-                                    <div>
-                                      <strong style={{ color: 'var(--primary-color)' }}>غير مؤهل للإلغاء: </strong>
-                                      <span>{selectedCsStudent.cancellation_metrics?.ineligibility_reason || 'الطالب لا يملك اشتراكاً قابلاً للإلغاء.'}</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-
-                              {/* ACTION 2: Recalculate & Add Coins */}
-                              <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                                  <RotateCcw size={18} style={{ color: 'var(--primary-color)' }} />
-                                  <h4 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
-                                    الإجراء الثاني: إعادة احتساب / إضافة النقاط
-                                  </h4>
-                                </div>
-                                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 16px', lineHeight: '1.6' }}>
-                                  يتضمن هذا الإجراء إعادة احتساب النقاط المستحقة لليوم الحالي، أو إضافة رصيد نقاط مباشرة إلى حساب الطالب.
-                                </p>
-
-                                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px' }}>
-                                  
-                                  {/* Sub-action A: Recalculate daily coins */}
-                                  <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '10px' }}>
-                                    <div>
-                                      <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>
-                                        إعادة احتساب نقاط اليوم
-                                      </span>
-                                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, lineHeight: '1.5' }}>
-                                        إعادة احتساب الرصيد المستحق لهذا اليوم وتعيينه لسعة الباقة (80/90/120 نقطة) وتحديث تاريخ النشاط.
-                                      </p>
-                                    </div>
-                                    <button
-                                      type="button"
-                                      disabled={csActionLoading}
-                                      onClick={handleCsRecalculateCoins}
-                                      className="btn-secondary"
-                                      style={{ padding: '9px 14px', fontSize: '0.82rem', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
-                                    >
-                                      <RotateCcw size={14} />
-                                      <span>إعادة احتساب نقاط اليوم الآن</span>
-                                    </button>
-                                  </div>
-
-                                  {/* Sub-action B: Add coins directly */}
-                                  <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                                    <div>
-                                      <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>
-                                        إضافة نقاط مباشرة
-                                      </span>
-                                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0 }}>
-                                        إضافة نقاط مباشرة إلى رصيد حساب الطالب الحالي.
-                                      </p>
-                                    </div>
-
-                                    {/* Presets */}
-                                    <div style={{ display: 'flex', gap: '6px' }}>
-                                      {['25', '50', '100', '200'].map((preset) => (
-                                        <button
-                                          key={preset}
-                                          type="button"
-                                          onClick={() => setCsCoinsToAdd(preset)}
-                                          style={{
-                                            flex: 1,
-                                            padding: '4px 6px',
-                                            borderRadius: '4px',
-                                            border: '1px solid',
-                                            borderColor: csCoinsToAdd === preset ? 'var(--primary-color)' : 'var(--border-color)',
-                                            background: csCoinsToAdd === preset ? 'var(--primary-light)' : 'transparent',
-                                            color: csCoinsToAdd === preset ? 'var(--primary-color)' : 'var(--text-muted)',
-                                            fontSize: '0.74rem',
-                                            fontWeight: 700,
-                                            cursor: 'pointer'
-                                          }}
-                                        >
-                                          +{preset}
-                                        </button>
-                                      ))}
-                                    </div>
-
-                                    <div style={{ display: 'flex', gap: '8px' }}>
-                                      <input
-                                        type="number"
-                                        min="1"
-                                        value={csCoinsToAdd}
-                                        onChange={(e) => setCsCoinsToAdd(e.target.value)}
-                                        placeholder="عدد النقاط"
-                                        style={{
-                                          width: '90px',
-                                          padding: '8px 10px',
-                                          borderRadius: 'var(--radius-sm)',
-                                          border: '1px solid var(--border-color)',
-                                          background: 'var(--card-bg)',
-                                          color: 'var(--text-main)',
-                                          fontSize: '0.85rem',
-                                          outline: 'none'
-                                        }}
-                                      />
-                                      <button
-                                        type="button"
-                                        disabled={csActionLoading}
-                                        onClick={() => handleCsAddCoins()}
-                                        className="btn-primary"
-                                        style={{ flex: 1, padding: '8px 12px', fontSize: '0.82rem', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
-                                      >
-                                        <PlusCircle size={14} />
-                                        <span>إضافة للحساب</span>
-                                      </button>
-                                    </div>
-                                  </div>
-
-                                </div>
-                              </div>
-
-                              {/* ACTION 3: Permanently Delete Account */}
-                              <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid rgba(230, 57, 70, 0.3)', color: 'var(--text-main)' }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                                  <UserX size={18} style={{ color: 'var(--danger-color)' }} />
-                                  <h4 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--danger-color)' }}>
-                                    الإجراء الثالث: حذف حساب الطالب نهائياً
-                                  </h4>
-                                </div>
-                                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: '1.6' }}>
-                                  حذف نهائي لا يمكن التراجع عنه: سيتم مسح حساب الطالب، وسجلات المحادثات، والامتحانات، والبطاقات التعليمية، والجلسات والأجهزة والاشتراكات بشكل كامل.
-                                </p>
-                                <button
-                                  type="button"
-                                  disabled={csActionLoading || selectedCsStudent.role === 'admin'}
-                                  onClick={() => setCsDeleteConfirmModal(true)}
-                                  style={{
-                                    padding: '9px 18px',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'rgba(230, 57, 70, 0.15)',
-                                    color: '#E63946',
-                                    border: '1px solid rgba(230, 57, 70, 0.4)',
-                                    fontSize: '0.82rem',
-                                    fontWeight: 800,
-                                    cursor: selectedCsStudent.role === 'admin' ? 'not-allowed' : 'pointer',
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '6px'
-                                  }}
-                                >
-                                  <Trash2 size={15} />
-                                  <span>{selectedCsStudent.role === 'admin' ? 'لا يمكن حذف حساب المسؤول' : 'حذف حساب هذا الطالب نهائياً'}</span>
-                                </button>
-                              </div>
-
-                            </div>
-                          )}
-                        </div>
-
-                      </div>
-
+                    <div className="glass" style={{ padding: '40px 24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                      <User size={48} style={{ margin: '0 auto 14px', color: 'var(--primary-color)' }} />
+                      <h4 style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--text-main)', marginBottom: '8px' }}>
+                        دليل وإدارة الطلاب والاشتراكات المتقدم
+                      </h4>
+                      <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)', maxWidth: '480px', margin: '0 auto 20px', lineHeight: '1.6' }}>
+                        تم تخصيص قسم متكامل ومستقل للطلاب والاشتراكات في التبويب الرئيسي، يتضمن فصل المشتركين عن المجانيين، التصدير إلى Excel، تعديل الملفات الدراسية، وإدارة رصيد النقاط.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setAdminSection('users')}
+                        className="btn-primary"
+                        style={{ padding: '10px 24px', fontSize: '0.88rem', fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                      >
+                        <User size={16} />
+                        <span>فتح دليل وإدارة الطلاب والاشتراكات</span>
+                      </button>
                     </div>
                   )}
 
@@ -11901,105 +14401,1000 @@ export default function App() {
                 </div>
               )}
 
-              {/* Users Management Section */}
+              {/* Students & Subscriptions Management Section */}
               {adminSection === 'users' && (
-                <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                  <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--primary-color)', marginBottom: '16px' }}>إدارة المستخدمين</h3>
-                  <div style={{ display: 'flex', gap: '10px', marginBottom: '16px' }}>
-                    <input
-                      type="text"
-                      value={adminUserSearch}
-                      onChange={(e) => setAdminUserSearch(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') loadAdminUsers(); }}
-                      placeholder="ابحث بالاسم أو رقم الهاتف..."
-                      style={{ flex: 1, padding: '10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', outline: 'none', background: 'var(--sidebar-bg)', color: 'var(--text-main)' }}
-                    />
-                    <button onClick={loadAdminUsers} className="btn-secondary" style={{ padding: '10px 18px' }}>بحث</button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                  
+                  {/* Top Bar: Title, Counters, and Export Actions */}
+                  <div className="glass" style={{ padding: '20px 24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
+                    <div>
+                      <h3 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--primary-color)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <User size={22} />
+                        <span>دليل وإدارة الطلاب والاشتراكات</span>
+                      </h3>
+                      <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '4px 0 0' }}>
+                        إدارة شاملة لجميع الطلاب، فرز المشتركين عن المجانيين، تفعيل الباقات، وتعديل الحسابات.
+                      </p>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        onClick={handleExportStudentsCsv}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '9px 16px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'var(--sidebar-bg)',
+                          border: '1px solid var(--border-color)',
+                          color: 'var(--text-main)',
+                          fontSize: '0.82rem',
+                          fontWeight: 700,
+                          cursor: 'pointer',
+                          transition: 'var(--transition)'
+                        }}
+                        title="تصدير بيانات الطلاب المعروضين إلى ملف Excel CSV"
+                      >
+                        <Download size={15} color="var(--primary-color)" />
+                        <span>تصدير Excel (CSV)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => loadCsStudents(undefined, undefined, undefined, false)}
+                        title="تحديث البيانات"
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '9px 12px',
+                          borderRadius: 'var(--radius-sm)',
+                          background: 'var(--sidebar-bg)',
+                          border: '1px solid var(--border-color)',
+                          color: 'var(--text-muted)',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <RefreshCw size={14} className={csStudentsLoading ? 'animate-spin' : ''} />
+                      </button>
+                    </div>
                   </div>
 
-                  {adminUsersLoading ? (
-                    <div style={{ display: 'flex', justifyContent: 'center', padding: '30px' }}><Loader2 size={20} className="animate-spin" style={{ color: 'var(--primary-color)' }} /></div>
-                  ) : adminUsers.length === 0 ? (
-                    <p style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '20px 0' }}>لا يوجد مستخدمون مطابقون.</p>
-                  ) : (
-                    <div style={{ overflowX: 'auto' }}>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem', textAlign: 'right' }}>
-                        <thead>
-                          <tr style={{ borderBottom: '2px solid var(--border-color)', color: 'var(--primary-color)' }}>
-                            <th style={{ padding: '10px 8px' }}>الاسم</th>
-                            <th style={{ padding: '10px 8px' }}>البريد الإلكتروني</th>
-                            <th style={{ padding: '10px 8px' }}>الصف</th>
-                            <th style={{ padding: '10px 8px' }}>الرصيد</th>
-                            <th style={{ padding: '10px 8px', textAlign: 'center' }}>الأجهزة</th>
-                            <th style={{ padding: '10px 8px', textAlign: 'center' }}>رصيد غير محدود</th>
-                            <th style={{ padding: '10px 8px', textAlign: 'center' }}>إدارة الأجهزة</th>
-                            <th style={{ padding: '10px 8px', textAlign: 'center' }}>حذف</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {adminUsers.map((u) => (
-                            <tr key={u.id} style={{ borderBottom: '1px solid var(--alpha-white-5)' }}>
-                              <td style={{ padding: '10px 8px', fontWeight: 700 }}>{u.name}{u.role === 'admin' && <span className="plan-badge plan-badge-max" style={{ marginRight: '6px' }}>مسؤول</span>}</td>
-                              <td style={{ padding: '10px 8px', direction: 'ltr', textAlign: 'right' }}>{u.email || u.phone}</td>
-                              <td style={{ padding: '10px 8px' }}>{GRADE_NAMES[u.grade_level] || u.grade_level}</td>
-                              <td style={{ padding: '10px 8px' }}>{(u.coins ?? 0).toFixed(2)}</td>
-                              <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                <span style={{
-                                  padding: '2px 8px',
-                                  borderRadius: 'var(--radius-full)',
-                                  background: (u.active_devices_count ?? 0) >= 3 ? 'rgba(230, 57, 70, 0.15)' : 'var(--alpha-white-2)',
-                                  color: (u.active_devices_count ?? 0) >= 3 ? '#E63946' : 'var(--text-main)',
-                                  fontSize: '0.75rem',
-                                  fontWeight: 800
-                                }}>
-                                  {u.active_devices_count ?? 0} / 3
+                  {/* Filter & Search Toolbar */}
+                  <div className="glass" style={{ padding: '16px 20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                    
+                    {/* Row 1: Free vs Subscribed Segmented Filter Pills */}
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      {[
+                        { key: 'all', label: 'الكل', count: adminStudentCounts.total || csStudents.length, icon: <User size={14} /> },
+                        { key: 'subscribed', label: 'المشتركون', count: adminStudentCounts.subscribed, icon: <Crown size={14} color="#FFB703" />, isSub: true },
+                        { key: 'free', label: 'الطلاب المجانيون', count: adminStudentCounts.free, icon: <BookOpen size={14} color="var(--secondary-color)" /> },
+                        { key: 'expired', label: 'الاشتراكات المنتهية', count: adminStudentCounts.expired, icon: <Clock size={14} color="var(--text-muted)" /> },
+                        { key: 'pwa', label: 'مستخدمو PWA', count: adminStudentCounts.pwa || 0, icon: <Smartphone size={14} color="#00B4D8" />, isPwa: true },
+                      ].map((f) => {
+                        const isSelected = adminStudentTierFilter === f.key;
+                        return (
+                          <button
+                            key={f.key}
+                            type="button"
+                            onClick={() => {
+                              setAdminStudentTierFilter(f.key as any);
+                              loadCsStudents(f.key, undefined, undefined, false);
+                            }}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '6px',
+                              padding: '8px 14px',
+                              borderRadius: 'var(--radius-full)',
+                              border: '1px solid',
+                              borderColor: isSelected ? (f.isSub ? '#FFB703' : (f as any).isPwa ? '#00B4D8' : 'var(--primary-color)') : 'var(--border-color)',
+                              background: isSelected ? (f.isSub ? 'rgba(255, 183, 3, 0.15)' : (f as any).isPwa ? 'rgba(0, 180, 216, 0.15)' : 'var(--primary-light)') : 'var(--sidebar-bg)',
+                              color: isSelected ? (f.isSub ? '#FFB703' : (f as any).isPwa ? '#00B4D8' : 'var(--primary-color)') : 'var(--text-main)',
+                              fontWeight: 800,
+                              fontSize: '0.8rem',
+                              cursor: 'pointer',
+                              transition: 'var(--transition)'
+                            }}
+                          >
+                            {f.icon}
+                            <span>{f.label}</span>
+                            <span style={{
+                              padding: '1px 6px',
+                              borderRadius: 'var(--radius-full)',
+                              background: isSelected ? (f.isSub ? 'rgba(255, 183, 3, 0.3)' : (f as any).isPwa ? 'rgba(0, 180, 216, 0.3)' : 'var(--primary-color)') : 'var(--alpha-white-2)',
+                              color: isSelected ? (f.isSub ? '#FFB703' : (f as any).isPwa ? '#00B4D8' : 'var(--text-on-primary)') : 'var(--text-muted)',
+                              fontSize: '0.72rem',
+                              fontWeight: 800
+                            }}>
+                              {f.count ?? 0}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {/* Row 2: Search + Grade Level Dropdown */}
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      <div style={{ position: 'relative', flex: 1, minWidth: '220px' }}>
+                        <input
+                          type="text"
+                          value={csStudentSearch}
+                          onChange={(e) => setCsStudentSearch(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') loadCsStudents(undefined, undefined, csStudentSearch, false); }}
+                          placeholder="ابحث بالاسم، رقم الهاتف، أو البريد الإلكتروني..."
+                          style={{
+                            width: '100%',
+                            padding: '10px 36px 10px 12px',
+                            borderRadius: 'var(--radius-sm)',
+                            border: '1px solid var(--border-color)',
+                            outline: 'none',
+                            background: 'var(--sidebar-bg)',
+                            color: 'var(--text-main)',
+                            fontSize: '0.86rem'
+                          }}
+                        />
+                        <Search size={15} style={{ position: 'absolute', right: '11px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                      </div>
+
+                      <select
+                        value={adminStudentGradeFilter}
+                        onChange={(e) => {
+                          setAdminStudentGradeFilter(e.target.value);
+                          loadCsStudents(undefined, e.target.value, undefined, false);
+                        }}
+                        style={{
+                          padding: '10px 14px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border-color)',
+                          background: 'var(--sidebar-bg)',
+                          color: 'var(--text-main)',
+                          fontSize: '0.84rem',
+                          fontWeight: 700,
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="all">جميع الصفوف الدراسية</option>
+                        {Object.entries(GRADE_NAMES).map(([val, label]) => (
+                          <option key={val} value={val}>{label}</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={adminStudentOptInFilter}
+                        onChange={(e) => setAdminStudentOptInFilter(e.target.value as any)}
+                        style={{
+                          padding: '10px 14px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid var(--border-color)',
+                          background: 'var(--sidebar-bg)',
+                          color: 'var(--text-main)',
+                          fontSize: '0.84rem',
+                          fontWeight: 700,
+                          outline: 'none'
+                        }}
+                      >
+                        <option value="all">كل حالات خصوصية AI</option>
+                        <option value="opted_in">تحسين AI: مفعل (متاح)</option>
+                        <option value="opted_out">تحسين AI: معطل (محمي)</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => loadCsStudents(undefined, undefined, csStudentSearch, false)}
+                        className="btn-primary"
+                        style={{ padding: '10px 20px', fontSize: '0.84rem', fontWeight: 700 }}
+                      >
+                        بحث
+                      </button>
+                    </div>
+
+                  </div>
+
+                  {/* 2-Column Master-Detail Layout */}
+                  <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '340px 1fr', gap: '16px', alignItems: 'flex-start' }}>
+                    
+                    {/* Column 1: Students Directory List */}
+                    <div className="glass" style={{ padding: '16px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', maxHeight: '680px', overflowY: 'auto' }}>
+                      {(() => {
+                        const displayedStudents = csStudents.filter((u) => {
+                          if (adminStudentOptInFilter === 'opted_in') return u.improve_ai_opt_in !== false;
+                          if (adminStudentOptInFilter === 'opted_out') return u.improve_ai_opt_in === false;
+                          return true;
+                        });
+
+                        return (
+                          <>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', paddingBottom: '8px', borderBottom: '1px solid var(--border-color)' }}>
+                              <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--primary-color)' }}>
+                                الطلاب ({displayedStudents.length})
+                              </span>
+                              {csStudentsLoading && (
+                                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <Loader2 size={12} className="animate-spin" /> جاري التحديث...
                                 </span>
-                              </td>
-                              <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                <label style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer' }}>
-                                  <input
-                                    type="checkbox"
-                                    checked={!!u.unlimited_credit}
-                                    onChange={() => handleToggleUserUnlimited(u.id, !!u.unlimited_credit)}
-                                    style={{ accentColor: 'var(--primary-color)', width: '16px', height: '16px' }}
-                                  />
-                                </label>
-                              </td>
-                              <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                <button
-                                  type="button"
-                                  onClick={() => handleResetUserDevices(u.id)}
-                                  style={{
-                                    padding: '4px 8px',
-                                    borderRadius: 'var(--radius-sm)',
-                                    background: 'var(--alpha-white-2)',
-                                    border: '1px solid var(--border-color)',
-                                    color: 'var(--text-main)',
+                              )}
+                            </div>
+
+                            {displayedStudents.length === 0 && csStudentsLoading ? (
+                              <div style={{ display: 'flex', justifyContent: 'center', padding: '30px' }}>
+                                <Loader2 size={20} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+                              </div>
+                            ) : displayedStudents.length === 0 ? (
+                              <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.82rem', padding: '30px 0' }}>لا يوجد طلاب مطابقون لمعايير الفلتر.</p>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {displayedStudents.map((u) => {
+                                  const isSelected = selectedCsStudent?.id === u.id;
+                                  const isSub = u.subscription_status === 'active' && u.plan_type !== 'free';
+                                  const isSuspended = u.subscription_status === 'suspended';
+                                  const isExpired = u.subscription_status === 'expired';
+                                  const planName = u.plan_type === 'pro_1m' ? 'شهر برو' : u.plan_type === 'pro_2m' ? 'شهرين' : u.plan_type === 'pro_3m' ? '3 أشهر' : u.plan_type === 'pro' ? 'برو' : u.plan_type === 'max' ? 'ماكس' : 'مجاني';
+
+                                  return (
+                                    <div
+                                      key={u.id}
+                                      onClick={() => selectCsStudent(u.id)}
+                                      style={{
+                                        padding: '12px',
+                                        borderRadius: 'var(--radius-sm)',
+                                        border: '1px solid',
+                                        borderColor: isSelected ? 'var(--primary-color)' : isSuspended ? 'rgba(230, 57, 70, 0.4)' : isSub ? 'rgba(255, 183, 3, 0.4)' : 'var(--border-color)',
+                                        background: isSelected ? 'var(--primary-light)' : 'var(--sidebar-bg)',
+                                        cursor: 'pointer',
+                                        transition: 'var(--transition)',
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        gap: '4px'
+                                      }}
+                                    >
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                          {isSub && <Crown size={14} color="#FFB703" />}
+                                          <span style={{ fontWeight: 800, fontSize: '0.88rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-main)' }}>
+                                            {u.name}
+                                          </span>
+                                        </div>
+                                        <span className={`plan-badge ${isSub ? 'plan-badge-pro' : 'plan-badge-free'}`} style={{ fontSize: '0.68rem', background: isSub ? '#FFB703' : undefined, color: isSub ? '#0D1B2A' : undefined }}>
+                                          {planName}
+                                        </span>
+                                      </div>
+                                      
+                                      <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', direction: 'ltr', textAlign: 'right' }}>
+                                        {u.email || u.phone}
+                                      </span>
+
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                                        <span>{GRADE_NAMES[u.grade_level] || u.grade_level}</span>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                          <span style={{
+                                            padding: '1px 6px',
+                                            borderRadius: 'var(--radius-full)',
+                                            fontSize: '0.68rem',
+                                            fontWeight: 700,
+                                            background: isSuspended ? 'rgba(230, 57, 70, 0.15)' : isSub ? 'rgba(34, 197, 94, 0.15)' : isExpired ? 'rgba(255, 183, 3, 0.15)' : 'var(--alpha-white-2)',
+                                            color: isSuspended ? '#E63946' : isSub ? '#22C55E' : isExpired ? '#FFB703' : 'var(--text-muted)'
+                                          }}>
+                                            {isSuspended ? 'مجمد' : isSub ? 'نشط' : isExpired ? 'منتهي' : 'مجاني'}
+                                          </span>
+                                          <span style={{ fontWeight: 700, color: 'var(--primary-color)' }}>{(u.coins ?? 0).toFixed(1)} نقطة</span>
+                                        </div>
+                                      </div>
+
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.71rem', color: 'var(--text-muted)', marginTop: '5px', paddingTop: '5px', borderTop: '1px dashed var(--alpha-white-2)', flexWrap: 'wrap' }}>
+                                        <span title="عدد الرسائل المرسلة من الطالب" style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                          <MessageSquare size={11} color="var(--primary-color)" />
+                                          <span>{u.messages_sent_count ?? 0} رسالة</span>
+                                        </span>
+                                        <span>•</span>
+                                        <span title="عدد الأيام التي أرسل فيها الطالب رسائل للذكاء الاصطناعي" style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                          <Calendar size={11} color="#00B4D8" />
+                                          <span>{u.active_chat_days_count ?? 0} يوم تفاعل</span>
+                                        </span>
+                                        <span>•</span>
+                                        <span title="عدد مجموعات بطاقات الاستذكار المنشأة" style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                          <Layers size={11} color="#FFB703" />
+                                          <span>{u.flashcard_decks_count ?? 0} كروت</span>
+                                        </span>
+                                        <span>•</span>
+                                        <span title="عدد الاختبارات المنشأة" style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                          <FileText size={11} color="var(--secondary-color)" />
+                                          <span>{u.exams_created_count ?? 0} اختبار</span>
+                                        </span>
+                                        <span>•</span>
+                                        <span title="عدد الاختبارات المنجزة" style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
+                                          <CheckCircle2 size={11} color="#22C55E" />
+                                          <span>{u.exams_completed_count ?? 0} منجز</span>
+                                        </span>
+                                        {u.pwa_installed && (
+                                          <>
+                                            <span>•</span>
+                                            <span title={`تطبيق PWA مثبت (${u.pwa_platform === 'ios' ? 'iOS' : u.pwa_platform === 'android' ? 'أندرويد' : 'كمبيوتر'})`} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', color: '#00B4D8', fontWeight: 700 }}>
+                                              <Smartphone size={11} color="#00B4D8" />
+                                              <span>PWA ({u.pwa_platform === 'ios' ? 'iOS' : u.pwa_platform === 'android' ? 'أندرويد' : 'مثبت'})</span>
+                                            </span>
+                                          </>
+                                        )}
+                                        <span>•</span>
+                                        <span title={u.improve_ai_opt_in !== false ? 'موافق على تحسين الذكاء الاصطناعي (متاح عرض المحادثات)' : 'غير موافق على تحسين الذكاء الاصطناعي (المحادثات محجوبة ومحمية)'} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', color: u.improve_ai_opt_in !== false ? '#22C55E' : '#E63946', fontWeight: 600 }}>
+                                          {u.improve_ai_opt_in !== false ? <ShieldCheck size={11} color="#22C55E" /> : <EyeOff size={11} color="#E63946" />}
+                                          <span>{u.improve_ai_opt_in !== false ? 'تحسين AI: مفعل' : 'تحسين AI: معطل'}</span>
+                                        </span>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+
+                    {/* Column 2: Selected Student Dossier & Full Controls */}
+                    <div>
+                      {!selectedCsStudent ? (
+                        <div className="glass" style={{ padding: '60px 20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', textAlign: 'center', color: 'var(--text-muted)' }}>
+                          <User size={48} style={{ margin: '0 auto 12px', opacity: 0.4, color: 'var(--primary-color)' }} />
+                          <h4 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-main)', marginBottom: '6px' }}>اختر طالباً للبدء</h4>
+                          <p style={{ fontSize: '0.85rem', maxWidth: '420px', margin: '0 auto', lineHeight: '1.6' }}>
+                            انقر على أي طالب من القائمة لعرض تفاصيل حسابه، تفعيل باقة اشتراك يدوي، تعديل بياناته، إرسال إشعار فوري، إعادة ضبط الأجهزة، أو تعديل رصيد النقاط.
+                          </p>
+                        </div>
+                      ) : selectedCsStudentLoading ? (
+                        <div className="glass" style={{ padding: '60px 20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'center' }}>
+                          <Loader2 size={30} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                          
+                          {/* Action Feedback Alert */}
+                          {csActionFeedback && (
+                            <div style={{
+                              padding: '12px 16px',
+                              borderRadius: 'var(--radius-md)',
+                              background: csActionFeedback.type === 'success' ? 'rgba(34, 197, 94, 0.12)' : 'rgba(230, 57, 70, 0.12)',
+                              border: '1px solid',
+                              borderColor: csActionFeedback.type === 'success' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(230, 57, 70, 0.3)',
+                              color: csActionFeedback.type === 'success' ? 'var(--success-color)' : 'var(--danger-color)',
+                              fontSize: '0.85rem',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '8px'
+                            }}>
+                              {csActionFeedback.type === 'success' ? <CheckCircle2 size={18} /> : <AlertTriangle size={18} />}
+                              <span>{csActionFeedback.message}</span>
+                            </div>
+                          )}
+
+                          {/* Student Summary Card */}
+                          <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px' }}>
+                              <div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <h3 style={{ fontSize: '1.3rem', fontWeight: 800, color: 'var(--primary-color)', margin: 0 }}>
+                                    {selectedCsStudent.name}
+                                  </h3>
+                                  {selectedCsStudent.role === 'admin' && (
+                                    <span className="plan-badge plan-badge-max" style={{ fontSize: '0.7rem' }}>مسؤول</span>
+                                  )}
+                                  {selectedCsStudent.subscription_status === 'suspended' && (
+                                    <span style={{ padding: '2px 8px', borderRadius: '4px', background: 'rgba(230, 57, 70, 0.15)', color: '#E63946', fontSize: '0.72rem', fontWeight: 800 }}>
+                                      حساب مجمد
+                                    </span>
+                                  )}
+                                </div>
+                                <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', direction: 'ltr', display: 'inline-block', marginTop: '2px' }}>
+                                  {selectedCsStudent.email || selectedCsStudent.phone}
+                                </span>
+                              </div>
+
+                              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                {selectedCsStudent.pwa_installed && (
+                                  <span style={{
+                                    padding: '3px 10px',
+                                    borderRadius: 'var(--radius-full)',
+                                    background: 'rgba(0, 180, 216, 0.15)',
+                                    border: '1px solid rgba(0, 180, 216, 0.4)',
+                                    color: '#00B4D8',
                                     fontSize: '0.72rem',
-                                    cursor: 'pointer',
+                                    fontWeight: 800,
                                     display: 'inline-flex',
                                     alignItems: 'center',
-                                    gap: '4px'
-                                  }}
-                                  title="تسجيل الخروج من كافة أجهزة هذا المستخدم"
-                                >
-                                  <RotateCcw size={12} />
-                                  <span>إعادة ضبط</span>
-                                </button>
-                              </td>
-                              <td style={{ padding: '10px 8px', textAlign: 'center' }}>
-                                {u.role !== 'admin' && (
-                                  <button onClick={() => handleDeleteUser(u.id)} style={{ background: 'transparent', border: 'none', color: 'var(--danger-color)', cursor: 'pointer' }}>
-                                    <Trash size={15} />
-                                  </button>
+                                    gap: '5px'
+                                  }}>
+                                    <Smartphone size={13} color="#00B4D8" />
+                                    <span>PWA مثبت ({selectedCsStudent.pwa_platform === 'ios' ? 'iOS' : selectedCsStudent.pwa_platform === 'android' ? 'أندرويد' : 'كمبيوتر'})</span>
+                                  </span>
                                 )}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                                <span style={{
+                                  padding: '3px 10px',
+                                  borderRadius: 'var(--radius-full)',
+                                  background: selectedCsStudent.improve_ai_opt_in !== false ? 'rgba(34, 197, 94, 0.15)' : 'rgba(230, 57, 70, 0.15)',
+                                  border: '1px solid',
+                                  borderColor: selectedCsStudent.improve_ai_opt_in !== false ? 'rgba(34, 197, 94, 0.4)' : 'rgba(230, 57, 70, 0.4)',
+                                  color: selectedCsStudent.improve_ai_opt_in !== false ? '#22C55E' : '#E63946',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 800,
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px'
+                                }}>
+                                  {selectedCsStudent.improve_ai_opt_in !== false ? <ShieldCheck size={13} color="#22C55E" /> : <EyeOff size={13} color="#E63946" />}
+                                  <span>{selectedCsStudent.improve_ai_opt_in !== false ? 'تحسين AI: مفعل' : 'تحسين AI: معطل (محمي)'}</span>
+                                </span>
+                                <span className={`plan-badge ${selectedCsStudent.subscription_status === 'active' && selectedCsStudent.plan_type !== 'free' ? 'plan-badge-pro' : 'plan-badge-free'}`} style={{
+                                  background: selectedCsStudent.subscription_status === 'active' && selectedCsStudent.plan_type !== 'free' ? '#FFB703' : undefined,
+                                  color: selectedCsStudent.subscription_status === 'active' && selectedCsStudent.plan_type !== 'free' ? '#0D1B2A' : undefined
+                                }}>
+                                  {selectedCsStudent.subscription_status === 'active' && selectedCsStudent.plan_type !== 'free' ? 'مشترك نشط' : selectedCsStudent.subscription_status === 'expired' ? 'اشتراك منتهي' : 'حساب مجاني'}
+                                </span>
+                                <span className="plan-badge plan-badge-free">
+                                  {selectedCsStudent.plan_type === 'pro_1m' ? 'باقة شهر' : selectedCsStudent.plan_type === 'pro_2m' ? 'باقة شهرين' : selectedCsStudent.plan_type === 'pro_3m' ? 'باقة 3 أشهر' : selectedCsStudent.plan_type === 'max' ? 'ماكس' : 'خطة مجانية'}
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Key Metrics Grid */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+                              <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                                <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>رصيد النقاط الحالي</span>
+                                <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--primary-color)' }}>
+                                  {(selectedCsStudent.coins ?? 0).toFixed(1)}
+                                </span>
+                              </div>
+
+                              <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                                <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>نقاط الترتيب (Merit)</span>
+                                <span style={{ fontSize: '1.2rem', fontWeight: 800, color: 'var(--primary-color)' }}>
+                                  {selectedCsStudent.points || 0}
+                                </span>
+                              </div>
+
+                              <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                                <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>الصف الدراسي</span>
+                                <span style={{ fontSize: '0.84rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '4px', display: 'block' }}>
+                                  {GRADE_NAMES[selectedCsStudent.grade_level] || selectedCsStudent.grade_level}
+                                </span>
+                              </div>
+
+                              <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>الأجهزة النشطة</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResetUserDevices(selectedCsStudent.id)}
+                                    title="إعادة ضبط الأجهزة"
+                                    style={{ background: 'none', border: 'none', color: 'var(--primary-color)', cursor: 'pointer', padding: 0 }}
+                                  >
+                                    <RotateCcw size={11} />
+                                  </button>
+                                </div>
+                                <span style={{ fontSize: '1.1rem', fontWeight: 800, color: (selectedCsStudent.active_devices_count ?? 0) >= 3 ? '#E63946' : 'var(--text-main)' }}>
+                                  {selectedCsStudent.active_devices_count ?? 0} / 3
+                                </span>
+                              </div>
+
+                              <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                                <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>تطبيق PWA</span>
+                                <span style={{ fontSize: '0.82rem', fontWeight: 800, color: selectedCsStudent.pwa_installed ? '#00B4D8' : 'var(--text-muted)', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  <Smartphone size={13} color={selectedCsStudent.pwa_installed ? '#00B4D8' : 'var(--text-muted)'} />
+                                  <span>{selectedCsStudent.pwa_installed ? `مثبت (${selectedCsStudent.pwa_platform === 'ios' ? 'iOS' : selectedCsStudent.pwa_platform === 'android' ? 'أندرويد' : 'كمبيوتر'})` : 'غير مثبت'}</span>
+                                </span>
+                              </div>
+
+                              <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                                <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>تحسين الذكاء الاصطناعي</span>
+                                <span style={{ fontSize: '0.82rem', fontWeight: 800, color: selectedCsStudent.improve_ai_opt_in !== false ? '#22C55E' : '#E63946', marginTop: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                  {selectedCsStudent.improve_ai_opt_in !== false ? <ShieldCheck size={13} color="#22C55E" /> : <EyeOff size={13} color="#E63946" />}
+                                  <span>{selectedCsStudent.improve_ai_opt_in !== false ? 'مفعل (متاح العرض)' : 'معطل (محجوب)'}</span>
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Academic Activity Row: Messages, AI Active Days, Flashcards, Exams Created, Exams Completed */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '16px' }}>
+                              <div style={{ padding: '12px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>الرسائل المرسلة</span>
+                                  <MessageSquare size={15} color="var(--primary-color)" />
+                                </div>
+                                <span style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--primary-color)' }}>
+                                  {selectedCsStudent.messages_sent_count ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>محادثات مع المعلم</span>
+                              </div>
+
+                              <div style={{ padding: '12px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>أيام التفاعل مع AI</span>
+                                  <Calendar size={15} color="#00B4D8" />
+                                </div>
+                                <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#00B4D8' }}>
+                                  {selectedCsStudent.active_chat_days_count ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>أيام أرسل فيها رسائل</span>
+                              </div>
+
+                              <div style={{ padding: '12px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>بطاقات الاستذكار</span>
+                                  <Layers size={15} color="#FFB703" />
+                                </div>
+                                <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#FFB703' }}>
+                                  {selectedCsStudent.flashcard_decks_count ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                                  {selectedCsStudent.flashcards_created_count ?? 0} كارت محفوظ
+                                </span>
+                              </div>
+
+                              <div style={{ padding: '12px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>الاختبارات المنشأة</span>
+                                  <FileText size={15} color="var(--secondary-color)" />
+                                </div>
+                                <span style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--secondary-color)' }}>
+                                  {selectedCsStudent.exams_created_count ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>امتحانات مخصصة</span>
+                              </div>
+
+                              <div style={{ padding: '12px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>الاختبارات المنجزة</span>
+                                  <CheckCircle2 size={15} color="#22C55E" />
+                                </div>
+                                <span style={{ fontSize: '1.25rem', fontWeight: 800, color: '#22C55E' }}>
+                                  {selectedCsStudent.exams_completed_count ?? 0}
+                                </span>
+                                <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                                  نسبة الإنجاز: {selectedCsStudent.exams_created_count ? Math.round(((selectedCsStudent.exams_completed_count ?? 0) / selectedCsStudent.exams_created_count) * 100) : 0}%
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Subscription Timeline & Dates */}
+                            {selectedCsStudent.subscription_start_date && (
+                              <div style={{ padding: '10px 14px', borderRadius: 'var(--radius-sm)', background: 'var(--alpha-white-2)', border: '1px solid var(--border-color)', fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                                <div>
+                                  <strong>بدء الاشتراك: </strong>
+                                  <span>{new Date(selectedCsStudent.subscription_start_date).toLocaleDateString('ar-EG')}</span>
+                                  <span style={{ color: 'var(--text-muted)', marginRight: '6px' }}>
+                                    (مضى {selectedCsStudent.cancellation_metrics?.elapsed_hours || 0} ساعة)
+                                  </span>
+                                </div>
+                                {selectedCsStudent.subscription_end_date && (
+                                  <div>
+                                    <strong>انتهاء الاشتراك: </strong>
+                                    <span>{new Date(selectedCsStudent.subscription_end_date).toLocaleDateString('ar-EG')}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 4 Direct Action Buttons Toolbar */}
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '8px', marginTop: '14px', borderTop: '1px solid var(--border-color)', paddingTop: '14px' }}>
+                              
+                              {/* Action 1: Grant Subscription Modal */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCsGrantSubPlan('pro_3m');
+                                  setCsGrantSubDays(90);
+                                  setCsGrantSubNote('');
+                                  setCsGrantSubModal(true);
+                                }}
+                                style={{
+                                  padding: '9px 12px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  background: 'rgba(255, 183, 3, 0.15)',
+                                  border: '1px solid rgba(255, 183, 3, 0.4)',
+                                  color: '#FFB703',
+                                  fontWeight: 800,
+                                  fontSize: '0.8rem',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <Crown size={15} />
+                                <span>تفعيل اشتراك يدوي</span>
+                              </button>
+
+                              {/* Action 2: Edit Profile Modal */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCsEditName(selectedCsStudent.name || '');
+                                  setCsEditPhone(selectedCsStudent.phone || '');
+                                  setCsEditEmail(selectedCsStudent.email || '');
+                                  setCsEditGrade(selectedCsStudent.grade_level || '1_high');
+                                  setCsEditTrack(selectedCsStudent.track_id || '');
+                                  setCsEditProfileModal(true);
+                                }}
+                                className="btn-secondary"
+                                style={{
+                                  padding: '9px 12px',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 700,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <Edit2 size={14} />
+                                <span>تعديل الملف الدراسي</span>
+                              </button>
+
+                              {/* Action 3: Send Direct Notification */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setCsDirectNotifTitle('');
+                                  setCsDirectNotifBody('');
+                                  setCsDirectNotifType('info');
+                                  setCsDirectNotifModal(true);
+                                }}
+                                style={{
+                                  padding: '9px 12px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  background: 'var(--primary-light)',
+                                  border: '1px solid var(--border-primary)',
+                                  color: 'var(--primary-color)',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <Bell size={14} />
+                                <span>إرسال إشعار فوري</span>
+                              </button>
+
+                              {/* Action 4: Freeze / Unfreeze Account */}
+                              <button
+                                type="button"
+                                disabled={csActionLoading}
+                                onClick={handleCsToggleBan}
+                                style={{
+                                  padding: '9px 12px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  background: selectedCsStudent.subscription_status === 'suspended' ? 'rgba(34, 197, 94, 0.12)' : 'rgba(230, 57, 70, 0.12)',
+                                  border: '1px solid',
+                                  borderColor: selectedCsStudent.subscription_status === 'suspended' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(230, 57, 70, 0.3)',
+                                  color: selectedCsStudent.subscription_status === 'suspended' ? '#22C55E' : '#E63946',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                <ShieldAlert size={14} />
+                                <span>{selectedCsStudent.subscription_status === 'suspended' ? 'تنشيط الحساب' : 'تجميد الحساب'}</span>
+                              </button>
+
+                              {/* Action 5: View AI Conversations History */}
+                              <button
+                                type="button"
+                                disabled={csConversationsLoading}
+                                onClick={() => handleOpenStudentConversations(selectedCsStudent.id)}
+                                style={{
+                                  padding: '9px 12px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  background: selectedCsStudent.improve_ai_opt_in === false ? 'rgba(230, 57, 70, 0.08)' : 'rgba(0, 180, 216, 0.12)',
+                                  border: '1px solid',
+                                  borderColor: selectedCsStudent.improve_ai_opt_in === false ? 'rgba(230, 57, 70, 0.3)' : 'rgba(0, 180, 216, 0.4)',
+                                  color: selectedCsStudent.improve_ai_opt_in === false ? '#E63946' : '#00B4D8',
+                                  fontSize: '0.8rem',
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  gap: '6px'
+                                }}
+                              >
+                                {selectedCsStudent.improve_ai_opt_in === false ? <EyeOff size={14} /> : <MessageSquareText size={14} />}
+                                <span>{selectedCsStudent.improve_ai_opt_in === false ? 'المحادثات محجوبة (Opt-out)' : 'سجل محادثات الذكاء الاصطناعي'}</span>
+                              </button>
+
+                            </div>
+
+                            {/* Opt-out Privacy Notice Banner */}
+                            {selectedCsStudent.improve_ai_opt_in === false && (
+                              <div style={{
+                                padding: '12px 16px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'rgba(230, 57, 70, 0.08)',
+                                border: '1px solid rgba(230, 57, 70, 0.25)',
+                                color: '#E63946',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '10px',
+                                marginTop: '12px',
+                                fontSize: '0.82rem'
+                              }}>
+                                <EyeOff size={18} style={{ flexShrink: 0 }} />
+                                <div>
+                                  <div style={{ fontWeight: 800, marginBottom: '2px' }}>سجل المحادثات محمي ومحجوب بالكامل</div>
+                                  <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                                    قام هذا الطالب بإلغاء تفعيل خيار «المساعدة في تحسين استجابات الذكاء الاصطناعي». التزاماً بسياسة الخصوصية الصارمة للمنصة، لا يمكن للمشرفين أو النظام الاطلاع على تفاصيل محادثاته.
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Coins Operations & Adjustment Card */}
+                          <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                              <RotateCcw size={18} style={{ color: 'var(--primary-color)' }} />
+                              <h4 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
+                                إدارة رصيد النقاط (إضافة / خصم / إعادة احتساب)
+                              </h4>
+                            </div>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 16px', lineHeight: '1.6' }}>
+                              التحكم الفوري في محفظة نقاط الطالب، سواء بضبط حصته اليومية المستحقة أو تعديل الرصيد يدوياً.
+                            </p>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '12px' }}>
+                              
+                              {/* Sub-action A: Recalculate daily coins */}
+                              <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between', gap: '10px' }}>
+                                <div>
+                                  <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>
+                                    إعادة احتساب نقاط اليوم
+                                  </span>
+                                  <p style={{ fontSize: '0.74rem', color: 'var(--text-muted)', margin: 0, lineHeight: '1.5' }}>
+                                    تعيين الرصيد لسعة الباقة (80/90/120 نقطة) وتحديث تاريخ اليوم.
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={csActionLoading}
+                                  onClick={handleCsRecalculateCoins}
+                                  className="btn-secondary"
+                                  style={{ padding: '8px 12px', fontSize: '0.78rem', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
+                                >
+                                  <RotateCcw size={13} />
+                                  <span>إعادة ضبط اليوم</span>
+                                </button>
+                              </div>
+
+                              {/* Sub-action B: Add coins directly */}
+                              <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--text-main)', display: 'block' }}>
+                                  إضافة نقاط للحساب
+                                </span>
+                                <div style={{ display: 'flex', gap: '4px' }}>
+                                  {['25', '50', '100'].map((preset) => (
+                                    <button
+                                      key={preset}
+                                      type="button"
+                                      onClick={() => setCsCoinsToAdd(preset)}
+                                      style={{
+                                        flex: 1,
+                                        padding: '3px',
+                                        borderRadius: '4px',
+                                        border: '1px solid',
+                                        borderColor: csCoinsToAdd === preset ? 'var(--primary-color)' : 'var(--border-color)',
+                                        background: csCoinsToAdd === preset ? 'var(--primary-light)' : 'transparent',
+                                        color: csCoinsToAdd === preset ? 'var(--primary-color)' : 'var(--text-muted)',
+                                        fontSize: '0.72rem',
+                                        fontWeight: 700,
+                                        cursor: 'pointer'
+                                      }}
+                                    >
+                                      +{preset}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div style={{ display: 'flex', gap: '6px' }}>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={csCoinsToAdd}
+                                    onChange={(e) => setCsCoinsToAdd(e.target.value)}
+                                    style={{ width: '70px', padding: '6px 8px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--card-bg)', color: 'var(--text-main)', fontSize: '0.8rem', outline: 'none' }}
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={csActionLoading}
+                                    onClick={() => handleCsAddCoins()}
+                                    className="btn-primary"
+                                    style={{ flex: 1, padding: '6px', fontSize: '0.78rem', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}
+                                  >
+                                    <PlusCircle size={13} />
+                                    <span>إضافة</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Sub-action C: Deduct coins */}
+                              <div style={{ padding: '14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                <span style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--text-main)', display: 'block' }}>
+                                  خصم نقاط من الحساب
+                                </span>
+                                <div style={{ display: 'flex', gap: '4px' }}>
+                                  {['10', '20', '50'].map((preset) => (
+                                    <button
+                                      key={preset}
+                                      type="button"
+                                      onClick={() => setCsCoinsToDeduct(preset)}
+                                      style={{
+                                        flex: 1,
+                                        padding: '3px',
+                                        borderRadius: '4px',
+                                        border: '1px solid',
+                                        borderColor: csCoinsToDeduct === preset ? '#E63946' : 'var(--border-color)',
+                                        background: csCoinsToDeduct === preset ? 'rgba(230, 57, 70, 0.12)' : 'transparent',
+                                        color: csCoinsToDeduct === preset ? '#E63946' : 'var(--text-muted)',
+                                        fontSize: '0.72rem',
+                                        fontWeight: 700,
+                                        cursor: 'pointer'
+                                      }}
+                                    >
+                                      -{preset}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div style={{ display: 'flex', gap: '6px' }}>
+                                  <input
+                                    type="number"
+                                    min="1"
+                                    value={csCoinsToDeduct}
+                                    onChange={(e) => setCsCoinsToDeduct(e.target.value)}
+                                    style={{ width: '70px', padding: '6px 8px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--card-bg)', color: 'var(--text-main)', fontSize: '0.8rem', outline: 'none' }}
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={csActionLoading}
+                                    onClick={() => handleCsDeductCoins()}
+                                    style={{
+                                      flex: 1,
+                                      padding: '6px',
+                                      fontSize: '0.78rem',
+                                      fontWeight: 800,
+                                      borderRadius: 'var(--radius-sm)',
+                                      background: 'rgba(230, 57, 70, 0.15)',
+                                      color: '#E63946',
+                                      border: '1px solid rgba(230, 57, 70, 0.3)',
+                                      cursor: 'pointer',
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      gap: '4px'
+                                    }}
+                                  >
+                                    <span>خصم</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                            </div>
+                          </div>
+
+                          {/* Action: Cancel Subscription Plan */}
+                          <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                              <CreditCard size={18} style={{ color: 'var(--primary-color)' }} />
+                              <h4 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
+                                إلغاء باقة الاشتراك واسترداد الخطة
+                              </h4>
+                            </div>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: '1.6' }}>
+                              يُشترط لإلغاء الاشتراك واسترداد الباقة أن يكون قد مضى <strong>أقل من 3 أيام (72 ساعة)</strong> على تفعيل الاشتراك، وأن يكون الطالب <strong>لم يستهلك أي نقاط</strong>.
+                            </p>
+
+                            {selectedCsStudent.cancellation_metrics?.is_eligible ? (
+                              <div style={{
+                                padding: '12px 14px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'rgba(34, 197, 94, 0.12)',
+                                border: '1px solid rgba(34, 197, 94, 0.3)',
+                                color: 'var(--success-color)',
+                                fontSize: '0.84rem',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '8px'
+                              }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 800 }}>
+                                  <CheckCircle2 size={18} />
+                                  <span>الطالب مؤهل للإلغاء والاسترداد الفوري</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  disabled={csActionLoading}
+                                  onClick={() => setCsCancelSubModal(true)}
+                                  style={{
+                                    alignSelf: 'flex-start',
+                                    padding: '8px 16px',
+                                    borderRadius: 'var(--radius-sm)',
+                                    background: '#E63946',
+                                    color: '#FFFFFF',
+                                    border: 'none',
+                                    fontWeight: 800,
+                                    fontSize: '0.82rem',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '6px'
+                                  }}
+                                >
+                                  <XCircle size={15} />
+                                  <span>تأكيد إلغاء الاشتراك الآن</span>
+                                </button>
+                              </div>
+                            ) : (
+                              <div style={{
+                                padding: '10px 14px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'var(--primary-light)',
+                                border: '1px solid var(--border-primary)',
+                                color: 'var(--text-secondary)',
+                                fontSize: '0.8rem',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '8px'
+                              }}>
+                                <AlertTriangle size={15} style={{ color: 'var(--primary-color)', flexShrink: 0 }} />
+                                <span>{selectedCsStudent.cancellation_metrics?.ineligibility_reason || 'الطالب لا يملك اشتراكاً قابلاً للإلغاء حالياً.'}</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Action: Danger Zone - Delete Account */}
+                          <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid rgba(230, 57, 70, 0.3)', color: 'var(--text-main)' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                              <UserX size={18} style={{ color: 'var(--danger-color)' }} />
+                              <h4 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: 'var(--danger-color)' }}>
+                                حذف حساب الطالب نهائياً من المنصة
+                              </h4>
+                            </div>
+                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: '1.6' }}>
+                              حذف نهائي لا يمكن التراجع عنه: مسح حساب الطالب، والمحادثات، والامتحانات، والجلسات بشكل كامل.
+                            </p>
+                            <button
+                              type="button"
+                              disabled={csActionLoading || selectedCsStudent.role === 'admin'}
+                              onClick={() => setCsDeleteConfirmModal(true)}
+                              style={{
+                                padding: '9px 18px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'rgba(230, 57, 70, 0.15)',
+                                color: '#E63946',
+                                border: '1px solid rgba(230, 57, 70, 0.4)',
+                                fontSize: '0.82rem',
+                                fontWeight: 800,
+                                cursor: selectedCsStudent.role === 'admin' ? 'not-allowed' : 'pointer',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px'
+                              }}
+                            >
+                              <Trash2 size={15} />
+                              <span>{selectedCsStudent.role === 'admin' ? 'لا يمكن حذف حساب المسؤول' : 'حذف حساب هذا الطالب نهائياً'}</span>
+                            </button>
+                          </div>
+
+                        </div>
+                      )}
                     </div>
-                  )}
+
+                  </div>
+
                 </div>
               )}
 
@@ -12227,6 +15622,7 @@ export default function App() {
                 <h2 style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--text-main)' }}>الملف الشخصي للطالب</h2>
                 <p style={{ color: 'var(--text-muted)', marginTop: '4px' }}>تعديل بياناتك الشخصية وتغيير كلمة المرور وإدارة باقة اشتراكك التعليمي.</p>
               </div>
+
 
               {profileMessage.text && (
                 <div style={{
@@ -12503,7 +15899,7 @@ export default function App() {
                         {isUserSubscribed ? 'التجديد القادم (القاهرة)' : 'حالة التجديد'}
                       </span>
                       <div style={{ fontSize: '1.05rem', fontWeight: 900, color: 'var(--text-main)', marginTop: '2px', fontFamily: isUserSubscribed ? 'monospace' : 'inherit', direction: isUserSubscribed ? 'ltr' : 'rtl' }}>
-                        {isUserSubscribed ? renewalCountdown : 'يتطلب باقة نشطة'}
+                        {isUserSubscribed ? <RenewalCountdownDisplay targetIso={verifiedCurrencyData?.dailyRenewal?.nextRenewalIso} /> : 'يتطلب باقة نشطة'}
                       </div>
                     </div>
                     <Clock size={20} color={isUserSubscribed ? 'var(--secondary-color)' : 'var(--text-muted)'} />
@@ -12515,12 +15911,12 @@ export default function App() {
                     {user?.plan_type === 'pro_3m' || user?.plan_type === 'max' ? 'باقة 3 أشهر (120 نقطة يومياً)' :
                      user?.plan_type === 'pro_2m' ? 'باقة شهرين (90 نقطة يومياً)' :
                      user?.plan_type === 'pro_1m' || user?.plan_type === 'pro' ? 'باقة شهر (80 نقطة يومياً)' :
-                     'الباقة المجانية التجريبية (15 نقطة صالحة للاستخدام)'}
+                     'الباقة المجانية التجريبية (20 نقطة صالحة للاستخدام)'}
                   </span>
                   <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginTop: '4px' }}>
                     {user?.plan_type && user.plan_type !== 'free' && isUserSubscribed
-                      ? `اشتراكك سارٍ حتى ${user.subscription_end_date ? new Date(user.subscription_end_date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : 'نهاية المدة'}. رصيدك يتجدد تلقائياً كل 24 ساعة بتوقيت القاهرة.`
-                      : 'تحصل على 15 نقطة تجريبية عند التسجيل. اشترك الآن في باقاتنا لتفعيل التجديد اليومي الدقيق والوصول الكامل.'}
+                      ? `اشتراكك سارٍ حتى ${effectiveEndMs ? new Date(effectiveEndMs).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : (user?.subscription_end_date ? new Date(user.subscription_end_date).toLocaleDateString('ar-EG', { year: 'numeric', month: 'long', day: 'numeric' }) : 'نهاية المدة')}. رصيدك يتجدد تلقائياً كل 24 ساعة بتوقيت القاهرة.`
+                      : 'تحصل على 20 نقطة تجريبية عند التسجيل. اشترك الآن في باقاتنا لتفعيل التجديد اليومي الدقيق والوصول الكامل.'}
                   </span>
                 </div>
 
@@ -12719,6 +16115,124 @@ export default function App() {
                     <span>تسجيل الخروج من جميع الأجهزة الأخرى</span>
                   </button>
                 )}
+              </div>
+
+              {/* Privacy & AI Improvement Card */}
+              <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '16px', color: 'var(--text-main)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <ShieldCheck size={22} color="var(--primary-color)" />
+                    <div>
+                      <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--primary-color)', margin: 0 }}>
+                        خصوصية التعلم وتحسين الذكاء الاصطناعي
+                      </h3>
+                      <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                        التحكم في مشاركة المحادثات التعليمية لتحسين جودة النظام
+                      </span>
+                    </div>
+                  </div>
+
+                  <span style={{
+                    padding: '4px 12px',
+                    borderRadius: 'var(--radius-full)',
+                    background: user.improve_ai_opt_in !== false ? 'rgba(34, 197, 94, 0.15)' : 'rgba(230, 57, 70, 0.15)',
+                    color: user.improve_ai_opt_in !== false ? '#22C55E' : '#E63946',
+                    border: `1px solid ${user.improve_ai_opt_in !== false ? 'rgba(34, 197, 94, 0.3)' : 'rgba(230, 57, 70, 0.3)'}`,
+                    fontSize: '0.76rem',
+                    fontWeight: 800,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    {user.improve_ai_opt_in !== false ? <CheckCircle size={13} /> : <EyeOff size={13} />}
+                    <span>{user.improve_ai_opt_in !== false ? 'مفعل (Opted-in)' : 'معطل (Opted-out)'}</span>
+                  </span>
+                </div>
+
+                {/* Toggle Row */}
+                <div style={{
+                  padding: '16px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--sidebar-bg)',
+                  border: '1px solid var(--border-color)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '16px',
+                  flexWrap: 'wrap'
+                }}>
+                  <div style={{ flex: 1, minWidth: '220px' }}>
+                    <span style={{ fontSize: '0.92rem', fontWeight: 800, color: 'var(--text-main)', display: 'block', marginBottom: '2px' }}>
+                      المساعدة في تحسين استجابات الذكاء الاصطناعي
+                    </span>
+                    <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)', direction: 'ltr', display: 'inline-block', textAlign: 'right' }}>
+                      Help improve AI responses
+                    </span>
+                  </div>
+
+                  {/* Toggle Switch */}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={user.improve_ai_opt_in !== false}
+                    disabled={improveAiLoading}
+                    onClick={handleToggleImproveAi}
+                    style={{
+                      position: 'relative',
+                      width: '56px',
+                      height: '30px',
+                      borderRadius: '15px',
+                      background: user.improve_ai_opt_in !== false ? 'var(--primary-color)' : 'var(--alpha-white-3)',
+                      border: '2px solid',
+                      borderColor: user.improve_ai_opt_in !== false ? 'var(--primary-color)' : 'var(--border-color)',
+                      cursor: improveAiLoading ? 'wait' : 'pointer',
+                      transition: 'background 0.25s ease, border-color 0.25s ease',
+                      padding: 0,
+                      outline: 'none',
+                      flexShrink: 0
+                    }}
+                    title={user.improve_ai_opt_in !== false ? 'انقر لإلغاء التفعيل' : 'انقر للتفعيل'}
+                  >
+                    <span
+                      style={{
+                        position: 'absolute',
+                        top: '2px',
+                        right: user.improve_ai_opt_in !== false ? '3px' : '28px',
+                        width: '22px',
+                        height: '22px',
+                        borderRadius: '50%',
+                        background: '#FFFFFF',
+                        boxShadow: '0 2px 6px rgba(0, 0, 0, 0.3)',
+                        transition: 'right 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center'
+                      }}
+                    >
+                      {improveAiLoading ? (
+                        <Loader2 size={12} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+                      ) : null}
+                    </span>
+                  </button>
+                </div>
+
+                {/* Explanation */}
+                <div style={{
+                  padding: '14px 16px',
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--alpha-white-1)',
+                  border: '1px solid var(--border-color)',
+                  fontSize: '0.82rem',
+                  color: 'var(--text-secondary)',
+                  lineHeight: '1.65'
+                }}>
+                  <p style={{ margin: '0 0 8px', color: 'var(--text-main)', fontWeight: 600 }}>
+                    تُستخدم محادثاتك مع المعلم الذكي للمساعدة في تحسين استجابات الذكاء الاصطناعي وتطوير دقة الشروحات التعليمية بما يتوافق مع مناهجك الدراسية المصرية.
+                  </p>
+                  <p style={{ margin: 0, color: 'var(--text-muted)' }}>
+                    <strong>ملاحظة هامة:</strong> هذا الإعداد مفعّل تلقائياً (Enabled)، ولك كامل الحرية في تفعيله أو إلغاء تفعيله في أي وقت وفقاً لرغبتك. عند إلغاء تفعيل هذا الخيار، يتم حجب وتشفير سجل محادثاتك بالكامل ولن يُسمح باستخدامه في تحسين وتدريب النماذج أو مراجعته في لوحة التحكم الإدارية.
+                  </p>
+                </div>
               </div>
 
               {/* Account Deletion & Danger Zone */}
@@ -13035,7 +16549,7 @@ export default function App() {
                                   (examResult.diagnostic.mastered_concepts || []).map((c: string, idx: number) => (
                                     <div key={idx} className="concept-pill concept-pill-mastered">
                                       <CheckCircle2 size={13} />
-                                      <span>{c}</span>
+                                      <span>{parseInlineText(c)}</span>
                                     </div>
                                   ))
                                 ) : (
@@ -13055,7 +16569,7 @@ export default function App() {
                                   (examResult.diagnostic.revision_concepts || []).map((c: string, idx: number) => (
                                     <div key={idx} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '6px 10px', background: 'rgba(249, 115, 22, 0.08)', borderRadius: '8px', border: '1px solid rgba(249, 115, 22, 0.25)' }}>
                                       <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#f97316', flex: 1, minWidth: 0, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                                        {c}
+                                        {parseInlineText(c)}
                                       </span>
                                       <button
                                         type="button"
@@ -13137,23 +16651,35 @@ export default function App() {
                       {Array.isArray(examResult.questions_review) && examResult.questions_review.length > 0 && (
                         <div style={{ width: '100%', textAlign: 'right', display: 'flex', flexDirection: 'column', gap: '14px' }}>
                           <h4 style={{ fontWeight: 800, fontSize: '1rem', color: 'var(--primary-color)', margin: 0 }}>مراجعة الأسئلة والإجابات النموذجية:</h4>
-                          {examResult.questions_review.map((q: any, qIdx: number) => (
-                            <div key={q.id || qIdx} style={{ background: 'var(--sidebar-bg)', padding: '16px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+                          {examResult.questions_review.map((q: any, qIdx: number) => {
+                            const isEnglishQ = isEnglishSubject(selectedExam?.subject_name) || isEnglishText(q?.question);
+                            return (
+                            <div key={q.id || qIdx} style={{
+                              background: 'var(--sidebar-bg)',
+                              padding: '16px',
+                              borderRadius: '12px',
+                              border: '1px solid var(--border-color)',
+                              direction: isEnglishQ ? 'ltr' : 'rtl',
+                              textAlign: isEnglishQ ? 'left' : 'right'
+                            }}>
                               <div style={{ display: 'flex', gap: '8px', marginBottom: '10px', alignItems: 'flex-start' }}>
-                                <span style={{ background: 'var(--primary-color)', color: 'var(--text-on-primary)', borderRadius: '6px', padding: '2px 8px', fontSize: '0.75rem', fontWeight: 800, flexShrink: 0 }}>س {qIdx + 1}</span>
-                                <span style={{ fontWeight: 700, fontSize: '0.92rem', lineHeight: '1.5' }}>{q.question}</span>
+                                <span style={{ background: 'var(--primary-color)', color: 'var(--text-on-primary)', borderRadius: '6px', padding: '2px 8px', fontSize: '0.75rem', fontWeight: 800, flexShrink: 0 }}>
+                                  {isEnglishQ ? `Q ${qIdx + 1}` : `س ${formatArabicNumerals(String(qIdx + 1), false)}`}
+                                </span>
+                                <span style={{ fontWeight: 700, fontSize: '0.92rem', lineHeight: '1.5' }}>{renderFormattedMath(q.question)}</span>
                               </div>
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.86rem' }}>
                                 {q.student_answer != null && (
-                                  <div><strong>إجابتك:</strong> <span style={{ color: 'var(--text-secondary)' }}>{String(q.student_answer)}</span></div>
+                                  <div><strong>{isEnglishQ ? 'Your Answer: ' : 'إجابتك: '}</strong> <span style={{ color: 'var(--text-secondary)' }}>{renderFormattedMath(String(q.student_answer))}</span></div>
                                 )}
-                                <div><strong>الإجابة النموذجية:</strong> <span style={{ color: 'var(--success-color)', fontWeight: 700 }}>{q.correct_answer}</span></div>
+                                <div><strong>{isEnglishQ ? 'Model Answer: ' : 'الإجابة النموذجية: '}</strong> <span style={{ color: 'var(--success-color)', fontWeight: 700 }}>{renderFormattedMath(q.correct_answer)}</span></div>
                                 {q.explanation && (
-                                  <div style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}><strong>الشرح:</strong> {q.explanation}</div>
+                                  <div style={{ color: 'var(--text-secondary)', lineHeight: '1.6' }}><strong>{isEnglishQ ? 'Explanation: ' : 'الشرح: '}</strong> {renderFormattedMath(q.explanation)}</div>
                                 )}
                               </div>
                             </div>
-                          ))}
+                          );
+                        })}
                         </div>
                       )}
 
@@ -13241,13 +16767,22 @@ export default function App() {
 
                       {/* Questions List */}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                        {(selectedExam.questions || []).map((q: any, qIdx: number) => (
-                          <div key={q.id || qIdx} style={{ background: 'var(--sidebar-bg)', padding: '20px', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
+                        {(selectedExam.questions || []).map((q: any, qIdx: number) => {
+                          const isEnglishExam = isEnglishSubject(selectedExam?.subject_name) || isEnglishText(q?.question);
+                          return (
+                          <div key={q.id || qIdx} style={{
+                            background: 'var(--sidebar-bg)',
+                            padding: '20px',
+                            borderRadius: '12px',
+                            border: '1px solid var(--border-color)',
+                            direction: isEnglishExam ? 'ltr' : 'rtl',
+                            textAlign: isEnglishExam ? 'left' : 'right'
+                          }}>
                             <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', alignItems: 'flex-start' }}>
                               <span style={{ background: 'var(--primary-color)', color: 'var(--text-on-primary)', borderRadius: '6px', padding: '2px 8px', fontSize: '0.78rem', fontWeight: 800 }}>
-                                س {qIdx + 1}
+                                {isEnglishExam ? `Q ${qIdx + 1}` : `س ${formatArabicNumerals(String(qIdx + 1), false)}`}
                               </span>
-                              <span style={{ fontWeight: 700, fontSize: '0.98rem', lineHeight: '1.5' }}>{q.question}</span>
+                              <span style={{ fontWeight: 700, fontSize: '0.98rem', lineHeight: '1.5' }}>{renderFormattedMath(q.question)}</span>
                             </div>
 
                             {/* Answer Fields depending on type */}
@@ -13269,7 +16804,9 @@ export default function App() {
                                         cursor: 'pointer',
                                         fontSize: '0.88rem',
                                         transition: 'var(--transition)',
-                                        fontWeight: 600
+                                        fontWeight: 600,
+                                        direction: isEnglishExam ? 'ltr' : 'rtl',
+                                        textAlign: isEnglishExam ? 'left' : 'right'
                                       }}
                                     >
                                       <input
@@ -13281,7 +16818,7 @@ export default function App() {
                                         }}
                                         style={{ accentColor: 'var(--primary-color)', width: '16px', height: '16px' }}
                                       />
-                                      <span>{opt}</span>
+                                      <span>{renderFormattedMath(opt)}</span>
                                     </label>
                                   );
                                 })}
@@ -13291,8 +16828,8 @@ export default function App() {
                             {q.type === 'true_false' && (
                               <div style={{ display: 'flex', gap: '14px' }}>
                                 {[
-                                  { val: 'true', label: 'صح' },
-                                  { val: 'false', label: 'خطأ' }
+                                  { val: 'true', label: isEnglishExam ? 'True' : 'صح' },
+                                  { val: 'false', label: isEnglishExam ? 'False' : 'خطأ' }
                                 ].map((tf) => {
                                   const isChecked = activeExamAnswers[q.id] === tf.val;
                                   return (
@@ -13325,7 +16862,7 @@ export default function App() {
                             {q.type === 'essay' && (
                               <textarea
                                 rows={4}
-                                placeholder="اكتب إجابتك المقالية بالتفصيل هنا..."
+                                placeholder={isEnglishExam ? "Type your answer here in English..." : "اكتب إجابتك المقالية بالتفصيل هنا..."}
                                 value={activeExamAnswers[q.id] || ''}
                                 onChange={(e) => {
                                   const val = e.target.value;
@@ -13340,12 +16877,15 @@ export default function App() {
                                   background: 'var(--card-bg)',
                                   color: 'var(--text-main)',
                                   fontSize: '0.88rem',
-                                  lineHeight: '1.5'
+                                  lineHeight: '1.5',
+                                  direction: isEnglishExam ? 'ltr' : 'rtl',
+                                  textAlign: isEnglishExam ? 'left' : 'right'
                                 }}
                               />
                             )}
                           </div>
-                        ))}
+                        );
+                      })}
                       </div>
 
                       {/* Desktop Actions */}
@@ -13795,9 +17335,9 @@ export default function App() {
 
                                   <div style={{ marginBottom: '12px' }}>
                                     <span style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--primary-color)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>السؤال:</span>
-                                    <p style={{ fontSize: '1rem', fontWeight: 700, lineHeight: 1.6, margin: '4px 0 0', color: 'var(--text-main)' }}>
-                                      {card.question}
-                                    </p>
+                                    <div dir="auto" style={{ fontSize: '1rem', fontWeight: 700, lineHeight: 1.6, margin: '4px 0 0', color: 'var(--text-main)' }}>
+                                      {renderFormattedMath(card.question)}
+                                    </div>
                                   </div>
                                 </div>
 
@@ -13837,31 +17377,43 @@ export default function App() {
                                   {isRevealed && (
                                     <div className="flashcard-answer-box">
                                       <span style={{ fontSize: '0.72rem', fontWeight: 800, color: 'var(--success-color)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>الإجابة النموذجية:</span>
-                                      <p style={{ fontSize: '0.95rem', fontWeight: 700, lineHeight: 1.6, margin: '4px 0 12px', color: 'var(--text-main)' }}>
-                                        {card.answer}
-                                      </p>
+                                      <div dir="auto" style={{ fontSize: '0.95rem', fontWeight: 700, lineHeight: 1.6, margin: '4px 0 12px', color: 'var(--text-main)' }}>
+                                        {renderFormattedMath(card.answer)}
+                                      </div>
                                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--border-color)', paddingTop: '8px' }}>
-                                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700 }}>تقييم الاستدعاء:</span>
+                                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                          <span>تقييم الاستدعاء:</span>
+                                          {reviewedCardRatings[card.id] && (
+                                            <span style={{ color: 'var(--success-color)', fontSize: '0.7rem', fontWeight: 800 }}>✓ تم الحفظ</span>
+                                          )}
+                                        </span>
                                         <div style={{ display: 'flex', gap: '4px' }}>
-                                          {[1, 2, 3, 4, 5].map(rating => (
-                                            <button
-                                              key={rating}
-                                              onClick={() => submitSubjectCardReview(card.id, rating)}
-                                              style={{
-                                                background: 'var(--hover-bg)',
-                                                border: '1px solid var(--border-color)',
-                                                color: 'var(--text-main)',
-                                                borderRadius: '6px',
-                                                padding: '2px 8px',
-                                                fontSize: '0.72rem',
-                                                fontWeight: 800,
-                                                cursor: 'pointer'
-                                              }}
-                                              title={`درجة ${rating}`}
-                                            >
-                                              {rating}
-                                            </button>
-                                          ))}
+                                          {[1, 2, 3, 4, 5].map(rating => {
+                                            const isSelected = reviewedCardRatings[card.id] === rating;
+                                            const isThisReviewing = reviewingCardId === card.id;
+                                            return (
+                                              <button
+                                                key={rating}
+                                                disabled={isThisReviewing}
+                                                onClick={() => submitSubjectCardReview(card.id, rating, true)}
+                                                style={{
+                                                  background: isSelected ? 'var(--primary-color)' : 'var(--hover-bg)',
+                                                  border: `1px solid ${isSelected ? 'var(--primary-color)' : 'var(--border-color)'}`,
+                                                  color: isSelected ? 'var(--text-on-primary)' : 'var(--text-main)',
+                                                  borderRadius: '6px',
+                                                  padding: '2px 8px',
+                                                  fontSize: '0.72rem',
+                                                  fontWeight: 800,
+                                                  cursor: isThisReviewing ? 'wait' : 'pointer',
+                                                  transition: 'all 0.2s ease',
+                                                  opacity: isThisReviewing ? 0.7 : 1
+                                                }}
+                                                title={`درجة ${rating}`}
+                                              >
+                                                {rating}
+                                              </button>
+                                            );
+                                          })}
                                         </div>
                                       </div>
                                     </div>
@@ -13882,7 +17434,12 @@ export default function App() {
                         <h3 style={{ margin: 0, fontSize: '1.3rem', fontWeight: 900 }}>أحسنت! أتممت مراجعة كل الكروت</h3>
                         <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', margin: 0 }}>تمت مراجعة {doneCards.length} كارت في هذه الجلسة بنجاح.</p>
                         <button
-                          onClick={() => { setActiveStackIndex(0); setDoneCards([]); setIsCardFlipped(false); }}
+                          onClick={() => {
+                            setSubjectCards(prev => [...prev].sort(() => Math.random() - 0.5));
+                            setActiveStackIndex(0);
+                            setDoneCards([]);
+                            setIsCardFlipped(false);
+                          }}
                           className="btn-primary"
                           style={{ padding: '10px 24px', borderRadius: '10px', border: 'none', cursor: 'pointer', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '8px' }}
                         >
@@ -13982,7 +17539,7 @@ export default function App() {
 
                         {/* Active Top Playing Card */}
                         <div
-                          style={{ position: 'relative', width: '100%', height: isMobile ? '260px' : '280px', zIndex: 3 }}
+                          style={{ position: 'relative', width: '100%', height: isMobile ? '310px' : '330px', zIndex: 3 }}
                           className={isDealingAway ? 'playing-card-slide-off' : ''}
                         >
                           <div
@@ -13993,13 +17550,13 @@ export default function App() {
                               if (!isCardFlipped) {
                                 setIsCardFlipped(true);
                               } else {
-                                advancePlayingCard();
+                                setIsCardFlipped(false);
                               }
                             }}
                           >
                             <div className={`flashcard-container ${isCardFlipped ? 'flipped' : ''}`} style={{ width: '100%', height: '100%' }}>
-                              <div className="flashcard-front" style={{ position: 'relative' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '10px', alignItems: 'center' }}>
+                              <div className="flashcard-front" style={{ position: 'relative', padding: isMobile ? '16px 14px' : '20px 24px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '8px', alignItems: 'center' }}>
                                   <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--primary-color)', fontWeight: 800 }}>
                                     {activeCard?.deck_title || 'كارت مراجعة'}
                                   </span>
@@ -14020,17 +17577,41 @@ export default function App() {
                                     </button>
                                   </div>
                                 </div>
-                                <p style={{ fontSize: isMobile ? '1.05rem' : '1.2rem', fontWeight: 800, lineHeight: 1.6, margin: 0, overflowY: 'auto', maxHeight: isMobile ? '130px' : '140px' }}>
-                                  {activeCard?.question}
-                                </p>
-                                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '14px', border: '1px solid var(--border-color)', padding: '4px 14px', borderRadius: '20px', background: 'var(--hover-bg)' }}>
+                                <div dir="auto" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: isMobile ? '1.05rem' : '1.2rem', fontWeight: 800, lineHeight: 1.6, margin: 0, overflowY: 'auto', maxHeight: isMobile ? '160px' : '180px', width: '100%' }}>
+                                  {renderFormattedMath(activeCard?.question)}
+                                </div>
+                                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 'auto', border: '1px solid var(--border-color)', padding: '4px 14px', borderRadius: '20px', background: 'var(--hover-bg)' }}>
                                   اضغط للقلب ورؤية الإجابة
                                 </span>
                               </div>
 
-                              <div className="flashcard-back" style={{ position: 'relative' }}>
-                                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '10px', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--success-color)', fontWeight: 800 }}>الإجابة النموذجية</span>
+                              <div className="flashcard-back" style={{ position: 'relative', padding: isMobile ? '14px 12px' : '18px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '6px', alignItems: 'center' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--success-color)', fontWeight: 800 }}>الإجابة النموذجية</span>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setIsCardFlipped(false);
+                                      }}
+                                      style={{
+                                        background: 'rgba(255,255,255,0.06)',
+                                        border: '1px solid var(--border-color)',
+                                        color: 'var(--text-muted)',
+                                        borderRadius: '6px',
+                                        padding: '2px 8px',
+                                        cursor: 'pointer',
+                                        fontSize: '0.7rem',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '4px'
+                                      }}
+                                      title="الرجوع إلى السؤال"
+                                    >
+                                      <RotateCcw size={11} />
+                                      <span>السؤال</span>
+                                    </button>
+                                  </div>
                                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                                     <button
                                       onClick={() => setEditingCard(activeCard)}
@@ -14048,57 +17629,102 @@ export default function App() {
                                     </button>
                                   </div>
                                 </div>
-                                <p style={{ fontSize: isMobile ? '1.02rem' : '1.15rem', fontWeight: 800, lineHeight: 1.6, margin: 0, overflowY: 'auto', maxHeight: isMobile ? '130px' : '140px' }}>
-                                  {activeCard?.answer}
-                                </p>
-                                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '14px', border: '1px solid var(--border-color)', padding: '4px 14px', borderRadius: '20px', background: 'var(--hover-bg)' }}>
-                                  اضغط للتمرير للكارت التالي
-                                </span>
+
+                                <div dir="auto" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: isMobile ? '0.98rem' : '1.1rem', fontWeight: 800, lineHeight: 1.6, margin: 0, overflowY: 'auto', maxHeight: isMobile ? '120px' : '140px', width: '100%' }}>
+                                  {renderFormattedMath(activeCard?.answer)}
+                                </div>
+
+                                {/* Leitner Recall Assessment embedded directly on card back */}
+                                <div
+                                  style={{
+                                    width: '100%',
+                                    marginTop: 'auto',
+                                    paddingTop: '8px',
+                                    borderTop: '1px solid var(--border-color)',
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: '6px'
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <span style={{ fontSize: isMobile ? '0.72rem' : '0.76rem', color: 'var(--text-muted)', fontWeight: 700 }}>
+                                      تقييم الاستدعاء (انقر للتقييم والتمرير):
+                                    </span>
+                                    {reviewedCardRatings[activeCard?.id] ? (
+                                      <span style={{ color: 'var(--success-color)', fontSize: '0.7rem', fontWeight: 800 }}>✓ تم الحفظ</span>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        disabled={isDealingAway}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          advancePlayingCard();
+                                        }}
+                                        style={{
+                                          background: 'transparent',
+                                          border: 'none',
+                                          color: 'var(--text-muted)',
+                                          cursor: isDealingAway ? 'not-allowed' : 'pointer',
+                                          fontSize: '0.7rem',
+                                          textDecoration: 'underline',
+                                          padding: '2px 4px'
+                                        }}
+                                      >
+                                        تخطي دون تقييم
+                                      </button>
+                                    )}
+                                  </div>
+
+                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: isMobile ? '4px' : '6px', width: '100%' }}>
+                                    {[
+                                      { val: 1, label: 'صعب جداً', color: '#ef4444' },
+                                      { val: 2, label: 'خاطئ', color: '#f97316' },
+                                      { val: 3, label: 'مقبول', color: '#eab308' },
+                                      { val: 4, label: 'سهل', color: '#00b4d8' },
+                                      { val: 5, label: 'ممتاز', color: '#10b981' }
+                                    ].map(r => {
+                                      const isThisReviewing = reviewingCardId === activeCard?.id;
+                                      const isRated = reviewedCardRatings[activeCard?.id] === r.val;
+                                      return (
+                                        <button
+                                          key={r.val}
+                                          type="button"
+                                          disabled={isThisReviewing || isDealingAway}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            submitSubjectCardReview(activeCard.id, r.val, false);
+                                          }}
+                                          style={{
+                                            background: isRated ? r.color : 'var(--hover-bg)',
+                                            border: `1px solid ${isRated ? r.color : 'var(--border-color)'}`,
+                                            borderRadius: '8px',
+                                            padding: isMobile ? '5px 2px' : '6px 4px',
+                                            color: isRated ? '#ffffff' : 'var(--text-main)',
+                                            fontSize: isMobile ? '0.65rem' : '0.72rem',
+                                            fontWeight: 700,
+                                            cursor: (isThisReviewing || isDealingAway) ? 'not-allowed' : 'pointer',
+                                            transition: 'all 0.18s ease',
+                                            opacity: (isThisReviewing || isDealingAway) ? 0.6 : 1,
+                                            display: 'flex',
+                                            flexDirection: 'column',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            minHeight: isMobile ? '42px' : '46px'
+                                          }}
+                                        >
+                                          <span style={{ fontSize: isMobile ? '0.85rem' : '0.95rem', fontWeight: 800, color: isRated ? '#ffffff' : r.color, lineHeight: 1.1 }}>{r.val}</span>
+                                          <span style={{ fontSize: isMobile ? '0.62rem' : '0.68rem', marginTop: '2px', whiteSpace: 'nowrap' }}>{r.label}</span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
                               </div>
                             </div>
                           </div>
                         </div>
                       </div>
-
-                      {/* Leitner Rating Controls */}
-                      {isCardFlipped && (
-                        <div className="animate-scale-in" style={{ display: 'flex', flexDirection: 'column', gap: '10px', background: 'var(--card-bg)', padding: isMobile ? '12px' : '16px', borderRadius: '16px', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-sm)' }}>
-                          <p style={{ margin: '0 0 6px 0', fontSize: isMobile ? '0.78rem' : '0.85rem', color: 'var(--text-muted)', textAlign: 'center', fontWeight: 700 }}>كيف كان استدعاؤك للمعلومة؟ (يتم السحب تلقائياً عند التقييم)</p>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: isMobile ? '6px' : '8px' }}>
-                            {[
-                              { val: 1, label: 'صعب جداً' },
-                              { val: 2, label: 'خاطئ' },
-                              { val: 3, label: 'مقبول' },
-                              { val: 4, label: 'سهل' },
-                              { val: 5, label: 'ممتاز' }
-                            ].map(r => (
-                              <button
-                                key={r.val}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  submitSubjectCardReview(activeCard.id, r.val);
-                                }}
-                                style={{
-                                  background: 'var(--hover-bg)',
-                                  border: '1px solid var(--border-color)',
-                                  borderRadius: '10px',
-                                  padding: isMobile ? '8px 2px' : '8px 4px',
-                                  color: 'var(--text-main)',
-                                  fontSize: isMobile ? '0.7rem' : '0.75rem',
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                  transition: 'all 0.2s ease',
-                                  minHeight: isMobile ? '48px' : 'auto'
-                                }}
-                              >
-                                <div style={{ fontSize: isMobile ? '0.92rem' : '1rem', marginBottom: '2px', color: 'var(--primary-color)' }}>{r.val}</div>
-                                <div>{r.label}</div>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   );
                 })()}
@@ -14761,8 +18387,8 @@ export default function App() {
       {/* Mobile sheets (renders above everything when open) */}
       {renderSubjectSheet()}
       {renderModeSheet()}
-      {renderModelSheet()}
       {renderUpgradeSheet()}
+      {renderTeacherConfigSheet()}
 
       {/* Mobile bottom tab bar — thumb-reachable primary navigation */}
       {isMobile && !isTourOpen && !(activeTab === 'exams' && selectedExam && !examResult) && (
@@ -14780,18 +18406,14 @@ export default function App() {
           </button>
           <button
             type="button"
-            className={`bottom-nav-item ${activeTab === 'tasks' ? 'active' : ''}`}
+            className={`bottom-nav-item ${activeTab === 'subscriptions' || activeTab === 'beta' ? 'active' : ''}`}
             onClick={() => {
-              setActiveTab('tasks');
+              setActiveTab('subscriptions');
               setSidebarOpen(false);
             }}
-            style={{ position: 'relative' }}
           >
-            <CheckCircle2 size={20} />
-            <span>المهام</span>
-            {dailyQuestsData?.quests?.some((q: any) => q.completed && !q.claimed) && (
-              <span className="bottom-nav-badge-dot" />
-            )}
+            <CreditCard size={20} />
+            <span>الاشتراك</span>
           </button>
           <button
             type="button"
@@ -15072,6 +18694,22 @@ export default function App() {
           mimeType={editingImage.mimeType}
           onConfirm={handleEditedImage}
           onCancel={() => setEditingImage(null)}
+        />
+      )}
+
+      {/* MODAL: Direct Camera Capture */}
+      {showCameraModal && (
+        <CameraCaptureModal
+          isOpen={showCameraModal}
+          onCapture={(dataUrl) => {
+            setShowCameraModal(false);
+            setEditingImage({ dataUrl, mimeType: 'image/jpeg' });
+          }}
+          onClose={() => setShowCameraModal(false)}
+          onFallbackToNative={() => {
+            setShowCameraModal(false);
+            cameraInputRef.current?.click();
+          }}
         />
       )}
 
@@ -16392,6 +20030,94 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL: Progressive Vector Embeddings Generator */}
+      {embeddingModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 1200, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '16px', direction: 'rtl' }}>
+          <div className="glass-strong animate-scale-in" style={{ background: 'var(--card-bg)', width: '100%', maxWidth: '490px', borderRadius: 'var(--radius-lg)', padding: '24px', boxShadow: 'var(--shadow-xl)', border: '1px solid var(--border-color)', color: 'var(--text-main)', position: 'relative' }}>
+            
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Cpu size={20} style={{ color: 'var(--accent-cyan)' }} />
+                <h3 style={{ fontSize: '1.05rem', fontWeight: 800, margin: 0 }}>فهرسة المتجهات الدلالية: {embeddingModal.subjectName}</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEmbeddingModal(null)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}
+                title="إغلاق ومتابعة في الخلفية"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '14px' }}>
+              تم حفظ وتفكيك فصول المنهج في قاعدة البيانات بنجاح وهو متاح للطلاب الآن. يقوم النظام حالياً بتوليد متجهات الذكاء الاصطناعي (Vector Embeddings) لتعزيز دقة البحث الهجين والذكاء الاصطناعي.
+            </p>
+
+            <div style={{ background: 'var(--sidebar-bg)', borderRadius: 'var(--radius-md)', padding: '14px', border: '1px solid var(--border-color)', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', fontSize: '0.82rem', fontWeight: 700 }}>
+                <span>نسبة الإنجاز</span>
+                <span style={{ color: 'var(--accent-cyan)' }}>{embeddingModal.percentage}% ({embeddingModal.completed} / {embeddingModal.total || '...'})</span>
+              </div>
+              
+              <div style={{ width: '100%', height: '8px', background: 'var(--border-color)', borderRadius: '999px', overflow: 'hidden' }}>
+                <div
+                  style={{
+                    width: `${Math.min(100, Math.max(0, embeddingModal.percentage))}%`,
+                    height: '100%',
+                    background: 'linear-gradient(90deg, var(--accent-cyan), var(--primary-color))',
+                    borderRadius: '999px',
+                    transition: 'width 0.4s ease'
+                  }}
+                />
+              </div>
+
+              <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem' }}>
+                {embeddingModal.isRunning ? (
+                  <>
+                    <Loader2 size={15} className="animate-spin" style={{ color: 'var(--accent-cyan)' }} />
+                    <span style={{ color: 'var(--text-secondary)' }}>جاري معالجة وتضمين وحدات البحث بالذكاء الاصطناعي...</span>
+                  </>
+                ) : embeddingModal.error ? (
+                  <>
+                    <AlertCircle size={15} style={{ color: 'var(--danger-color)' }} />
+                    <span style={{ color: 'var(--danger-color)' }}>{embeddingModal.error}</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 size={15} style={{ color: 'var(--success-color)' }} />
+                    <span style={{ color: 'var(--success-color)', fontWeight: 700 }}>اكتملت فهرسة وتوليد جميع المتجهات الدلالية بنجاح 100%!</span>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              {embeddingModal.error && (
+                <button
+                  type="button"
+                  onClick={() => runProgressiveEmbedding(embeddingModal.curriculumId, embeddingModal.subjectName, embeddingModal.total)}
+                  className="btn-primary"
+                  style={{ padding: '8px 14px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px' }}
+                >
+                  <RefreshCw size={14} />
+                  <span>إعادة المحاولة</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setEmbeddingModal(null)}
+                className="btn-secondary"
+                style={{ padding: '8px 14px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 700 }}
+              >
+                {embeddingModal.isRunning ? 'متابعة في الخلفية' : 'إغلاق'}
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
       {/* MODAL: Placeholder Curriculum Notice for Students */}
       {placeholderModalCurriculum && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 1100, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', direction: 'rtl' }}>
@@ -16670,6 +20396,308 @@ export default function App() {
         </div>
       )}
 
+      {/* MODAL: Customer Service Manual Subscription Grant */}
+      {csGrantSubModal && selectedCsStudent && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 1100, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', direction: 'rtl' }}>
+          <div className="glass-strong animate-scale-in" style={{ background: 'var(--card-bg)', width: '100%', maxWidth: '480px', borderRadius: 'var(--radius-lg)', padding: '26px', boxShadow: 'var(--shadow-xl)', border: '1px solid rgba(255, 183, 3, 0.4)', color: 'var(--text-main)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Crown size={22} color="#FFB703" />
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>تفعيل باقة اشتراك يدوي للطالب</h3>
+              </div>
+              <button onClick={() => setCsGrantSubModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={18} /></button>
+            </div>
+
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+              تفعيل اشتراك فوري للطالب <strong>{selectedCsStudent.name}</strong>، وإيداع الرصيد اليومي وإرسال إشعار ترحيبي بنجاح التفعيل.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '6px' }}>اختر الباقة المطلوبة:</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                  {[
+                    { id: 'pro_1m', label: 'شهر برو', days: 30, coins: 80, price: '60 ج.م' },
+                    { id: 'pro_2m', label: 'شهرين', days: 60, coins: 90, price: '110 ج.م' },
+                    { id: 'pro_3m', label: '3 أشهر (ترم)', days: 90, coins: 120, price: '140 ج.م' },
+                  ].map((p) => {
+                    const isSelected = csGrantSubPlan === p.id;
+                    return (
+                      <div
+                        key={p.id}
+                        onClick={() => {
+                          setCsGrantSubPlan(p.id as any);
+                          setCsGrantSubDays(p.days);
+                        }}
+                        style={{
+                          padding: '10px 8px',
+                          borderRadius: 'var(--radius-sm)',
+                          border: '1px solid',
+                          borderColor: isSelected ? '#FFB703' : 'var(--border-color)',
+                          background: isSelected ? 'rgba(255, 183, 3, 0.15)' : 'var(--sidebar-bg)',
+                          cursor: 'pointer',
+                          textAlign: 'center',
+                          transition: 'var(--transition)'
+                        }}
+                      >
+                        <span style={{ fontSize: '0.82rem', fontWeight: 800, color: isSelected ? '#FFB703' : 'var(--text-main)', display: 'block' }}>{p.label}</span>
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', display: 'block', marginTop: '2px' }}>{p.coins} نقطة/يوم</span>
+                        <span style={{ fontSize: '0.72rem', fontWeight: 700, color: isSelected ? '#FFB703' : 'var(--primary-color)', display: 'block', marginTop: '2px' }}>{p.price}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '6px' }}>مدة التفعيل (بالأيام):</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="365"
+                  value={csGrantSubDays}
+                  onChange={(e) => setCsGrantSubDays(parseInt(e.target.value) || 30)}
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '6px' }}>ملاحظات المشرف (اختياري):</label>
+                <input
+                  type="text"
+                  value={csGrantSubNote}
+                  onChange={(e) => setCsGrantSubNote(e.target.value)}
+                  placeholder="مثال: منحة تفوق دراسي / تحويل بنكي يدوي..."
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setCsGrantSubModal(false)}
+                  className="btn-secondary"
+                  style={{ flex: 1, padding: '11px', fontWeight: 700 }}
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={csActionLoading}
+                  onClick={handleCsGrantSubscription}
+                  style={{
+                    flex: 1.5,
+                    padding: '11px',
+                    borderRadius: 'var(--radius-sm)',
+                    background: '#FFB703',
+                    color: '#0D1B2A',
+                    border: 'none',
+                    fontWeight: 800,
+                    fontSize: '0.88rem',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  {csActionLoading ? <Loader2 size={16} className="animate-spin" /> : <span>تأكيد التفعيل الفوري</span>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Customer Service Edit Student Academic Profile */}
+      {csEditProfileModal && selectedCsStudent && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 1100, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', direction: 'rtl' }}>
+          <div className="glass-strong animate-scale-in" style={{ background: 'var(--card-bg)', width: '100%', maxWidth: '480px', borderRadius: 'var(--radius-lg)', padding: '26px', boxShadow: 'var(--shadow-xl)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Edit2 size={20} color="var(--primary-color)" />
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>تعديل الملف الدراسي للطالب</h3>
+              </div>
+              <button onClick={() => setCsEditProfileModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={18} /></button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>الاسم الكامل:</label>
+                <input
+                  type="text"
+                  value={csEditName}
+                  onChange={(e) => setCsEditName(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>رقم الهاتف:</label>
+                <input
+                  type="text"
+                  value={csEditPhone}
+                  onChange={(e) => setCsEditPhone(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem', direction: 'ltr', textAlign: 'right' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>البريد الإلكتروني:</label>
+                <input
+                  type="email"
+                  value={csEditEmail}
+                  onChange={(e) => setCsEditEmail(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem', direction: 'ltr', textAlign: 'right' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>المرحلة والصف الدراسي:</label>
+                <select
+                  value={csEditGrade}
+                  onChange={(e) => setCsEditGrade(e.target.value)}
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
+                >
+                  {Object.entries(GRADE_NAMES).map(([val, label]) => (
+                    <option key={val} value={val}>{label}</option>
+                  ))}
+                </select>
+              </div>
+
+              {csEditGrade === '2_high' && (
+                <div>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>مسار البكالوريا:</label>
+                  <select
+                    value={csEditTrack}
+                    onChange={(e) => setCsEditTrack(e.target.value)}
+                    style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
+                  >
+                    <option value="">بدون مسار محدد</option>
+                    {Object.values(BACCALAUREATE_TRACKS).map((t) => (
+                      <option key={t.id} value={t.id}>{t.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setCsEditProfileModal(false)}
+                  className="btn-secondary"
+                  style={{ flex: 1, padding: '11px', fontWeight: 700 }}
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={csActionLoading}
+                  onClick={handleCsUpdateProfile}
+                  className="btn-primary"
+                  style={{ flex: 1.5, padding: '11px', fontWeight: 800, fontSize: '0.88rem' }}
+                >
+                  {csActionLoading ? <Loader2 size={16} className="animate-spin" /> : <span>حفظ التعديلات</span>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Customer Service Send Direct Targeted In-App Notification */}
+      {csDirectNotifModal && selectedCsStudent && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 1100, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', direction: 'rtl' }}>
+          <div className="glass-strong animate-scale-in" style={{ background: 'var(--card-bg)', width: '100%', maxWidth: '480px', borderRadius: 'var(--radius-lg)', padding: '26px', boxShadow: 'var(--shadow-xl)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Bell size={20} color="var(--primary-color)" />
+                <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>إرسال إشعار فوري مباشر للطالب</h3>
+              </div>
+              <button onClick={() => setCsDirectNotifModal(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={18} /></button>
+            </div>
+
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', marginBottom: '16px' }}>
+              سيظهر هذا الإشعار مباشرة في حساب الطالب <strong>{selectedCsStudent.name}</strong> في قائمة الإشعارات أعلى الشاشة.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>عنوان الإشعار:</label>
+                <input
+                  type="text"
+                  value={csDirectNotifTitle}
+                  onChange={(e) => setCsDirectNotifTitle(e.target.value)}
+                  placeholder="مثال: تنبيه بخصوص موعد التجديد..."
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>محتوى الإشعار:</label>
+                <textarea
+                  rows={3}
+                  value={csDirectNotifBody}
+                  onChange={(e) => setCsDirectNotifBody(e.target.value)}
+                  placeholder="اكتب نص الرسالة أو التنبيه الموجه للطالب..."
+                  style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem', resize: 'vertical', fontFamily: 'var(--font-arabic)' }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>نوع الإشعار ولونه:</label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+                  {[
+                    { id: 'info', label: 'معلومات عامة' },
+                    { id: 'success', label: 'إشعار نجاح' },
+                    { id: 'warning', label: 'تنبيه هام' },
+                  ].map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => setCsDirectNotifType(t.id as any)}
+                      style={{
+                        padding: '8px',
+                        borderRadius: 'var(--radius-sm)',
+                        border: '1px solid',
+                        borderColor: csDirectNotifType === t.id ? 'var(--primary-color)' : 'var(--border-color)',
+                        background: csDirectNotifType === t.id ? 'var(--primary-light)' : 'var(--sidebar-bg)',
+                        color: csDirectNotifType === t.id ? 'var(--primary-color)' : 'var(--text-muted)',
+                        fontSize: '0.78rem',
+                        fontWeight: 700,
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', gap: '10px', marginTop: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setCsDirectNotifModal(false)}
+                  className="btn-secondary"
+                  style={{ flex: 1, padding: '11px', fontWeight: 700 }}
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={csActionLoading}
+                  onClick={handleCsSendDirectNotification}
+                  className="btn-primary"
+                  style={{ flex: 1.5, padding: '11px', fontWeight: 800, fontSize: '0.88rem' }}
+                >
+                  {csActionLoading ? <Loader2 size={16} className="animate-spin" /> : <span>إرسال الإشعار الآن</span>}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: Customer Service Permanent Student Deletion Confirmation */}
       {csDeleteConfirmModal && selectedCsStudent && (
         <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 1100, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '20px', direction: 'rtl' }}>
@@ -16809,6 +20837,424 @@ export default function App() {
                   {csSupportSaving ? <Loader2 size={16} className="animate-spin" /> : <span>حفظ التحديث</span>}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Customer Service Student AI Conversations Viewer */}
+      {csConversationsModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            width: '100vw',
+            height: '100vh',
+            background: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(12px)',
+            zIndex: 1100,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '16px',
+            direction: 'rtl'
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCsConversationsModalOpen(false);
+          }}
+        >
+          <div
+            className="glass-strong animate-scale-in"
+            style={{
+              background: 'var(--card-bg)',
+              width: '100%',
+              maxWidth: '1040px',
+              maxHeight: '92vh',
+              height: '840px',
+              borderRadius: 'var(--radius-lg)',
+              padding: '24px',
+              boxShadow: 'var(--shadow-xl)',
+              border: '1px solid var(--border-color)',
+              color: 'var(--text-main)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '16px',
+              overflow: 'hidden'
+            }}
+          >
+            {/* Modal Header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <MessageSquareText size={22} color="var(--primary-color)" />
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <h3 style={{ fontSize: '1.2rem', fontWeight: 800, margin: 0, color: 'var(--text-main)' }}>
+                      سجل محادثات الذكاء الاصطناعي
+                    </h3>
+                    {(csConversationsData?.student?.name || selectedCsStudent?.name) && (
+                      <span style={{
+                        padding: '2px 8px',
+                        borderRadius: 'var(--radius-full)',
+                        background: 'var(--primary-light)',
+                        color: 'var(--primary-color)',
+                        fontSize: '0.78rem',
+                        fontWeight: 700
+                      }}>
+                        {csConversationsData?.student?.name || selectedCsStudent?.name}
+                      </span>
+                    )}
+                  </div>
+                  <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
+                    مراجعة التفاعل التعليمي للطالب مع المعلم الذكي وفقاً لتصريح الخصوصية
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCsConversationsModalOpen(false)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+                title="إغلاق"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            {csConversationsLoading ? (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '12px' }}>
+                <Loader2 size={36} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
+                <span style={{ fontSize: '0.88rem', color: 'var(--text-muted)' }}>جاري تحميل سجل المحادثات والجلسات...</span>
+              </div>
+            ) : csConversationsData?.opted_out ? (
+              /* Opted Out Privacy Shield Card */
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '30px 20px', maxWidth: '580px', margin: '0 auto' }}>
+                <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: 'rgba(230, 57, 70, 0.12)', border: '2px solid rgba(230, 57, 70, 0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '16px' }}>
+                  <EyeOff size={32} color="#E63946" />
+                </div>
+                <h4 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--text-main)', marginBottom: '8px' }}>
+                  سجل المحادثات محمي ومحجوب بالكامل
+                </h4>
+                <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: '1.7', marginBottom: '16px' }}>
+                  قام الطالب <strong>{csConversationsData?.student?.name || selectedCsStudent?.name}</strong> بإلغاء تفعيل خيار «المساعدة في تحسين استجابات الذكاء الاصطناعي» من إعدادات حسابه الشخصي.
+                </p>
+                <div style={{
+                  padding: '14px 18px',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--sidebar-bg)',
+                  border: '1px solid var(--border-color)',
+                  fontSize: '0.82rem',
+                  color: 'var(--text-muted)',
+                  lineHeight: '1.6',
+                  textAlign: 'right',
+                  marginBottom: '24px',
+                  width: '100%'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, color: '#E63946', marginBottom: '6px' }}>
+                    <ShieldAlert size={15} />
+                    <span>ضمان الخصوصية التامة للطلاب:</span>
+                  </div>
+                  وفقاً لسياسة EGS AI الصارمة لحماية خصوصية بيانات الطلاب، لا يمكن لأي مشرف أو إداري أو طرف ثالث الاطلاع على سجل المحادثات أو استرجاع نصوص الأسئلة والإجابات متى اختار الطالب إلغاء المشاركة.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCsConversationsModalOpen(false)}
+                  className="btn-primary"
+                  style={{ padding: '10px 28px', fontSize: '0.88rem', fontWeight: 700 }}
+                >
+                  فهمت ذلك - إغلاق النافذة
+                </button>
+              </div>
+            ) : csConversationsData?.error ? (
+              /* Error State */
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '30px' }}>
+                <AlertTriangle size={36} color="#E63946" style={{ marginBottom: '12px' }} />
+                <h4 style={{ fontSize: '1.1rem', fontWeight: 800, color: 'var(--text-main)', marginBottom: '6px' }}>تعذر تحميل السجل</h4>
+                <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', maxWidth: '440px' }}>{csConversationsData.error}</p>
+                <button
+                  type="button"
+                  onClick={() => selectedCsStudent && handleOpenStudentConversations(selectedCsStudent.id)}
+                  className="btn-secondary"
+                  style={{ marginTop: '16px', padding: '8px 20px', fontSize: '0.84rem', fontWeight: 700 }}
+                >
+                  إعادة المحاولة
+                </button>
+              </div>
+            ) : (
+              /* Populated Conversation History */
+              (() => {
+                const sessions = csConversationsData?.sessions || [];
+                const messages = csConversationsData?.messages || [];
+
+                // Filter subjects from sessions
+                const availableSubjects = Array.from(new Set(sessions.map((s: any) => s.subject).filter(Boolean)));
+
+                // Filtered sessions
+                const filteredSessions = sessions.filter((s: any) => {
+                  if (csConversationSubjectFilter !== 'all' && s.subject !== csConversationSubjectFilter) return false;
+                  if (csConversationSearch.trim()) {
+                    const query = csConversationSearch.trim().toLowerCase();
+                    const titleMatch = (s.title || '').toLowerCase().includes(query);
+                    const hasMatchingMsg = messages.some((m: any) => m.session_id === s.id && (m.message || '').toLowerCase().includes(query));
+                    if (!titleMatch && !hasMatchingMsg) return false;
+                  }
+                  return true;
+                });
+
+                // Active session messages
+                const activeSession = sessions.find((s: any) => s.id === csSelectedSessionId) || filteredSessions[0];
+                const activeMessages = activeSession
+                  ? messages.filter((m: any) => m.session_id === activeSession.id)
+                  : [];
+
+                return (
+                  <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '12px', minHeight: 0 }}>
+                    
+                    {/* Toolbar & Filters */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap', padding: '10px 14px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{
+                          padding: '3px 10px',
+                          borderRadius: 'var(--radius-full)',
+                          background: 'rgba(34, 197, 94, 0.15)',
+                          color: '#22C55E',
+                          fontSize: '0.74rem',
+                          fontWeight: 800,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '4px'
+                        }}>
+                          <ShieldCheck size={13} />
+                          <span>تحسين AI: مفعل (مصرح بالعرض)</span>
+                        </span>
+                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                          {sessions.length} جلسة • {messages.length} رسالة مسجلة
+                        </span>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        {/* Subject Filter */}
+                        {availableSubjects.length > 0 && (
+                          <select
+                            value={csConversationSubjectFilter}
+                            onChange={(e) => setCsConversationSubjectFilter(e.target.value)}
+                            style={{
+                              padding: '6px 10px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'var(--card-bg)',
+                              border: '1px solid var(--border-color)',
+                              color: 'var(--text-main)',
+                              fontSize: '0.78rem',
+                              fontWeight: 700,
+                              outline: 'none'
+                            }}
+                          >
+                            <option value="all">كل المواد ({sessions.length})</option>
+                            {availableSubjects.map((sub: any) => (
+                              <option key={sub} value={sub}>{sub}</option>
+                            ))}
+                          </select>
+                        )}
+
+                        {/* Search in conversations */}
+                        <div style={{ position: 'relative', width: '220px' }}>
+                          <input
+                            type="text"
+                            value={csConversationSearch}
+                            onChange={(e) => setCsConversationSearch(e.target.value)}
+                            placeholder="بحث في المحادثات..."
+                            style={{
+                              width: '100%',
+                              padding: '6px 28px 6px 10px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'var(--card-bg)',
+                              border: '1px solid var(--border-color)',
+                              color: 'var(--text-main)',
+                              fontSize: '0.78rem',
+                              outline: 'none'
+                            }}
+                          />
+                          <Search size={13} style={{ position: 'absolute', right: '9px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Master-Detail Split: Left Sessions List, Right Chat Transcript */}
+                    <div style={{ flex: 1, display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '300px 1fr', gap: '14px', minHeight: 0, overflow: 'hidden' }}>
+                      
+                      {/* Left: Sessions List */}
+                      <div style={{
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'var(--sidebar-bg)',
+                        border: '1px solid var(--border-color)',
+                        padding: '10px',
+                        overflowY: 'auto',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '6px',
+                        maxHeight: '100%'
+                      }}>
+                        <div style={{ fontSize: '0.76rem', fontWeight: 800, color: 'var(--text-muted)', marginBottom: '4px', padding: '0 4px' }}>
+                          الجلسات ({filteredSessions.length})
+                        </div>
+
+                        {filteredSessions.length === 0 ? (
+                          <div style={{ textAlign: 'center', padding: '30px 10px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                            لا توجد جلسات محادثة مسجلة.
+                          </div>
+                        ) : (
+                          filteredSessions.map((s: any) => {
+                            const isCurrent = (activeSession?.id === s.id);
+                            const sessionMsgs = messages.filter((m: any) => m.session_id === s.id);
+                            return (
+                              <div
+                                key={s.id}
+                                onClick={() => setCsSelectedSessionId(s.id)}
+                                style={{
+                                  padding: '10px 12px',
+                                  borderRadius: 'var(--radius-sm)',
+                                  border: '1px solid',
+                                  borderColor: isCurrent ? 'var(--primary-color)' : 'var(--border-color)',
+                                  background: isCurrent ? 'var(--primary-light)' : 'var(--card-bg)',
+                                  cursor: 'pointer',
+                                  transition: 'var(--transition)',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  gap: '4px'
+                                }}
+                              >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                  <span style={{ fontSize: '0.82rem', fontWeight: 800, color: isCurrent ? 'var(--primary-color)' : 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '190px' }}>
+                                    {s.title || 'محادثة عامة'}
+                                  </span>
+                                  {s.subject && (
+                                    <span style={{
+                                      fontSize: '0.66rem',
+                                      fontWeight: 700,
+                                      padding: '1px 6px',
+                                      borderRadius: 'var(--radius-full)',
+                                      background: 'rgba(0, 180, 216, 0.12)',
+                                      color: '#00B4D8'
+                                    }}>
+                                      {s.subject}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
+                                  <span>{sessionMsgs.length} رسالة</span>
+                                  <span>{s.created_at ? new Date(s.created_at).toLocaleDateString('ar-EG') : ''}</span>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+
+                      {/* Right: Message Transcript Viewer */}
+                      <div style={{
+                        borderRadius: 'var(--radius-sm)',
+                        background: 'var(--sidebar-bg)',
+                        border: '1px solid var(--border-color)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        overflow: 'hidden',
+                        maxHeight: '100%'
+                      }}>
+                        {/* Transcript Sub-Header */}
+                        <div style={{ padding: '10px 16px', borderBottom: '1px solid var(--border-color)', background: 'var(--card-bg)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                              {activeSession?.title || 'تفاصيل الجلسة'}
+                            </span>
+                            {activeSession?.subject && (
+                              <span style={{ fontSize: '0.74rem', color: 'var(--primary-color)', marginRight: '8px' }}>
+                                ({activeSession.subject})
+                              </span>
+                            )}
+                          </div>
+                          <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                            {activeMessages.length} رسالة في هذه الجلسة
+                          </span>
+                        </div>
+
+                        {/* Transcript Scroll Area */}
+                        <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                          {!activeSession ? (
+                            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                              اختر جلسة من القائمة لعرض المحادثة بالكامل.
+                            </div>
+                          ) : activeMessages.length === 0 ? (
+                            <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                              لا توجد رسائل مسجلة في هذه الجلسة.
+                            </div>
+                          ) : (
+                            activeMessages.map((msg: any, idx: number) => {
+                              const isUser = msg.sender === 'user';
+                              return (
+                                <div
+                                  key={msg.id || idx}
+                                  style={{
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    alignSelf: isUser ? 'flex-start' : 'stretch',
+                                    maxWidth: isUser ? '85%' : '100%'
+                                  }}
+                                >
+                                  {/* Sender Label & Timestamp */}
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+                                    <span style={{
+                                      fontWeight: 800,
+                                      color: isUser ? 'var(--primary-color)' : 'var(--secondary-color)'
+                                    }}>
+                                      {isUser ? (csConversationsData?.student?.name || 'الطالب') : 'المعلم الذكي (EGS AI)'}
+                                    </span>
+                                    <span>•</span>
+                                    <span>{msg.created_at ? new Date(msg.created_at).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                                    {msg.tokens_used && (
+                                      <span style={{ color: 'var(--text-muted)', fontSize: '0.68rem' }}>({msg.tokens_used} رمز)</span>
+                                    )}
+                                  </div>
+
+                                  {/* Message Bubble Card */}
+                                  <div style={{
+                                    padding: '12px 14px',
+                                    borderRadius: 'var(--radius-sm)',
+                                    background: isUser ? 'var(--card-bg)' : 'rgba(0, 180, 216, 0.06)',
+                                    border: '1px solid',
+                                    borderColor: isUser ? 'var(--border-color)' : 'rgba(0, 180, 216, 0.25)',
+                                    color: 'var(--text-main)',
+                                    fontSize: '0.85rem',
+                                    lineHeight: '1.7',
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-word',
+                                    fontFamily: 'var(--font-arabic)'
+                                  }}>
+                                    {msg.message}
+                                  </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+
+                    </div>
+                  </div>
+                );
+              })()
+            )}
+
+            {/* Modal Footer */}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', borderTop: '1px solid var(--border-color)', paddingTop: '12px' }}>
+              <button
+                type="button"
+                onClick={() => setCsConversationsModalOpen(false)}
+                className="btn-secondary"
+                style={{ padding: '8px 22px', fontSize: '0.84rem', fontWeight: 700 }}
+              >
+                إغلاق
+              </button>
             </div>
           </div>
         </div>

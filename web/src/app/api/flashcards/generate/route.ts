@@ -1,8 +1,9 @@
-export const runtime = 'edge';
+export const maxDuration = 60;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { getCurriculumContextForLesson } from '@/lib/curriculum_structure';
+import { isEnglishSubject } from '@/lib/subject_helpers';
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -45,13 +46,54 @@ export async function POST(req: NextRequest) {
       ? `\nFOCUS TOPIC CONSTRAINT: All cards MUST focus strictly on this lesson: "${topic}". Do not pull concepts from other lessons.`
       : '';
 
+    const isEnglish = isEnglishSubject(subject_name);
+
+    const languageMandate = isEnglish
+      ? `- ALL USER-FACING TEXT (questions, answers, deck titles) MUST BE STRICTLY AND ENTIRELY IN ENGLISH ONLY. NEVER USE ARABIC IN QUESTIONS, ANSWERS, OR DECK TITLES.
+- NUMERALS MANDATE: Use English digits (0, 1, 2, 3, 4, 5, 6, 7, 8, 9) for all numbers and measurements.`
+      : `- ALL USER-FACING TEXT (questions, answers, deck titles) MUST BE IN IMPECCABLE, FORMAL MODERN STANDARD ARABIC (اللغة العربية الفصحى السليمة).
+- NUMERALS MANDATE (قاعدة كتابة الأرقام الإلزامية): Use Arabic numerals (٠، ١، ٢، ٣، ٤، ٥، ٦، ٧، ٨، ٩) for all numbers, measurements, and values.
+- ABSOLUTELY ZERO COLLOQUIAL PHRASING (ممنوع العامية نهائياً في صياغة الكروت مثل: "إيه"، "ليه"، "مين"، "ازاي").`;
+
+    const cardRules = isEnglish
+      ? `1. Question: Clear, high-yield conceptual question in English testing understanding of principles, functions, or cause-and-effect rather than rote recall.
+2. Answer: Concise, authoritative model answer highlighting underlying mechanisms, formulas, or rules.
+3. Strict Curriculum Adherence: Ground all questions strictly in the provided textbook context.`
+      : `1. Question: سؤال استيعابي مركز لقياس المفاهيم الجوهرية ونواتج التعلم باللغة العربية الفصحى السليمة، يركز على الفهم والاستنباط والعلاقات العلمية بدلاً من الحفظ والتلقين.
+2. Answer: إجابة نموذجية دقيقة وشاملة توضح السبب العلمي، القاعدة، أو الصيغة الرياضية بوضوح.
+3. Strict Curriculum Adherence: الالتزام التام بنصوص ومفاهيم المنهج المدرسي المعتمد وتجنب الأسئلة التافهة أو غير المجدية.`;
+
+    const schemaExample = isEnglish
+      ? `{
+  "title": "Flashcards: ${topic}",
+  "cards": [
+    {
+      "question": "What is the primary grammatical distinction between the Present Perfect and the Past Simple?",
+      "answer": "The Present Perfect links a past action to the present moment or its current consequence, while the Past Simple describes an event completed at a specific past time."
+    },
+    {
+      "question": "How does the prefix 'un-' alter the meaning of an adjective?",
+      "answer": "It negates the adjective or denotes its opposite (e.g., known -> unknown, happy -> unhappy)."
+    }
+  ]
+}`
+      : `{
+  "title": "كروت المفاهيم الأساسية: ${topic}",
+  "cards": [
+    {
+      "question": "ما التفسير العلمي لكون النواة موجبة الشحنة في ذرة أي عنصر؟",
+      "answer": "لاحتوائها على بروتونات موجبة الشحنة ونيوترونات متعادلة الشحنة كهربياً، فتكون المحصلة النهائية لشحنة النواة موجبة."
+    }
+  ]
+}`;
+
     const systemPrompt = `You are the Flashcards Generation Engine for the Egyptian National Curriculum (Middle & High School).
-Generate high-yield Active Recall flashcards to help students master key definitions, laws, and facts.
+Generate high-yield Active Recall flashcards to help students master conceptual understanding, underlying scientific causes, formulas, and learning outcomes. Strictly avoid rote memorization, trivial trivia, or colloquial phrasing.
 
 ================================================================================
 CRITICAL LANGUAGE & OUTPUT MANDATE:
-- ALL USER-FACING TEXT (questions, answers, deck titles) MUST BE IN PURE, CLEAR ARABIC.
-- Format all mathematical, physical, and chemical formulas in standard LaTeX ($$ or $).
+${languageMandate}
+- Format all mathematical, physical, and chemical formulas in standard LaTeX ($$ or $). Strictly avoid raw Unicode superscripts (⁰-⁹) or Unicode multiply (×) in plain text.
 - Return strict JSON ONLY (no markdown fences, no conversational prose).
 ================================================================================
 
@@ -66,20 +108,10 @@ ${curriculumText || 'General curriculum content for ' + subject_name}
 """
 
 Card Design Rules:
-1. Question: Clear, focused, single-concept question in Arabic.
-2. Answer: Concise, accurate model answer highlighting key terms.
-3. Strict Curriculum Adherence: Keep all facts strictly faithful to the textbook.
+${cardRules}
 
 JSON Output Schema:
-{
-  "title": "عنوان مجموعة الكروت بالعربية (مثال: ملخص قوانين نيوتن)",
-  "cards": [
-    {
-      "question": "نص السؤال أو المفهوم؟",
-      "answer": "الإجابة النموذجية المركزة"
-    }
-  ]
-}`;
+${schemaExample}`;
 
     const response = await fetch(DEEPSEEK_API_URL, {
       method: 'POST',
@@ -88,12 +120,15 @@ JSON Output Schema:
         'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
       },
       body: JSON.stringify({
-        model: 'deepseek-chat',
+        model: 'deepseek-flash',
         messages: [
           { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Generate ${count} flashcards for topic: ${topic}.` }
+          { role: 'user', content: `Generate ${count} flashcards for topic: ${topic} as a JSON object.` }
         ],
-        temperature: 0.8
+        response_format: { type: 'json_object' },
+        thinking: { type: 'disabled' },
+        temperature: 0.35,
+        max_tokens: 4000
       })
     });
 
@@ -103,7 +138,8 @@ JSON Output Schema:
     }
 
     const data = await response.json();
-    let content = data.choices[0].message.content.trim();
+    const msg = data.choices?.[0]?.message;
+    let content = (msg?.content || msg?.reasoning_content || '').trim();
 
     // Clean JSON markdown fences
     if (content.startsWith('```json')) {
@@ -132,7 +168,7 @@ JSON Output Schema:
     await db.deductCoins(userId, null, coinsCost);
 
     // Save deck and cards to database
-    const deckTitle = parsed.title || `كروت: ${topic}`;
+    const deckTitle = parsed.title || (isEnglish ? `Cards: ${topic}` : `كروت: ${topic}`);
     const newDeck = await db.createFlashcardDeck(userId, subject_name, grade_level, deckTitle, parsed.cards);
 
     return NextResponse.json({

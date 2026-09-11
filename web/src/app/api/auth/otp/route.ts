@@ -2,7 +2,7 @@ export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { generateSessionToken, parseDeviceMetadata } from '@/lib/auth_helpers';
-import { checkRateLimit, getClientIp } from '@/lib/rate_limiter';
+import { checkRateLimitAsync, getClientIp } from '@/lib/rate_limiter';
 
 export async function POST(req: NextRequest) {
   try {
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const rateLimit = checkRateLimit(`otp_${ip}_${cleanEmail}`, 5, 600);
+    const rateLimit = await checkRateLimitAsync(`otp_${ip}_${cleanEmail}`, 5, 600);
     if (!rateLimit.allowed) {
       return NextResponse.json(
         { error: `تم تجاوز الحد المسموح لمحاولات التحقق. يرجى الانتظار ${rateLimit.resetSeconds} ثانية.` },
@@ -75,6 +75,9 @@ export async function POST(req: NextRequest) {
       hasRegisteredBefore: !!has_registered_before
     });
 
+    const initialCoins = 20.0;
+    const isClaimed = true;
+
     // Create profile
     const profile = await db.createProfile({
       id: userId,
@@ -86,7 +89,9 @@ export async function POST(req: NextRequest) {
       plan_type: 'free',
       role: 'student',
       password_hash: pending.password_hash,
-      coins: trialResult.coins,
+      coins: initialCoins,
+      welcome_reward_claimed: isClaimed,
+      free_plan_claimed: isClaimed,
       terms_accepted_at: pending.terms_accepted_at || new Date().toISOString()
     });
 
@@ -129,16 +134,22 @@ export async function POST(req: NextRequest) {
         subscription_end_date: profile.subscription_end_date || null,
         subscription_plan_id: profile.subscription_plan_id || null,
         role: profile.role,
-        coins: profile.coins === undefined ? 15.0 : profile.coins,
+        coins: profile.coins === undefined ? initialCoins : profile.coins,
         points: profile.points || 0,
-        study_streak: profile.study_streak || 1
+        study_streak: profile.study_streak || 1,
+        welcome_reward_claimed: !!profile.welcome_reward_claimed,
+        free_plan_claimed: !!profile.free_plan_claimed,
+        apology_compensation_claimed: !!profile.apology_compensation_claimed,
+        apology_dismissed: !!profile.apology_dismissed,
+        created_at: profile.created_at,
+        improve_ai_opt_in: profile.improve_ai_opt_in !== undefined ? profile.improve_ai_opt_in : true
       }
     });
 
   } catch (error: any) {
     console.error('OTP API Error:', error);
     return NextResponse.json(
-      { error: 'حدث خطأ أثناء تأكيد رمز التحقق.' },
+      { error: error?.message || 'حدث خطأ أثناء تأكيد رمز التحقق.' },
       { status: 500 }
     );
   }

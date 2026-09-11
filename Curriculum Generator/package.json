@@ -6,7 +6,8 @@
     "dev": "next dev -p 3005",
     "build": "next build",
     "start": "next start -p 3005",
-    "lint": "next lint"
+    "lint": "next lint",
+    "verify": "node scripts/verify_curriculum.mjs"
   },
   "dependencies": {
     "@napi-rs/canvas": "^1.0.3",

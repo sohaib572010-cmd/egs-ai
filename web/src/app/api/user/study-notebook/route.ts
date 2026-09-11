@@ -17,8 +17,46 @@ export async function GET(req: NextRequest) {
     }
 
     const { searchParams } = new URL(req.url);
-    const subjectName = searchParams.get('subject_name') || undefined;
+    const action = searchParams.get('action');
 
+    // On-demand resolution of conversation & message for a specific note
+    if (action === 'resolve') {
+      const noteId = searchParams.get('note_id');
+      if (!noteId) {
+        return NextResponse.json({ error: 'معرف الملاحظة مطلوب' }, { status: 400 });
+      }
+      const notes = await db.getStudyNotebook(userId);
+      const targetNote = notes.find(n => n.id === noteId);
+      if (!targetNote) {
+        return NextResponse.json({ error: 'الملاحظة غير موجودة' }, { status: 404 });
+      }
+
+      if (targetNote.session_id) {
+        return NextResponse.json({
+          success: true,
+          session_id: targetNote.session_id,
+          message_id: targetNote.message_id || null
+        });
+      }
+
+      // Search user chat history for matching message content
+      const history = await db.getChatHistory(userId);
+      const match = history.find(ch => 
+        ch.sender === 'ai' &&
+        ch.message &&
+        (ch.message === targetNote.content ||
+         ch.message.includes(targetNote.content.trim().slice(0, 50)) ||
+         targetNote.content.includes(ch.message.trim().slice(0, 50)))
+      );
+
+      return NextResponse.json({
+        success: true,
+        session_id: match?.session_id || null,
+        message_id: match?.id || null
+      });
+    }
+
+    const subjectName = searchParams.get('subject_name') || undefined;
     const notes = await db.getStudyNotebook(userId, subjectName);
 
     return NextResponse.json({
@@ -46,7 +84,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { subject_name, grade_level, title, content, note_type } = body;
+    const { subject_name, grade_level, title, content, note_type, session_id, message_id, sessionId, messageId } = body;
 
     if (!subject_name || !title || !content) {
       return NextResponse.json({ error: 'المادة والعنوان والمحتوى حقول مطلوبة' }, { status: 400 });
@@ -61,7 +99,9 @@ export async function POST(req: NextRequest) {
       gradeLevel: targetGrade,
       title,
       content,
-      noteType: note_type || 'formula'
+      noteType: note_type || 'formula',
+      sessionId: session_id || sessionId || null,
+      messageId: message_id || messageId || null
     });
 
     return NextResponse.json({

@@ -75,6 +75,22 @@ export function AppTour({
   const [targetRect, setTargetRect] = useState<DOMRect | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
+  // Dynamic mobile detection ensuring robust styling even if prop is omitted or on resize
+  const [effectiveIsMobile, setEffectiveIsMobile] = useState(isMobile);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      const isSmall = typeof window !== 'undefined' && (
+        window.innerWidth <= 768 ||
+        (window.visualViewport ? window.visualViewport.width <= 768 : false)
+      );
+      setEffectiveIsMobile(Boolean(isMobile || isSmall));
+    };
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, [isMobile]);
+
   // Define screen tours with authentic Egyptian Arabic explanations
   const getScreenSteps = useCallback((): TourStep[] => {
     const subjectName = currentSubject || 'المادة اللي هتختارها';
@@ -103,7 +119,7 @@ export function AppTour({
           },
           {
             targetId: 'tour-subject-selector',
-            title: '2. اختيار المادة الدراسية',
+            title: '1. اختيار المادة الدراسية',
             badge: 'خطوة أساسية',
             badgeIcon: <BookOpen size={14} />,
             position: 'bottom',
@@ -125,7 +141,7 @@ export function AppTour({
           },
           {
             targetId: 'tour-composer-dock',
-            title: '3. صندوق السؤال وخيارات الذكاء الاصطناعي',
+            title: '2. صندوق السؤال وخيارات الذكاء الاصطناعي',
             badge: 'التحكم الذكي',
             badgeIcon: <Brain size={14} />,
             position: isMobile ? 'top' : 'top',
@@ -172,24 +188,24 @@ export function AppTour({
                     </ul>
                   </div>
                 ),
-                actionText: 'التالي: اختيار النموذج الذكي'
+                actionText: 'التالي: ميزة التفكير المعمق'
               },
               {
-                title: 'نماذج الذكاء الاصطناعي والفرق بينها',
-                badge: '3 من 4: نماذج AI',
-                badgeIcon: <Zap size={14} />,
-                targetId: 'tour-model-selector',
+                title: 'ميزة التفكير المعمق (Deep Thinking)',
+                badge: '3 من 4: التفكير الذكي',
+                badgeIcon: <Brain size={14} />,
+                targetId: 'tour-thinking-controls',
                 content: (
                   <div className="tour-content-body">
                     <p>
-                      تقدر تبدّل بين نموذجين حسب قوة المسألة اللي بتسألها:
+                      محرك الذكاء الاصطناعي فائق السرعة، ومتاح للمشتركين تفعيل التفكير المعمق للمسائل الصعبة:
                     </p>
                     <ul className="tour-features-list">
                       <li>
-                        <strong>نموذج Fast (السريع):</strong> ممتاز للأسئلة السريعة، المفاهيم المباشرة، وحفظ القوانين، وسريع جداً في الرد.
+                        <strong>الوضع السريع:</strong> استجابة فورية فائقة السرعة للمفاهيم والأسئلة المباشرة وحفظ القوانين.
                       </li>
                       <li>
-                        <strong>نموذج Pro (الفائق):</strong> بيملك أعلى قدرة استنتاجية وتحليلية، مصمم لحل أعقد مسائل امتحانات الثانوية العامة والمسائل المركبة بدقة فائقة.
+                        <strong>التفكير المعمق (حصرياً للمشتركين):</strong> تحليل استنتاجي خطوة بخطوة لأعقد مسائل امتحانات الثانوية العامة بدقة متناهية.
                       </li>
                     </ul>
                   </div>
@@ -433,7 +449,7 @@ export function AppTour({
       default:
         return [];
     }
-  }, [screen, currentSubject, isMobile]);
+  }, [screen, currentSubject, effectiveIsMobile]);
 
   const steps = getScreenSteps();
   const currentStep = steps[currentStepIndex] || steps[0];
@@ -467,13 +483,31 @@ export function AppTour({
     if (activeTargetId) {
       const targetEl = document.getElementById(activeTargetId);
       if (targetEl) {
-        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+        if (effectiveIsMobile) {
+          // For mobile, scroll intelligently based on target location:
+          // For bottom dock controls (composer dock, send button, deep thinking, models),
+          // scroll target towards the bottom so the card has ample, unobstructed space at the top!
+          const isBottomDockControl = activeTargetId === 'tour-composer-dock' ||
+            activeTargetId === 'tour-thinking-controls' ||
+            activeTargetId === 'tour-model-selector' ||
+            activeTargetId === 'tour-send-button' ||
+            currentStep?.position === 'top';
+
+          targetEl.scrollIntoView({
+            behavior: 'smooth',
+            block: isBottomDockControl ? 'end' : 'start',
+            inline: 'nearest'
+          });
+        } else {
+          targetEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+        }
       }
     }
 
     measureTargetRect();
-    const timer1 = setTimeout(measureTargetRect, 80);
-    const timer2 = setTimeout(measureTargetRect, 320);
+    const timer1 = setTimeout(measureTargetRect, 60);
+    const timer2 = setTimeout(measureTargetRect, 200);
+    const timer3 = setTimeout(measureTargetRect, 450);
 
     const handleScrollOrResize = () => {
       measureTargetRect();
@@ -489,6 +523,7 @@ export function AppTour({
     return () => {
       clearTimeout(timer1);
       clearTimeout(timer2);
+      clearTimeout(timer3);
       window.removeEventListener('resize', handleScrollOrResize);
       window.removeEventListener('scroll', handleScrollOrResize, true);
       if (typeof window !== 'undefined' && window.visualViewport) {
@@ -496,9 +531,9 @@ export function AppTour({
         window.visualViewport.removeEventListener('scroll', handleScrollOrResize);
       }
     };
-  }, [isOpen, currentStepIndex, subStepIndex, activeTargetId, measureTargetRect]);
+  }, [isOpen, currentStepIndex, subStepIndex, activeTargetId, measureTargetRect, effectiveIsMobile]);
 
-  // When opening Step 3 (Submit box) in Chat screen: automatically prefill the prompt!
+  // When opening Step 2 (Submit box) in Chat screen: automatically prefill the prompt!
   useEffect(() => {
     if (screen === 'chat' && currentStepIndex === 2 && isOpen) {
       const prompt = `اشرحلي بالتفصيل وبأمثلة واضحة أول درس في منهج ${currentSubject || 'الفيزياء'}`;
@@ -554,7 +589,7 @@ export function AppTour({
     // Custom action triggers
     if (screen === 'chat') {
       if (currentStepIndex === 1) {
-        // Step 2: Subject selector
+        // Step 1: Subject selector
         if (onSelectSubjectPrompt && !currentSubject) {
           onSelectSubjectPrompt();
         }
@@ -563,7 +598,7 @@ export function AppTour({
       }
 
       if (currentStepIndex === 2 && isLastSubStep) {
-        // Step 3 final sub-step: Submit message - Close tour immediately first so streaming is completely unobstructed!
+        // Step 2 final sub-step: Submit message - Close tour immediately first so streaming is completely unobstructed!
         onClose(true);
         if (onSubmitTourMessage) {
           setTimeout(onSubmitTourMessage, 40);
@@ -596,14 +631,15 @@ export function AppTour({
     handleNext();
   };
 
-  // Card positioning logic
+  // Card positioning logic with guaranteed non-overlapping bounds
   const getCardStyle = (): React.CSSProperties => {
     const visualViewport = typeof window !== 'undefined' ? window.visualViewport : null;
     const winW = visualViewport ? visualViewport.width : (typeof window !== 'undefined' ? window.innerWidth : 1200);
     const winH = visualViewport ? visualViewport.height : (typeof window !== 'undefined' ? window.innerHeight : 800);
     const offsetTop = visualViewport ? visualViewport.offsetTop : 0;
 
-    if (isMobile) {
+    if (effectiveIsMobile) {
+      // 1. Centered fallback when there's no target or position is explicitly center
       if (!targetRect || currentStep.position === 'center') {
         return {
           position: 'fixed',
@@ -613,33 +649,53 @@ export function AppTour({
           transform: 'translateY(-50%)',
           margin: '0 auto',
           maxWidth: '440px',
+          maxHeight: 'min(80vh, calc(100dvh - 36px))',
+          display: 'flex',
+          flexDirection: 'column',
           zIndex: 10002
         };
       }
 
-      // If target element is in bottom half of viewport (like composer dock), place card at top
-      if (targetRect.top > winH / 2) {
+      // 2. We have a targetRect. Calculate available space above and below the target:
+      const targetTop = targetRect.top;
+      const targetBottom = targetRect.bottom;
+      const spaceAbove = targetTop - offsetTop - 12;
+      const spaceBelow = (winH + offsetTop) - targetBottom - 12;
+
+      // Card prefers top if explicitly requested, or if target is closer to bottom
+      const placeAtTop = currentStep.position === 'top' || spaceAbove >= spaceBelow;
+
+      if (placeAtTop) {
+        // Place card at top of viewport, strictly bounded above targetRect so it NEVER overlaps
+        const availableHeight = Math.max(160, Math.min(380, spaceAbove - 12));
         return {
           position: 'fixed',
-          top: `calc(${offsetTop + 12}px + env(safe-area-inset-top, 0px))`,
+          top: `calc(${offsetTop + 10}px + env(safe-area-inset-top, 0px))`,
           left: '12px',
           right: '12px',
           margin: '0 auto',
           maxWidth: '440px',
+          maxHeight: `${availableHeight}px`,
+          display: 'flex',
+          flexDirection: 'column',
+          zIndex: 10002
+        };
+      } else {
+        // Place card at bottom of viewport, strictly bounded below targetRect so it NEVER overlaps
+        const availableHeight = Math.max(160, Math.min(380, spaceBelow - 12));
+        return {
+          position: 'fixed',
+          bottom: 'calc(10px + env(safe-area-inset-bottom, 0px))',
+          left: '12px',
+          right: '12px',
+          margin: '0 auto',
+          maxWidth: '440px',
+          maxHeight: `${availableHeight}px`,
+          display: 'flex',
+          flexDirection: 'column',
           zIndex: 10002
         };
       }
-
-      // If target element is in top half of viewport, place card at bottom
-      return {
-        position: 'fixed',
-        bottom: 'calc(12px + env(safe-area-inset-bottom, 0px))',
-        left: '12px',
-        right: '12px',
-        margin: '0 auto',
-        maxWidth: '440px',
-        zIndex: 10002
-      };
     }
 
     // Desktop positioning
@@ -651,6 +707,9 @@ export function AppTour({
         transform: 'translate(-50%, -50%)',
         maxWidth: '520px',
         width: '92%',
+        maxHeight: 'min(86vh, 600px)',
+        display: 'flex',
+        flexDirection: 'column',
         zIndex: 10002
       };
     }
@@ -678,6 +737,9 @@ export function AppTour({
       top: `${Math.round(top)}px`,
       left: `${Math.round(left)}px`,
       width: `${cardWidth}px`,
+      maxHeight: 'min(86vh, 600px)',
+      display: 'flex',
+      flexDirection: 'column',
       zIndex: 10002
     };
   };
@@ -869,7 +931,9 @@ export function AppTour({
               onClick={handleActionClick}
             >
               <span>
-                {activeSubStep?.actionText || currentStep.actionButtonText || (isLastMainStep ? 'إتمام الجولة' : 'التالي')}
+                {effectiveIsMobile
+                  ? (isLastMainStep && isLastSubStep ? 'إرسال وتجربة الآن' : (isLastMainStep ? 'إتمام الجولة' : 'التالي'))
+                  : (activeSubStep?.actionText || currentStep.actionButtonText || (isLastMainStep ? 'إتمام الجولة' : 'التالي'))}
               </span>
               {isLastMainStep && isLastSubStep ? (
                 <CheckCircle size={15} />

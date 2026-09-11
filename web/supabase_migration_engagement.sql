@@ -28,8 +28,14 @@ CREATE TABLE IF NOT EXISTS study_notebook (
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   note_type TEXT NOT NULL DEFAULT 'formula', -- 'formula' | 'definition' | 'solution' | 'law' | 'general'
+  session_id UUID NULL REFERENCES chat_sessions(id) ON DELETE SET NULL,
+  message_id TEXT NULL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+ALTER TABLE study_notebook ADD COLUMN IF NOT EXISTS session_id UUID REFERENCES chat_sessions(id) ON DELETE SET NULL;
+ALTER TABLE study_notebook ADD COLUMN IF NOT EXISTS message_id TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_study_notebook_user ON study_notebook(user_id, subject_name);
+CREATE INDEX IF NOT EXISTS idx_study_notebook_session ON study_notebook(session_id);
 CREATE INDEX IF NOT EXISTS idx_study_notebook_created ON study_notebook(user_id, created_at DESC);

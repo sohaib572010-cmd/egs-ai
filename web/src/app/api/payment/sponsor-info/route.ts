@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
         study_streak: profile.study_streak || 1,
         points: profile.points || 0,
         plan_type: profile.plan_type || 'free',
-        subscription_status: profile.subscription_status || 'inactive'
+        subscription_status: profile.subscription_status || (profile.plan_type && profile.plan_type !== 'free' ? 'active' : 'inactive')
       }
     });
 

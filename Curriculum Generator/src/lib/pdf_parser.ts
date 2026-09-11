@@ -78,15 +78,13 @@ export class PDFDocumentHandler {
 
       if (allCached) return;
 
-      const escapedFilePath = this.filePath.replace(/\\/g, "\\\\");
-      const escapedCacheDir = this.cacheDir.replace(/\\/g, "\\\\");
-
       const pyScript = `
 import fitz
 import os
+import json
 
-pdf_path = r'''${escapedFilePath}'''
-out_dir = r'''${escapedCacheDir}'''
+pdf_path = json.loads(${JSON.stringify(JSON.stringify(this.filePath))})
+out_dir = json.loads(${JSON.stringify(JSON.stringify(this.cacheDir))})
 os.makedirs(out_dir, exist_ok=True)
 
 try:
@@ -100,9 +98,11 @@ except Exception as e:
     print('Batch render error:', e)
 `;
 
-      execSync(`python -c "${pyScript.replace(/\n/g, " ").replace(/"/g, '\\"')}"`, {
-        timeout: 120000,
-        stdio: "ignore",
+      execSync("python", {
+        input: pyScript,
+        encoding: "utf-8",
+        timeout: 180000,
+        stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (e: any) {
       console.warn("Batch pre-render notice (will render on-demand):", e.message);
@@ -113,21 +113,8 @@ except Exception as e:
     return this.totalPages;
   }
 
-  private extractLock: Promise<void> = Promise.resolve();
-
   public async extractPage(pageNumber: number): Promise<PDFPageContent> {
-    const currentLock = this.extractLock;
-    let releaseLock: () => void = () => {};
-    this.extractLock = new Promise<void>((resolve) => {
-      releaseLock = resolve;
-    });
-
-    await currentLock;
-    try {
-      return await this.extractPageInternalWithTimeout(pageNumber);
-    } finally {
-      releaseLock();
-    }
+    return await this.extractPageInternalWithTimeout(pageNumber);
   }
 
   private async extractPageInternalWithTimeout(pageNumber: number): Promise<PDFPageContent> {
@@ -183,19 +170,35 @@ except Exception as e:
     // Load full-page rendered image from cache or on-demand
     let imageBuffer: Buffer | null = null;
     const cachedImgPath = path.join(this.cacheDir, `page_${pageNumber}.jpg`);
-    const legacyCachePath = path.join(process.cwd(), "page_images_cache", `page_${pageNumber}.jpg`);
 
     if (fs.existsSync(cachedImgPath)) {
       imageBuffer = fs.readFileSync(cachedImgPath);
-    } else if (fs.existsSync(legacyCachePath)) {
-      imageBuffer = fs.readFileSync(legacyCachePath);
     } else {
       try {
-        const escapedFilePath = this.filePath.replace(/\\/g, "\\\\");
-        const escapedOut = cachedImgPath.replace(/\\/g, "\\\\");
-        const pyCmd = `python -c "import fitz; doc=fitz.open(r'''${escapedFilePath}'''); pix=doc[${pageNumber - 1}].get_pixmap(dpi=180); pix.save(r'''${escapedOut}''')"`;
         if (!fs.existsSync(this.cacheDir)) fs.mkdirSync(this.cacheDir, { recursive: true });
-        execSync(pyCmd, { timeout: 15000 });
+        const pySingleScript = `
+import fitz
+import os
+import json
+
+pdf_path = json.loads(${JSON.stringify(JSON.stringify(this.filePath))})
+out_path = json.loads(${JSON.stringify(JSON.stringify(cachedImgPath))})
+os.makedirs(os.path.dirname(out_path), exist_ok=True)
+
+try:
+    doc = fitz.open(pdf_path)
+    if ${pageNumber - 1} < len(doc):
+        pix = doc[${pageNumber - 1}].get_pixmap(dpi=180)
+        pix.save(out_path)
+except Exception as e:
+    print('Single page render error:', e)
+`;
+        execSync("python", {
+          input: pySingleScript,
+          encoding: "utf-8",
+          timeout: 20000,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
         if (fs.existsSync(cachedImgPath)) {
           imageBuffer = fs.readFileSync(cachedImgPath);
         }

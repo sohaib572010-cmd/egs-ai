@@ -26,6 +26,7 @@ export interface RateLimitResult {
   resetSeconds: number;
 }
 
+// In-memory sliding-window rate limiter (Fast local execution & graceful fallback)
 export function checkRateLimit(
   key: string,
   maxRequests: number,
@@ -61,6 +62,58 @@ export function checkRateLimit(
     remaining: maxRequests - record.timestamps.length,
     resetSeconds
   };
+}
+
+/**
+ * Distributed Multi-Tier Rate Limiter
+ * - Tier 1: Upstash Redis REST (Zero TCP, edge/serverless native)
+ * - Tier 2: High-performance local in-memory sliding window fallback (Zero database contention)
+ * 
+ * PostgreSQL is intentionally excluded from the rate-limiting hot path to prevent
+ * connection pool exhaustion and transaction queue contention under brute-force attacks.
+ */
+export async function checkRateLimitAsync(
+  key: string,
+  maxRequests: number,
+  windowSeconds: number
+): Promise<RateLimitResult> {
+  // 1. Tier 1: Upstash Redis REST
+  const redisUrl = process.env.UPSTASH_REDIS_REST_URL;
+  const redisToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (redisUrl && redisToken) {
+    try {
+      const response = await fetch(`${redisUrl}/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${redisToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify([
+          ['INCR', `rl:${key}`],
+          ['EXPIRE', `rl:${key}`, windowSeconds, 'NX'],
+          ['TTL', `rl:${key}`]
+        ])
+      });
+
+      if (response.ok) {
+        const results = await response.json();
+        const currentCount = typeof results[0]?.result === 'number' ? results[0].result : 1;
+        const ttl = typeof results[2]?.result === 'number' && results[2].result > 0 ? results[2].result : windowSeconds;
+
+        const allowed = currentCount <= maxRequests;
+        return {
+          allowed,
+          remaining: Math.max(0, maxRequests - currentCount),
+          resetSeconds: ttl
+        };
+      }
+    } catch (redisErr) {
+      // Fall through to in-memory tier on Redis network/availability error
+    }
+  }
+
+  // 2. Tier 2: High-performance local in-memory sliding-window fallback
+  return checkRateLimit(key, maxRequests, windowSeconds);
 }
 
 export function getClientIp(req: NextRequest): string {

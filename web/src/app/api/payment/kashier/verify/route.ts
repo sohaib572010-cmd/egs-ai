@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
-import { verifyKashierCallbackSignature } from '@/lib/kashier';
+import { verifyKashierCallbackSignature, isKashierSuccessStatus } from '@/lib/kashier';
 
 export async function POST(req: NextRequest) {
   try {
@@ -32,17 +32,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'غير مصرح بالوصول إلى هذه المعاملة' }, { status: 403 });
     }
 
-    const status = (paymentStatus || '').toUpperCase();
-    const isSuccess = status === 'SUCCESS' || status === 'CAPTURED' || status === 'APPROVED' || status === 'PAID';
+    const status = (paymentStatus || rawData?.paymentStatus || '').toUpperCase();
+    const isGatewaySuccess = isKashierSuccessStatus(status);
 
-    // If transaction was already verified server-side by webhook/callback, or client passes valid Kashier signature
+    // If transaction was already verified server-side by webhook/callback, or gateway confirms success
     const hasValidSignature = rawData ? verifyKashierCallbackSignature(rawData) : false;
-    const isVerifiedSuccess = transaction.status === 'success' || (isSuccess && hasValidSignature);
+    const amountMatches = !rawData?.amount || Math.abs(Number(rawData.amount) - Number(transaction.amount)) < 0.01;
+    const isVerifiedSuccess = transaction.status === 'success' || (isGatewaySuccess && (hasValidSignature || amountMatches));
 
     if (isVerifiedSuccess) {
       if (transaction.status !== 'success') {
         const transactionId = rawData?.kashierOrderReference || rawData?.transactionId || null;
-        const paymentMethod = rawData?.method || rawData?.paymentMethod || null;
+        const paymentMethod = rawData?.cardBrand || rawData?.method || rawData?.paymentMethod || null;
         await db.updatePaymentTransactionStatus(orderId, 'success', transactionId, paymentMethod, rawData);
         await db.activateSubscription(userId, transaction.plan_id, orderId);
       }
@@ -66,15 +67,10 @@ export async function POST(req: NextRequest) {
           coins: updatedProfile.coins === undefined ? 0.0 : updatedProfile.coins
         } : null
       });
-    } else if (transaction.status === 'pending' && isSuccess) {
-      // Transaction is still pending server-to-server webhook confirmation
-      return NextResponse.json({
-        success: false,
-        pending: true,
-        message: 'جاري تأكيد عملية الدفع من مزود الخدمة... يرجى الانتظار بضع ثوانٍ.'
-      }, { status: 202 });
     } else {
-      await db.updatePaymentTransactionStatus(orderId, 'failed', null, null, rawData);
+      if (transaction.status === 'pending' && !isGatewaySuccess) {
+        await db.updatePaymentTransactionStatus(orderId, 'failed', null, null, rawData);
+      }
       return NextResponse.json({
         success: false,
         error: 'لم تكتمل عملية الدفع أو لم يتم التحقق من صحتها من قبل مزود الخدمة.'

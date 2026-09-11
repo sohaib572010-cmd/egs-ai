@@ -96,21 +96,18 @@ export async function runHybridTriFusionRetrieval(
   query: string,
   queryEmbedding: number[],
   keywords: string[],
-  options: HybridRetrievalOptions = {}
+  options: HybridRetrievalOptions = {},
+  hydePassage?: string
 ): Promise<HybridRetrievalResult> {
   const cleanGrade = gradeLevel.trim();
   const cleanSubject = subjectName.trim();
   const topK = options.topK ?? 8;
 
-  // 1. Retrieve all curriculum chunks & graph data for this curriculum
-  const [curriculumRecord, allCurriculumChunks, graphData] = await Promise.all([
+  // 1. Retrieve curriculum record & graph data for this curriculum
+  const [curriculumRecord, graphData] = await Promise.all([
     db.getCurriculumRecord(cleanGrade, cleanSubject).catch(err => {
       console.warn('getCurriculumRecord notice:', err);
       return null;
-    }),
-    db.getAllChunksForCurriculum(cleanGrade, cleanSubject).catch(err => {
-      console.warn('getAllChunksForCurriculum notice:', err);
-      return [] as CurriculumChunk[];
     }),
     db.getCurriculumGraph(cleanGrade, cleanSubject).catch(err => {
       console.warn('getCurriculumGraph notice:', err);
@@ -119,13 +116,14 @@ export async function runHybridTriFusionRetrieval(
   ]);
 
   const candidateChunksMap = new Map<string, CurriculumChunk>();
-  allCurriculumChunks.forEach(c => candidateChunksMap.set(c.id, c));
 
-  // 2. Parallel Channel Execution: Vector + BM25 + GraphRAG
+  // 2. Parallel Channel Execution: Vector + BM25 (via database RPC) + GraphRAG
   const vectorPromise = (async () => {
     if (!queryEmbedding || queryEmbedding.length === 0) return [];
     try {
-      return await db.vectorSearchCurriculum(cleanGrade, cleanSubject, queryEmbedding);
+      const vecChunks = await db.vectorSearchCurriculum(cleanGrade, cleanSubject, queryEmbedding);
+      vecChunks.forEach(c => candidateChunksMap.set(c.id, c));
+      return vecChunks;
     } catch (err) {
       console.warn('Vector search notice (falling back):', err);
       return [];
@@ -134,20 +132,21 @@ export async function runHybridTriFusionRetrieval(
 
   const bm25Promise = (async () => {
     try {
-      if (allCurriculumChunks.length === 0) return [];
-      const childChunks = allCurriculumChunks.filter(c => c.chunk_level === 'child');
-      const docsToIndex = (childChunks.length > 0 ? childChunks : allCurriculumChunks).map(c => ({
-        id: c.id,
-        heading: c.heading,
-        content: c.content,
-        parent_id: c.parent_id,
-        position_index: c.position_index
-      }));
-
-      const bm25Index = new BM25Index(docsToIndex);
-      return bm25Index.search(query, 30);
+      const searchKeywords = (keywords && keywords.length > 0)
+        ? keywords
+        : query.replace(/[؟?!.،,;:]/g, ' ').split(/\s+/).filter(w => w.length > 2);
+      
+      const bm25Chunks = await db.hybridSearchCurriculum(
+        cleanGrade,
+        cleanSubject,
+        queryEmbedding || [],
+        searchKeywords,
+        []
+      );
+      bm25Chunks.forEach(c => candidateChunksMap.set(c.id, c));
+      return bm25Chunks.map((c, idx) => ({ doc: c, rank: idx + 1, score: 1.0 / (idx + 1) }));
     } catch (err) {
-      console.warn('BM25 search notice (falling back):', err);
+      console.warn('BM25 hybrid RPC notice (falling back):', err);
       return [];
     }
   })();
@@ -184,10 +183,10 @@ export async function runHybridTriFusionRetrieval(
     graphPromise
   ]);
 
-  // 3. Weighted Reciprocal Rank Fusion
+  // 3. Weighted Reciprocal Rank Fusion over candidate pools
   const fusedScores = fuseRRF(
     vectorCandidates,
-    bm25Candidates,
+    bm25Candidates as any,
     subgraph.connectedChunkIds,
     candidateChunksMap,
     options
@@ -211,8 +210,47 @@ export async function runHybridTriFusionRetrieval(
   }
 
   // Fallback if no parents or child chunks are already parent sections
-  if (parentChunks.length === 0) {
+  if (parentChunks.length === 0 && topChildChunks.length > 0) {
     parentChunks = topChildChunks;
+  }
+
+  // Resilient fallback: If Tri-Fusion yields 0 parent chunks, directly extract from raw markdown content
+  if (parentChunks.length === 0 && curriculumRecord) {
+    try {
+      const detail = await db.getCurriculumDetail(curriculumRecord.id);
+      if (detail && detail.content) {
+        const queryTerms = [...new Set([
+          ...query.replace(/[؟?!.،,;:\-_\/]/g, ' ').split(/\s+/).filter(w => w.length > 2),
+          ...(keywords || [])
+        ])].filter(w => w.length > 2);
+
+        const rawSections = detail.content.split(/\n(?=#{1,3}\s)/);
+        const scored = rawSections.map((sec, idx) => {
+          const firstLine = (sec.split('\n')[0] || '').toLowerCase();
+          const body = sec.toLowerCase();
+          let score = 0;
+          for (const t of queryTerms) {
+            const term = t.toLowerCase();
+            if (firstLine.includes(term)) score += 15;
+            else if (body.includes(term)) score += 3;
+          }
+          return { sec, score, idx };
+        }).filter(s => s.score > 0).sort((a, b) => b.score - a.score);
+
+        if (scored.length > 0) {
+          parentChunks = scored.slice(0, 4).map(s => ({
+            id: `fallback_${s.idx}`,
+            curriculum_id: curriculumRecord.id,
+            heading: s.sec.split('\n')[0]?.replace(/^#+\s*/, '') || 'قسم دراسي',
+            content: s.sec,
+            chunk_level: 'parent' as const,
+            position_index: s.idx
+          }));
+        }
+      }
+    } catch (fallbackErr) {
+      console.warn('Raw markdown section fallback notice in hybrid_retriever:', fallbackErr);
+    }
   }
 
   // 5. Build Formatted Context Block

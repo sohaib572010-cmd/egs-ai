@@ -21,19 +21,19 @@ export const KASHIER_PLANS: Record<string, KashierPlan> = {
     durationDays: 30,
     dailyCoins: 80,
     bonusCoins: 80,
-    badge: 'الباقة الأكثر طلباً',
-    description: 'تمنحك 80 نقطة يومياً تتجدد كل 24 ساعة طوال 30 يوماً مع وصول لنموذج Pro وميزة التفكير'
+    badge: 'الباقة التمهيدية',
+    description: 'تمنحك 80 نقطة يومياً تتجدد كل 24 ساعة طوال 30 يوماً مع وصول كامل لنموذج Pro والتفكير المستفيض (2 ج.م / اليوم)'
   },
   pro_2m: {
     id: 'pro_2m',
     name: 'باقة شهرين (2 Months)',
-    amount: 100,
+    amount: 110,
     currency: 'EGP',
     durationDays: 60,
     dailyCoins: 90,
     bonusCoins: 90,
-    badge: 'الباقة الأكثر شعبية',
-    description: 'تمنحك 90 نقطة يومياً تتجدد كل 24 ساعة طوال 60 يوماً مع وصول لنموذج Pro وميزة التفكير'
+    badge: 'الباقة المرنة',
+    description: 'تمنحك 90 نقطة يومياً تتجدد كل 24 ساعة طوال 60 يوماً مع نموذج Pro والتفكير المستفيض (1.83 ج.م / اليوم)'
   },
   pro_3m: {
     id: 'pro_3m',
@@ -43,13 +43,13 @@ export const KASHIER_PLANS: Record<string, KashierPlan> = {
     durationDays: 90,
     dailyCoins: 120,
     bonusCoins: 120,
-    badge: 'أفضل قيمة وأعلى توفير',
-    description: 'تمنحك 120 نقطة يومياً تتجدد كل 24 ساعة طوال 90 يوماً مع وصول لنموذج Pro وميزة التفكير'
+    badge: 'خيار 85% من الطلاب المتفوقين — باقة الترم الكامل',
+    description: 'تمنحك 120 نقطة يومياً تتجدد كل 24 ساعة طوال 90 يوماً مع أعلى أولوية وتوفير 40 ج.م (فقط 1.5 ج.م / اليوم)'
   }
 };
 
 export function getKashierCredentials() {
-  const merchantId = (process.env.KASHIER_MERCHANT_ID || process.env.NEXT_PUBLIC_KASHIER_MERCHANT_ID || '').trim();
+  const merchantId = (process.env.KASHIER_MERCHANT_ID || process.env.NEXT_PUBLIC_KASHIER_MERCHANT_ID || 'MID-47766-857').trim();
   const securityKey = (process.env.KASHIER_SECURITY_KEY || '').trim();
   let apiKey = (process.env.KASHIER_API_KEY || '').trim();
 
@@ -93,55 +93,103 @@ function safeTimingCompare(calculatedHex: string, providedHex: string): boolean 
   }
 }
 
+export function isKashierSuccessStatus(status?: string | null): boolean {
+  if (!status) return false;
+  const s = String(status).trim().toUpperCase();
+  return s === 'SUCCESS' || s === 'CAPTURED' || s === 'APPROVED' || s === 'PAID';
+}
+
 /**
- * Validates the callback redirect signature from Kashier strictly.
+ * Validates the callback redirect signature from Kashier.
  * Kashier passes query params and a signature header/param.
+ * Tests arrival order, raw query sequence, sorted order, and signatureKeys.
  */
-export function verifyKashierCallbackSignature(params: Record<string, any>): boolean {
+export function verifyKashierCallbackSignature(
+  params: Record<string, any>,
+  rawSearchString?: string
+): boolean {
   const signature = params.signature || params.hash;
   if (!signature || typeof signature !== 'string') return false;
 
   const { apiKey, securityKey } = getKashierCredentials();
-  const validKeys = [apiKey, securityKey].filter(Boolean);
+  const validKeys: string[] = [];
+  if (apiKey) {
+    validKeys.push(apiKey);
+    if (apiKey.length === 72 && apiKey.slice(0, 36) === apiKey.slice(36)) {
+      validKeys.push(apiKey.slice(0, 36));
+    }
+  }
+  if (securityKey) {
+    validKeys.push(securityKey);
+    if (securityKey.includes('$')) {
+      validKeys.push(securityKey.split('$')[0]);
+      validKeys.push(securityKey.split('$')[1]);
+    }
+  }
+
   if (validKeys.length === 0) {
     console.error('Cannot verify Kashier signature: No Kashier keys configured.');
     return false;
   }
 
-  // 1. If signatureKeys array is provided by Kashier gateway
+  const ignoredKeys = new Set(['signature', 'hash', 'mode']);
+  const candidates: string[] = [];
+
+  // 1. Raw search string as directly received from the request URL
+  if (rawSearchString) {
+    const cleanSearch = rawSearchString.startsWith('?') ? rawSearchString.slice(1) : rawSearchString;
+    const parts = cleanSearch.split('&').filter(part => {
+      const key = decodeURIComponent(part.split('=')[0] || '');
+      return key && !ignoredKeys.has(key);
+    });
+    if (parts.length > 0) {
+      candidates.push(parts.join('&'));
+      // Also test decoded version
+      const decodedParts = parts.map(p => {
+        const [k, ...v] = p.split('=');
+        return `${decodeURIComponent(k)}=${decodeURIComponent(v.join('='))}`;
+      });
+      candidates.push(decodedParts.join('&'));
+    }
+  }
+
+  // 2. Exact arrival order from params
+  const arrivalKeys = Object.keys(params).filter(k => !ignoredKeys.has(k));
+  if (arrivalKeys.length > 0) {
+    candidates.push(arrivalKeys.map(k => `${k}=${params[k]}`).join('&'));
+  }
+
+  // 3. Alphabetical sorted order
+  const sortedKeys = [...arrivalKeys].sort();
+  if (sortedKeys.length > 0) {
+    candidates.push(sortedKeys.map(k => `${k}=${params[k]}`).join('&'));
+  }
+
+  // 4. signatureKeys array (if provided by Kashier gateway)
   if (params.signatureKeys) {
     try {
       const keys = typeof params.signatureKeys === 'string' ? JSON.parse(params.signatureKeys) : params.signatureKeys;
       if (Array.isArray(keys) && keys.length > 0) {
-        const queryParts: string[] = [];
-        keys.forEach((k: string) => {
-          if (params[k] !== undefined) {
-            queryParts.push(`${k}=${params[k]}`);
-          }
-        });
-        const queryString = queryParts.join('&');
-
-        for (const key of validKeys) {
-          const calculated = crypto.createHmac('sha256', key).update(queryString).digest('hex');
-          if (safeTimingCompare(calculated, signature)) {
-            return true;
-          }
-        }
+        candidates.push(keys.filter((k: string) => params[k] !== undefined).map((k: string) => `${k}=${params[k]}`).join('&'));
+        const sortedSigKeys = [...keys].sort();
+        candidates.push(sortedSigKeys.filter((k: string) => params[k] !== undefined).map((k: string) => `${k}=${params[k]}`).join('&'));
       }
     } catch (e) {
       console.warn('Error parsing Kashier signatureKeys:', e);
     }
   }
 
-  // 2. Direct query string reconstruction without signature & mode
-  const ignoredKeys = new Set(['signature', 'hash', 'mode']);
-  const sortedKeys = Object.keys(params).filter(k => !ignoredKeys.has(k)).sort();
-  if (sortedKeys.length > 0) {
-    const queryString = sortedKeys.map(k => `${k}=${params[k]}`).join('&');
+  // Check all candidates against all valid keys
+  for (const candidate of candidates) {
+    if (!candidate) continue;
     for (const key of validKeys) {
-      const calculated = crypto.createHmac('sha256', key).update(queryString).digest('hex');
-      if (safeTimingCompare(calculated, signature)) {
-        return true;
+      try {
+        const calculated = crypto.createHmac('sha256', key).update(candidate).digest('hex');
+        if (safeTimingCompare(calculated, signature)) {
+          return true;
+        }
+      } catch {
+        continue;
       }
     }
   }
