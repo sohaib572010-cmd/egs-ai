@@ -276,7 +276,7 @@ export default function Dashboard() {
               مُستخرج ومُنظّم المناهج الدراسية المتزامن (EGS AI Multi-Curriculum Engine)
             </h1>
             <p style={{ fontSize: "14px", color: "var(--text-muted)", marginTop: "4px" }}>
-              معالجة متوازية فائقة السرعة مع استخراج OCR مرن ومواءمة تامة مع محرك الـ AI والـ RAG
+              معالجة متوازية فائقة السرعة مدعومة بنموذج DeepSeek 4.1 متعدد الوسائط الموحد (رؤية بصرية وهيكلة تربوية مباشرة)
             </p>
           </div>
         </div>
@@ -297,7 +297,7 @@ export default function Dashboard() {
             }}
           >
             <CheckCircle2 size={16} />
-            مفاتيح الـ AI مفعّلة وجاهزة تلقائياً
+            محرك DeepSeek 4.1 متعدد الوسائط مفعّل
           </span>
 
           <button
@@ -524,54 +524,54 @@ export default function Dashboard() {
             }}
           >
             <div>
-              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
-                مفتاح Google Gemini API Key (موصى به - رؤية بصرية و OCR فائقة الدقة ومجانية)
-              </label>
-              <input
-                type="password"
-                value={settings.geminiApiKey || ""}
-                onChange={(e) => setSettings({ ...settings, geminiApiKey: e.target.value })}
-                placeholder="أدخل مفتاح Google Gemini (AIzaSy...)"
-                style={{
-                  width: "100%",
-                  padding: "10px 14px",
-                  backgroundColor: "var(--bg-main)",
-                  border: "1px solid var(--border-color)",
-                  borderRadius: "8px",
-                  color: "var(--text-main)",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
-                مفتاح EdenAI API Key (احتياطي لاستخراج OCR والرؤية البصرية)
-              </label>
-              <input
-                type="password"
-                value={settings.edenAiApiKey}
-                onChange={(e) => setSettings({ ...settings, edenAiApiKey: e.target.value })}
-                placeholder="أدخل مفتاح EdenAI (Bearer eyJ...)"
-                style={{
-                  width: "100%",
-                  padding: "10px 14px",
-                  backgroundColor: "var(--bg-main)",
-                  border: "1px solid var(--border-color)",
-                  borderRadius: "8px",
-                  color: "var(--text-main)",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
-                مفتاح DeepSeek API Key (لهيكلة الـ RAG والوحدات والدروس)
+              <label style={{ fontSize: "13px", color: "var(--text-main)", fontWeight: "600", display: "block", marginBottom: "6px" }}>
+                مفتاح DeepSeek API Key (الأساسي والموصى به - نموذج DeepSeek 4.1 الموحد للرؤية والنصوص)
               </label>
               <input
                 type="password"
                 value={settings.deepSeekApiKey}
                 onChange={(e) => setSettings({ ...settings, deepSeekApiKey: e.target.value })}
                 placeholder="أدخل مفتاح DeepSeek (sk-...)"
+                style={{
+                  width: "100%",
+                  padding: "10px 14px",
+                  backgroundColor: "var(--bg-main)",
+                  border: "1px solid var(--brand-primary)",
+                  borderRadius: "8px",
+                  color: "var(--text-main)",
+                }}
+              />
+            </div>
+
+            <div>
+              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
+                مفتاح Google Gemini API Key (احتياطي اختياري)
+              </label>
+              <input
+                type="password"
+                value={settings.geminiApiKey || ""}
+                onChange={(e) => setSettings({ ...settings, geminiApiKey: e.target.value })}
+                placeholder="مفتاح Google Gemini (اختياري)"
+                style={{
+                  width: "100%",
+                  padding: "10px 14px",
+                  backgroundColor: "var(--bg-main)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "8px",
+                  color: "var(--text-main)",
+                }}
+              />
+            </div>
+
+            <div>
+              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
+                مفتاح EdenAI API Key (احتياطي اختياري)
+              </label>
+              <input
+                type="password"
+                value={settings.edenAiApiKey}
+                onChange={(e) => setSettings({ ...settings, edenAiApiKey: e.target.value })}
+                placeholder="مفتاح EdenAI (اختياري)"
                 style={{
                   width: "100%",
                   padding: "10px 14px",

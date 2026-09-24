@@ -1,7 +1,7 @@
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, invalidateCurriculumsCache } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { processCurriculumChunks } from '@/lib/curriculum_processor';
 
@@ -33,7 +33,11 @@ export async function GET(req: NextRequest) {
     if (authResult instanceof NextResponse) return authResult;
 
     const curriculums = await db.getCurriculums();
-    return NextResponse.json({ success: true, curriculums });
+    return NextResponse.json({ success: true, curriculums }, {
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate'
+      }
+    });
   } catch (error: any) {
     console.error('Get curriculums error:', error);
     return NextResponse.json({ error: 'حدث خطأ أثناء تحميل المناهج الدراسية.' }, { status: 500 });

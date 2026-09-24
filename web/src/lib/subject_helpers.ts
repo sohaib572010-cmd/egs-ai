@@ -52,11 +52,15 @@ export function determineMathNotationContext(
   // 2. Query override detection:
   if (q) {
     const hasLatinMathEquation =
-      /\b[a-zA-Z]\s*[\^=+\-*\/]\s*[\da-zA-Z]/.test(q) ||
+      /\b[a-zA-Z]\s*[²³\^=+\-*\/×÷≠±≤≥]\s*[\da-zA-Z]/.test(q) ||
+      /\b[a-zA-Z][²³]/.test(q) ||
+      /[√∛]\s*(?:\([^)]+\)|[a-zA-Z\d]+)/.test(q) ||
       /\b(sin|cos|tan|log|ln|lim|sqrt|frac|dy\/dx|f\(x\))\b/i.test(q) ||
       /(\$[a-zA-Z][^$]*\$)/.test(q);
     const hasArabicMathEquation =
-      /[سصعنرقأب]\s*[\^=+\-*\/]\s*[٠-٩0-9سصعنرقأب]/.test(q) ||
+      /[سصعنرقأب]\s*[²³\^=+\-*\/×÷≠±≤≥]\s*[٠-٩0-9سصعنرقأب]/.test(q) ||
+      /[سصعنرقأب][²³]/.test(q) ||
+      /[√∛]\s*(?:\([^)]+\)|[سصعنرقأب٠-٩0-9]+)/.test(q) ||
       /(جا|جتا|ظا|ظتا|نها|لو|د\(س\))/.test(q) ||
       /(\$[سصعنرقأب][^$]*\$)/.test(q);
 
@@ -116,12 +120,51 @@ export function isEnglishMathSubject(subjectName?: string, gradeLevel?: string):
   return determineMathNotationContext(subjectName, gradeLevel).mode === 'english';
 }
 
+/**
+ * Strips structural markup, protocol tags, code fences, and LaTeX math formulas
+ * before performing natural language classification.
+ */
+export function extractReadableText(text: string): string {
+  if (!text) return '';
+  return text
+    // Remove protocol tags and blocks like [QUIZ_QUESTION]...[/QUIZ_QUESTION], [CREATE_EXAM], etc.
+    .replace(/\[[A-Z_]+(?::[^\]]*)?\][\s\S]*?\[\/[A-Z_]+\]/g, '')
+    .replace(/\[[A-Z_]+(?::[^\]]*)?\]/g, '')
+    .replace(/\[\/[A-Z_]+\]/g, '')
+    // Remove markdown code fences and inline code
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/`[^`]+`/g, '')
+    // Remove block and inline LaTeX formulas
+    .replace(/\$\$[\s\S]*?\$\$/g, '')
+    .replace(/\\\[[\s\S]*?\\\]/g, '')
+    .replace(/\$[^$]+\$/g, '')
+    .replace(/\\\([^)]+\\\)/g, '')
+    .replace(/\\begin\{[a-z*]+\}[\s\S]*?\\end\{[a-z*]+\}/gi, '')
+    // Remove markdown images and keep link text
+    .replace(/!\[[^\]]*\]\([^)]+\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .trim();
+}
+
 export function isEnglishText(text?: string): boolean {
   if (!text) return false;
-  const latinMatches = text.match(/[A-Za-z]/g) || [];
-  const arabicMatches = text.match(/[\u0600-\u06FF]/g) || [];
-  return latinMatches.length > arabicMatches.length;
+  const readable = extractReadableText(text);
+  if (!readable) return false;
+
+  const latinMatches = readable.match(/[A-Za-z]/g) || [];
+  const arabicMatches = readable.match(/[\u0600-\u06FF]/g) || [];
+
+  // If no Latin characters or fewer than 2, cannot be English
+  if (latinMatches.length < 2) return false;
+
+  // Pure Latin/English text (no Arabic characters)
+  if (arabicMatches.length === 0) return true;
+
+  // Mixed text: Latin must constitute the dominant majority (>= 65%)
+  const totalLetters = latinMatches.length + arabicMatches.length;
+  return (latinMatches.length / totalLetters) >= 0.65;
 }
+
 
 const ARABIC_GRADE_NAMES: Record<string, string> = {
   '1_middle': 'الصف الأول الإعدادي',

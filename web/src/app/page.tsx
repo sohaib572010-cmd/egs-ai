@@ -15,6 +15,8 @@ import {
   BookOpen,
   Sparkles,
   Plus,
+  Play,
+  Pause,
   Send,
   Lock,
   Check,
@@ -107,10 +109,17 @@ import {
   Cpu,
   MessageSquareText,
   ToggleLeft,
-  ToggleRight
+  ToggleRight,
+  Volume2,
+  VolumeX,
+  Printer,
+  FileDown,
+  Star,
+  Filter
 } from 'lucide-react';
 import AppTour, { TourScreen } from '@/components/AppTour';
 import { isEnglishSubject, isEnglishText } from '@/lib/subject_helpers';
+import { speakEnglish, stopSpeech, isPureEnglishVocab, isEnglishSpeechEligible } from '@/lib/speech_helpers';
 import { DEFAULT_STATIC_CURRICULUMS, DEFAULT_DAILY_QUESTS, DEFAULT_DAILY_QUESTS_DATA } from '@/lib/default_curriculums';
 
 interface SearchStep {
@@ -507,6 +516,17 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
          .replace(/±/g, ' \\pm ')
          .replace(/∞/g, ' \\infty ');
 
+    // 7.1 Normalize visual roots, powers, and fractions to LaTeX
+    f = f.replace(/∛\s*\(([^)]+)\)/g, '\\sqrt[3]{$1}')
+         .replace(/∛\s*([٠-٩0-9a-zA-Z\u0600-\u06FF]+)/g, '\\sqrt[3]{$1}')
+         .replace(/√\s*\(([^)]+)\)/g, '\\sqrt{$1}')
+         .replace(/√\s*([٠-٩0-9a-zA-Z\u0600-\u06FF]+)/g, '\\sqrt{$1}')
+         .replace(/\^\s*\(([^)]+)\)/g, '^{$1}')
+         .replace(/\^\s*([0-9a-zA-Z\u0600-\u06FF]+)/g, '^{$1}')
+         .replace(/(?:\(([^\)]+)\)|([٠-٩0-9a-zA-Z\u0600-\u06FF]+))\s*\/\s*(?:\(([^\)]+)\)|([٠-٩0-9a-zA-Z\u0600-\u06FF]+))/g,
+           (m, n1, n2, d1, d2) => `\\frac{${n1 || n2}}{${d1 || d2}}`
+         );
+
     // 8. In Arabic formulas (with Arabic variables and NO Latin variables), normalize standalone Western digits into Arabic numerals
     if (isArabicFormula) {
       const ARABIC_DIGIT_CONV = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
@@ -537,6 +557,194 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
     f = f.replace(/\\\s*$/, '');
     f = f.replace(/\\(approx|times|pm|div|le|ge|leq|geq|neq|sim|simeq|equiv|to|leftarrow|rightarrow|Rightarrow|Leftarrow)\\(frac|sqrt|text|mathbf|mathit|mathrm|sum|int|lim)/g, '\\$1 \\$2');
     return f.replace(/\s+/g, ' ').trim();
+  };
+
+  // Helper to format chat session titles cleanly, preventing protocol tags from appearing as garbled text
+  const formatSessionTitle = (rawTitle?: string): string => {
+    if (!rawTitle) return 'محادثة جديدة';
+    let clean = rawTitle;
+    if (clean.includes('VOICE_MESSAGE:') || clean.includes('[VOICE_MESSAGE:')) {
+      const match = clean.match(/\[?VOICE_MESSAGE:[^\]]*\]([\s\S]*)/);
+      if (match && match[1]?.trim()) {
+        clean = match[1].trim();
+      } else {
+        return 'تسجيل صوتي';
+      }
+    }
+    if (clean.includes('IMAGE_MESSAGE:') || clean.includes('[IMAGE_MESSAGE:')) {
+      const match = clean.match(/\[?IMAGE_MESSAGE:[^\]]*\]([\s\S]*)/);
+      if (match && match[1]?.trim()) {
+        clean = match[1].trim();
+      } else {
+        return 'سؤال من صورة';
+      }
+    }
+    clean = clean.replace(/\[[A-Z_]+:[^\]]*\]/g, '').trim();
+    clean = clean.replace(/^\[?VOICE_MESSAGE:[^\]]*\]?/g, '').trim();
+    clean = clean.replace(/^\[?IMAGE_MESSAGE:[^\]]*\]?/g, '').trim();
+    if (!clean || clean.length === 0) return 'تسجيل صوتي';
+    return clean.length > 35 ? clean.substring(0, 35) + '...' : clean;
+  };
+
+  // AudioMessageBubble: Interactive Voice Recording Player in Chat with Waveform & Transcript
+  interface AudioMessageBubbleProps {
+    durationSeconds: number;
+    mimeType?: string;
+    audioBase64?: string;
+    transcript: string;
+    imageThumbnail?: {
+      mime: string;
+      base64: string;
+    };
+  }
+
+  const AudioMessageBubble = ({
+    durationSeconds,
+    mimeType = 'audio/webm',
+    audioBase64,
+    transcript,
+    imageThumbnail
+  }: AudioMessageBubbleProps) => {
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [currentTime, setCurrentTime] = useState(0);
+    const [showTranscript, setShowTranscript] = useState(false);
+    const audioRef = useRef<HTMLAudioElement | null>(null);
+
+    const audioSrc = audioBase64
+      ? (audioBase64.startsWith('data:') ? audioBase64 : `data:${mimeType};base64,${audioBase64}`)
+      : '';
+
+    useEffect(() => {
+      if (!audioSrc) return;
+      const audio = new Audio(audioSrc);
+      audioRef.current = audio;
+
+      audio.ontimeupdate = () => {
+        setCurrentTime(audio.currentTime);
+      };
+      audio.onended = () => {
+        setIsPlaying(false);
+        setCurrentTime(0);
+      };
+      audio.onpause = () => {
+        setIsPlaying(false);
+      };
+
+      return () => {
+        audio.pause();
+        audio.src = '';
+        audioRef.current = null;
+      };
+    }, [audioSrc]);
+
+    const togglePlay = () => {
+      if (!audioRef.current) return;
+      if (isPlaying) {
+        audioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        audioRef.current.play().then(() => {
+          setIsPlaying(true);
+        }).catch(err => {
+          console.error('Voice playback error:', err);
+        });
+      }
+    };
+
+    const effectiveDuration = durationSeconds > 0 ? durationSeconds : (audioRef.current?.duration || 1);
+    const progressRatio = Math.min(1, Math.max(0, currentTime / effectiveDuration));
+
+    const formatSecs = (s: number) => {
+      const mins = Math.floor(s / 60);
+      const secs = Math.floor(s % 60);
+      return `${mins}:${secs.toString().padStart(2, '0')}`;
+    };
+
+    const waveHeights = [8, 14, 22, 12, 18, 24, 16, 20, 26, 15, 10, 18, 24, 20, 14, 22, 28, 16, 12, 20, 15, 10];
+
+    return (
+      <div className="voice-message-bubble">
+        {imageThumbnail && (
+          <img
+            src={`data:${imageThumbnail.mime};base64,${imageThumbnail.base64}`}
+            alt="Attached question"
+            style={{
+              maxWidth: '100%',
+              maxHeight: '220px',
+              borderRadius: '10px',
+              objectFit: 'contain',
+              border: '1px solid rgba(255,255,255,0.2)',
+              marginBottom: '4px'
+            }}
+          />
+        )}
+
+        <div className="voice-bubble-header">
+          <span className="voice-bubble-tag">
+            <Mic size={13} />
+            <span>رسالة صوتية</span>
+          </span>
+          <span className="voice-time-indicator">
+            {formatSecs(isPlaying ? currentTime : durationSeconds)}
+          </span>
+        </div>
+
+        <div className="voice-player-row">
+          <button
+            type="button"
+            onClick={togglePlay}
+            className="voice-play-circle-btn"
+            title={isPlaying ? 'إيقاف مؤقت' : 'تشغيل الرسالة الصوتية'}
+            aria-label={isPlaying ? 'إيقاف مؤقت' : 'تشغيل الرسالة الصوتية'}
+          >
+            {isPlaying ? <Pause size={18} /> : <Play size={18} style={{ marginRight: '-2px' }} />}
+          </button>
+
+          <div
+            className="voice-waveform-wrap"
+            onClick={(e) => {
+              if (!audioRef.current || !effectiveDuration) return;
+              const rect = e.currentTarget.getBoundingClientRect();
+              const clickX = e.clientX - rect.left;
+              const ratio = clickX / rect.width;
+              const targetTime = ratio * effectiveDuration;
+              audioRef.current.currentTime = targetTime;
+              setCurrentTime(targetTime);
+            }}
+          >
+            {waveHeights.map((h, i) => {
+              const barRatio = (i + 1) / waveHeights.length;
+              const isPlayed = barRatio <= progressRatio;
+              return (
+                <span
+                  key={i}
+                  className={`voice-waveform-line ${isPlayed ? 'played' : ''}`}
+                  style={{ height: `${h}px` }}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        {transcript && transcript.trim() && (
+          <div className="voice-transcript-wrapper">
+            <button
+              type="button"
+              onClick={() => setShowTranscript(prev => !prev)}
+              className="voice-transcript-toggle-btn"
+            >
+              {showTranscript ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+              <span>{showTranscript ? 'إخفاء النص المفرّغ' : 'عرض النص المفرّغ'}</span>
+            </button>
+            {showTranscript && (
+              <div className="voice-transcript-content animate-fade-in">
+                {transcript}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
 
   // GeneratingElementCard: Displays animated Arabic placeholder while structured elements (quizzes, SVG, formulas, cards) stream
@@ -797,12 +1005,18 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
   };
 
   // parseInlineText: parses bold, italic, code, links, and math delimiters inline
-  const parseInlineText = (text: string, depth: number = 0): React.ReactNode[] => {
+  const parseInlineText = (
+    text: string, 
+    depth: number = 0,
+    onPlayEnglish?: (text: string, id: string) => void,
+    playingSpeechId?: string | null,
+    idPrefix?: string
+  ): React.ReactNode[] => {
     if (!text) return [];
 
     const isEng = isEnglishText(text);
 
-    const regex = /(\\\[[\s\S]*?\\\])|(\\\([\s\S]*?\\\))|(\$\$[\s\S]*?\$\$)|(\$(?:[^\$]|\\.)+?\$)|(\*\*\*[^*]+?\*\*\*|___[^_]+?___)|(\*\*[^*]+?\*\*|__[^_]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(~~[^~\n]+?~~)|(`[^`\n]+?`)|(\[[^\]\n]+\]\(https?:\/\/[^\s\)]+\))|(\\(?:text|mathbf|mathrm|frac|sqrt|xrightarrow|times|div|pm|approx|le|ge|neq|sum|int|lim|sin|cos|tan|cot|sec|csc|log|ln|to|rightarrow|leftarrow|Rightarrow|Leftarrow|cdot|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi)\b(?:\{[^{}\n]*\}|[^\$\s،,\)]+)*)/g;
+    const regex = /(\\\[[\s\S]*?\\\])|(\\\([\s\S]*?\\\))|(\$\$[\s\S]*?\$\$)|(\$(?:[^\$]|\\.)+?\$)|(\*\*\*[^*]+?\*\*\*|___[^_]+?___)|(\*\*[^*]+?\*\*|__[^_]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(~~[^~\n]+?~~)|(`[^`\n]+?`)|(\[[^\]\n]+\]\(https?:\/\/[^\s\)]+\))|(\\(?:text|mathbf|mathrm|frac|sqrt|xrightarrow|times|div|pm|approx|le|ge|neq|sum|int|lim|sin|cos|tan|cot|sec|csc|log|ln|to|rightarrow|leftarrow|Rightarrow|Leftarrow|cdot|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi)\b(?:\{[^{}\n]*\}|[^\$\s،,\)]+)*)|([√∛]\s*(?:\([^)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+[²³]|[٠-٩0-9a-zA-Z\u0600-\u06FF]+\s*\^\s*(?:\([^)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)|(?:\([^\)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)\s*\/\s*(?:\([^\)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+))/g;
 
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
@@ -831,22 +1045,104 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       } else if (match[5]) {
         // Bold + Italic *** ... *** or ___ ... ___
         const content = matched.startsWith('***') ? matched.slice(3, -3) : matched.slice(3, -3);
-        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
-        parts.push(<strong key={`bi-${key}`} style={{ fontWeight: 800 }}><em>{children}</em></strong>);
+        const isVocab = isPureEnglishVocab(content);
+        const vocabId = `vocab-${idPrefix || 't'}-${content.replace(/[^a-zA-Z0-9]/g, '_')}-${key}`;
+        const isPlaying = playingSpeechId === vocabId;
+
+        if (isVocab && onPlayEnglish) {
+          parts.push(
+            <span key={`bi-vocab-${key}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', verticalAlign: 'baseline', margin: '0 2px' }}>
+              <strong style={{ fontWeight: 800 }}><em>{content}</em></strong>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPlayEnglish(content, vocabId);
+                }}
+                style={{
+                  background: isPlaying ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.12)',
+                  color: isPlaying ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                  border: isPlaying ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.35)',
+                  borderRadius: '6px',
+                  padding: '2px 7px',
+                  cursor: 'pointer',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '3px',
+                  lineHeight: '1.2',
+                  transition: 'var(--transition)',
+                  userSelect: 'none',
+                  boxShadow: isPlaying ? '0 0 10px rgba(255, 183, 3, 0.4)' : 'none'
+                }}
+                title={`استماع لنطق كلمة: ${content}`}
+                aria-label={`استماع لنطق كلمة ${content}`}
+              >
+                {isPlaying ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                <span>{isPlaying ? 'إيقاف' : 'نطق'}</span>
+              </button>
+            </span>
+          );
+        } else {
+          const children = depth < 3 ? parseInlineText(content, depth + 1, onPlayEnglish, playingSpeechId, idPrefix) : formatArabicNumerals(content, isEng);
+          parts.push(<strong key={`bi-${key}`} style={{ fontWeight: 800 }}><em>{children}</em></strong>);
+        }
       } else if (match[6]) {
         // Bold ** ... ** or __ ... __
         const content = matched.startsWith('**') ? matched.slice(2, -2) : matched.slice(2, -2);
-        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
-        parts.push(<strong key={`b-${key}`} style={{ fontWeight: 800 }}>{children}</strong>);
+        const isVocab = isPureEnglishVocab(content);
+        const vocabId = `vocab-${idPrefix || 't'}-${content.replace(/[^a-zA-Z0-9]/g, '_')}-${key}`;
+        const isPlaying = playingSpeechId === vocabId;
+
+        if (isVocab && onPlayEnglish) {
+          parts.push(
+            <span key={`b-vocab-${key}`} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', verticalAlign: 'baseline', margin: '0 2px' }}>
+              <strong style={{ fontWeight: 800 }}>{content}</strong>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onPlayEnglish(content, vocabId);
+                }}
+                style={{
+                  background: isPlaying ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.12)',
+                  color: isPlaying ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                  border: isPlaying ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.35)',
+                  borderRadius: '6px',
+                  padding: '2px 7px',
+                  cursor: 'pointer',
+                  fontSize: '0.72rem',
+                  fontWeight: 700,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '3px',
+                  lineHeight: '1.2',
+                  transition: 'var(--transition)',
+                  userSelect: 'none',
+                  boxShadow: isPlaying ? '0 0 10px rgba(255, 183, 3, 0.4)' : 'none'
+                }}
+                title={`استماع لنطق كلمة: ${content}`}
+                aria-label={`استماع لنطق كلمة ${content}`}
+              >
+                {isPlaying ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                <span>{isPlaying ? 'إيقاف' : 'نطق'}</span>
+              </button>
+            </span>
+          );
+        } else {
+          const children = depth < 3 ? parseInlineText(content, depth + 1, onPlayEnglish, playingSpeechId, idPrefix) : formatArabicNumerals(content, isEng);
+          parts.push(<strong key={`b-${key}`} style={{ fontWeight: 800 }}>{children}</strong>);
+        }
       } else if (match[7]) {
         // Italic * ... * or _ ... _
         const content = matched.startsWith('*') ? matched.slice(1, -1) : matched.slice(1, -1);
-        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
+        const children = depth < 3 ? parseInlineText(content, depth + 1, onPlayEnglish, playingSpeechId, idPrefix) : formatArabicNumerals(content, isEng);
         parts.push(<em key={`i-${key}`}>{children}</em>);
       } else if (match[8]) {
         // Strikethrough ~~ ... ~~
         const content = matched.slice(2, -2);
-        const children = depth < 3 ? parseInlineText(content, depth + 1) : formatArabicNumerals(content, isEng);
+        const children = depth < 3 ? parseInlineText(content, depth + 1, onPlayEnglish, playingSpeechId, idPrefix) : formatArabicNumerals(content, isEng);
         parts.push(<del key={`del-${key}`}>{children}</del>);
       } else if (match[9]) {
         // Inline code ` ... `
@@ -855,7 +1151,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
         // Link [text](url)
         const linkMatch = matched.match(/^\[([^\]]+)\]\((https?:\/\/[^\s\)]+)\)$/);
         if (linkMatch) {
-          const children = depth < 3 ? parseInlineText(linkMatch[1], depth + 1) : formatArabicNumerals(linkMatch[1], isEng);
+          const children = depth < 3 ? parseInlineText(linkMatch[1], depth + 1, onPlayEnglish, playingSpeechId, idPrefix) : formatArabicNumerals(linkMatch[1], isEng);
           parts.push(
             <a
               key={`a-${key}`}
@@ -878,6 +1174,9 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
         } else {
           parts.push(<MathRenderer key={`bare-${key}`} formula={matched} block={false} isEnglish={isEng} />);
         }
+      } else if (match[12]) {
+        // Visual Unicode Math formula without raw LaTeX code (e.g. √(16), 5², س², √س, س/ص)
+        parts.push(<MathRenderer key={`vmath-${key}`} formula={matched} block={false} isEnglish={isEng} />);
       }
 
       lastIndex = match.index + matched.length;
@@ -891,7 +1190,19 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
   };
 
   // MarkdownMessage: Universal markdown & math parser (headers, blockquotes, lists, tables, code, LaTeX blocks)
-  const MarkdownMessage = ({ content, isStreaming = false }: { content: string; isStreaming?: boolean }) => {
+  const MarkdownMessage = ({ 
+    content, 
+    isStreaming = false,
+    onPlayEnglish,
+    playingSpeechId,
+    messageId
+  }: { 
+    content: string; 
+    isStreaming?: boolean;
+    onPlayEnglish?: (text: string, id: string) => void;
+    playingSpeechId?: string | null;
+    messageId?: string;
+  }) => {
     const isEng = isEnglishText(content);
     const lines = content.split('\n');
     const blocks: React.ReactNode[] = [];
@@ -975,11 +1286,109 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
           quoteLines.push(lines[idx].trim().replace(/^>\s?/, ''));
           idx++;
         }
-        blocks.push(
-          <blockquote key={`quote-${idx}`} className="markdown-blockquote">
-            <MarkdownMessage content={quoteLines.join('\n')} isStreaming={isStreaming} />
-          </blockquote>
-        );
+        const quoteText = quoteLines.join('\n');
+        const isEnglishPassage = isEnglishSpeechEligible(quoteText) && !quoteText.includes('$$');
+
+        if (isEnglishPassage && onPlayEnglish) {
+          const passageId = `passage-${messageId || 'm'}-${idx}`;
+          const isPlayingPassage = playingSpeechId === passageId;
+          blocks.push(
+            <div 
+              key={`quote-passage-${idx}`}
+              className="listening-passage-card animate-fade-in"
+              style={{
+                margin: '1rem 0',
+                padding: '16px 18px',
+                borderRadius: '14px',
+                border: '1px solid rgba(0, 180, 216, 0.3)',
+                background: 'linear-gradient(135deg, rgba(0, 180, 216, 0.08) 0%, rgba(114, 9, 183, 0.06) 100%)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '12px'
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{
+                    background: 'rgba(0, 180, 216, 0.2)',
+                    color: 'var(--tech-cyan, #00B4D8)',
+                    borderRadius: '8px',
+                    padding: '6px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <Headphones size={18} />
+                  </div>
+                  <div>
+                    <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                      مقطع استماع وقراءة (Listening Passage)
+                    </span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => onPlayEnglish(quoteText, passageId)}
+                  style={{
+                    background: isPlayingPassage ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.16)',
+                    color: isPlayingPassage ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                    border: isPlayingPassage ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.4)',
+                    borderRadius: '10px',
+                    padding: '7px 16px',
+                    fontSize: '0.8rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    minHeight: '36px',
+                    transition: 'var(--transition)',
+                    boxShadow: isPlayingPassage ? '0 0 12px rgba(255, 183, 3, 0.35)' : 'none'
+                  }}
+                  title="استمع للمقطع كاملاً بالنطق الإنجليزي الواضح"
+                  aria-label="استمع للمقطع كاملاً بالنطق الإنجليزي الواضح"
+                >
+                  {isPlayingPassage ? <VolumeX size={15} /> : <Volume2 size={15} />}
+                  <span>{isPlayingPassage ? 'إيقاف الاستماع' : 'استمع للمقطع'}</span>
+                </button>
+              </div>
+
+              <div style={{
+                fontSize: '0.94rem',
+                lineHeight: '1.85',
+                color: 'var(--text-main)',
+                fontFamily: 'var(--font-english)',
+                direction: 'ltr',
+                textAlign: 'left',
+                background: 'var(--alpha-white-3)',
+                padding: '12px 14px',
+                borderRadius: '8px',
+                border: '1px solid var(--border-color)'
+              }}>
+                <MarkdownMessage 
+                  content={quoteText} 
+                  isStreaming={isStreaming} 
+                  onPlayEnglish={onPlayEnglish}
+                  playingSpeechId={playingSpeechId}
+                  messageId={messageId}
+                />
+              </div>
+            </div>
+          );
+        } else {
+          blocks.push(
+            <blockquote key={`quote-${idx}`} className="markdown-blockquote">
+              <MarkdownMessage 
+                content={quoteText} 
+                isStreaming={isStreaming} 
+                onPlayEnglish={onPlayEnglish}
+                playingSpeechId={playingSpeechId}
+                messageId={messageId}
+              />
+            </blockquote>
+          );
+        }
         continue;
       }
 
@@ -1065,16 +1474,12 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       }
 
       // 6. Standalone math formula line (LaTeX or Arabic/Unicode math equations)
-      // Exclude lines containing markdown formatting (bold **, strikethrough ~~, links [)
-      // Note: single underscore _ is widely used in LaTeX subscripts (V_x, a_1), so only check for __bold__ or isolated _italic_
       const hasMarkdownFormatting = /\*\*|~~|__|^\[/.test(trimmed) ||
         /(?<![a-zA-Z0-9\\])_[^_\s][^_]*_(?![a-zA-Z0-9])/.test(trimmed) ||
         /(?<!\S)\*[^*\n]+\*(?!\S)/.test(trimmed);
 
-      // Exclude lines containing inline math delimiters ($ or \() - these must be parsed inline!
       const hasInlineDelimiters = /\$|\\\(/.test(trimmed);
 
-      // Exclude lines starting with prose/introductory words
       const isProseIntro = /^(إذن|إذاً|وبالتالي|حيث|وحيث أن|بما أن|نلاحظ أن|نعوض في|نعوض|خطوة|أولاً|ثانياً|ثالثاً|رابعاً|خامساً|الشرح|ملحوظة|تنبيه|المعطيات|المطلوب|القانون|الحل|الناتج|الحد|معامل|قيمة|أي أن)\b/i.test(trimmed);
 
       const isExistingLaTeXFormula = /^\s*(?:\\[a-zA-Z]+|[a-zA-Z0-9]|[=\+\-\*\/\(\)\{\}\^\._\s]|\\approx|\\times|\\div|\\pm|\\sqrt|\\frac)+\s*$/.test(trimmed) &&
@@ -1109,18 +1514,19 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       if (headerMatch) {
         const level = headerMatch[1].length;
         const headingText = headerMatch[2];
+        const hId = `h${level}-${messageId || 'm'}-${idx}`;
         if (level === 1) {
-          blocks.push(<h1 key={`h1-${idx}`} style={{ marginTop: '1.2rem', marginBottom: '0.6rem', color: 'var(--text-main)', fontWeight: 700, fontSize: '1.3rem' }}>{parseInlineText(headingText)}</h1>);
+          blocks.push(<h1 key={`h1-${idx}`} style={{ marginTop: '1.2rem', marginBottom: '0.6rem', color: 'var(--text-main)', fontWeight: 700, fontSize: '1.3rem' }}>{parseInlineText(headingText, 0, onPlayEnglish, playingSpeechId, hId)}</h1>);
         } else if (level === 2) {
-          blocks.push(<h2 key={`h2-${idx}`} style={{ marginTop: '1.2rem', marginBottom: '0.6rem', color: 'var(--text-main)', fontWeight: 700, fontSize: '1.15rem' }}>{parseInlineText(headingText)}</h2>);
+          blocks.push(<h2 key={`h2-${idx}`} style={{ marginTop: '1.2rem', marginBottom: '0.6rem', color: 'var(--text-main)', fontWeight: 700, fontSize: '1.15rem' }}>{parseInlineText(headingText, 0, onPlayEnglish, playingSpeechId, hId)}</h2>);
         } else if (level === 3) {
-          blocks.push(<h3 key={`h3-${idx}`} style={{ marginTop: '1.2rem', marginBottom: '0.6rem', color: 'var(--text-main)', fontWeight: 700, fontSize: '1.05rem' }}>{parseInlineText(headingText)}</h3>);
+          blocks.push(<h3 key={`h3-${idx}`} style={{ marginTop: '1.2rem', marginBottom: '0.6rem', color: 'var(--text-main)', fontWeight: 700, fontSize: '1.05rem' }}>{parseInlineText(headingText, 0, onPlayEnglish, playingSpeechId, hId)}</h3>);
         } else if (level === 4) {
-          blocks.push(<h4 key={`h4-${idx}`} className="markdown-h4">{parseInlineText(headingText)}</h4>);
+          blocks.push(<h4 key={`h4-${idx}`} className="markdown-h4">{parseInlineText(headingText, 0, onPlayEnglish, playingSpeechId, hId)}</h4>);
         } else if (level === 5) {
-          blocks.push(<h5 key={`h5-${idx}`} className="markdown-h5">{parseInlineText(headingText)}</h5>);
+          blocks.push(<h5 key={`h5-${idx}`} className="markdown-h5">{parseInlineText(headingText, 0, onPlayEnglish, playingSpeechId, hId)}</h5>);
         } else {
-          blocks.push(<h6 key={`h6-${idx}`} className="markdown-h6">{parseInlineText(headingText)}</h6>);
+          blocks.push(<h6 key={`h6-${idx}`} className="markdown-h6">{parseInlineText(headingText, 0, onPlayEnglish, playingSpeechId, hId)}</h6>);
         }
         idx++;
         continue;
@@ -1157,7 +1563,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
                 <thead>
                   <tr style={{ backgroundColor: 'var(--primary-light)', borderBottom: '2px solid var(--border-color)' }}>
                     {headers.map((h, hIdx) => (
-                      <th key={hIdx} style={{ padding: '12px 14px', fontWeight: 700, color: 'var(--text-main)' }}>{parseInlineText(h)}</th>
+                      <th key={hIdx} style={{ padding: '12px 14px', fontWeight: 700, color: 'var(--text-main)' }}>{parseInlineText(h, 0, onPlayEnglish, playingSpeechId, `th-${idx}-${hIdx}`)}</th>
                     ))}
                   </tr>
                 </thead>
@@ -1165,7 +1571,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
                   {parsedRows.map((row, rIdx) => (
                     <tr key={rIdx} style={{ borderBottom: '1px solid var(--border-color)', backgroundColor: rIdx % 2 === 1 ? 'rgba(85, 107, 47, 0.02)' : 'transparent' }}>
                       {row.map((cell, cIdx) => (
-                        <td key={cIdx} style={{ padding: '10px 14px', color: 'var(--text-main)' }}>{parseInlineText(cell)}</td>
+                        <td key={cIdx} style={{ padding: '10px 14px', color: 'var(--text-main)' }}>{parseInlineText(cell, 0, onPlayEnglish, playingSpeechId, `td-${idx}-${rIdx}-${cIdx}`)}</td>
                       ))}
                     </tr>
                   ))}
@@ -1216,28 +1622,106 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
           const hasTasks = listItems.some(i => i.isTask);
           blocks.push(
             <ul key={`ul-${idx}`} style={{ marginRight: hasTasks ? '0.5rem' : '1.5rem', marginBottom: '0.8rem', listStyleType: hasTasks ? 'none' : 'disc', paddingRight: hasTasks ? 0 : undefined }}>
-              {listItems.map((item, lIdx) => (
-                <li key={lIdx} className={item.isTask ? "markdown-task-item" : ""} style={{ marginBottom: '0.4rem', display: item.isTask ? 'flex' : 'list-item', alignItems: 'center', gap: '8px' }}>
-                  {item.isTask && (
-                    <input
-                      type="checkbox"
-                      checked={item.isChecked}
-                      readOnly
-                      className="markdown-task-checkbox"
-                    />
-                  )}
-                  <span>{parseInlineText(item.text)}</span>
-                </li>
-              ))}
+              {listItems.map((item, lIdx) => {
+                const liId = `li-${messageId || 'm'}-${idx}-${lIdx}`;
+                const itemIsEnglishSentence = isEnglishSpeechEligible(item.text) && !item.text.startsWith('**');
+                const isPlayingLi = playingSpeechId === liId;
+
+                return (
+                  <li key={lIdx} className={item.isTask ? "markdown-task-item" : ""} style={{ marginBottom: '0.4rem', display: item.isTask ? 'flex' : 'list-item', alignItems: 'center', gap: '8px' }}>
+                    {item.isTask && (
+                      <input
+                        type="checkbox"
+                        checked={item.isChecked}
+                        readOnly
+                        className="markdown-task-checkbox"
+                      />
+                    )}
+                    <span>{parseInlineText(item.text, 0, onPlayEnglish, playingSpeechId, liId)}</span>
+                    {itemIsEnglishSentence && onPlayEnglish && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPlayEnglish(item.text, liId);
+                        }}
+                        style={{
+                          background: isPlayingLi ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.1)',
+                          color: isPlayingLi ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                          border: isPlayingLi ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.25)',
+                          borderRadius: 'var(--radius-full)',
+                          padding: '2px 8px',
+                          cursor: 'pointer',
+                          fontSize: '0.7rem',
+                          fontWeight: 600,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '3px',
+                          minHeight: '24px',
+                          marginRight: '6px',
+                          verticalAlign: 'middle',
+                          transition: 'var(--transition)',
+                          boxShadow: isPlayingLi ? '0 0 8px rgba(255, 183, 3, 0.35)' : 'none'
+                        }}
+                        title="استماع لهذه الجملة بالإنجليزية"
+                        aria-label="استماع لهذه الجملة بالإنجليزية"
+                      >
+                        {isPlayingLi ? <VolumeX size={11} /> : <Volume2 size={11} />}
+                        <span>{isPlayingLi ? 'إيقاف' : 'استماع'}</span>
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           );
         } else {
           const isArabicList = !isEnglishText(listItems.map(i => i.text).join(' '));
           blocks.push(
             <ol key={`ol-${idx}`} style={{ marginRight: '1.5rem', marginBottom: '0.8rem', listStyleType: isArabicList ? 'arabic-indic' : 'decimal' }}>
-              {listItems.map((item, lIdx) => (
-                <li key={lIdx} style={{ marginBottom: '0.4rem' }}>{parseInlineText(item.text)}</li>
-              ))}
+              {listItems.map((item, lIdx) => {
+                const liId = `ol-${messageId || 'm'}-${idx}-${lIdx}`;
+                const itemIsEnglishSentence = isEnglishSpeechEligible(item.text) && !item.text.startsWith('**');
+                const isPlayingLi = playingSpeechId === liId;
+
+                return (
+                  <li key={lIdx} style={{ marginBottom: '0.4rem' }}>
+                    <span>{parseInlineText(item.text, 0, onPlayEnglish, playingSpeechId, liId)}</span>
+                    {itemIsEnglishSentence && onPlayEnglish && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onPlayEnglish(item.text, liId);
+                        }}
+                        style={{
+                          background: isPlayingLi ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.1)',
+                          color: isPlayingLi ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                          border: isPlayingLi ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.25)',
+                          borderRadius: 'var(--radius-full)',
+                          padding: '2px 8px',
+                          cursor: 'pointer',
+                          fontSize: '0.7rem',
+                          fontWeight: 600,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '3px',
+                          minHeight: '24px',
+                          marginRight: '6px',
+                          verticalAlign: 'middle',
+                          transition: 'var(--transition)',
+                          boxShadow: isPlayingLi ? '0 0 8px rgba(255, 183, 3, 0.35)' : 'none'
+                        }}
+                        title="استماع لهذه الجملة بالإنجليزية"
+                        aria-label="استماع لهذه الجملة بالإنجليزية"
+                      >
+                        {isPlayingLi ? <VolumeX size={11} /> : <Volume2 size={11} />}
+                        <span>{isPlayingLi ? 'إيقاف' : 'استماع'}</span>
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
             </ol>
           );
         }
@@ -1245,11 +1729,52 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       }
 
       // 11. Paragraph
-      blocks.push(
-        <p key={`p-${idx}`} style={{ marginBottom: '0.8rem', lineHeight: '1.7' }}>
-          {parseInlineText(line)}
-        </p>
-      );
+      const trimmedLine = line.trim();
+      const isEnglishSentence = isEnglishSpeechEligible(trimmedLine) && trimmedLine.length >= 15 && !trimmedLine.startsWith('**');
+      const pId = `p-${messageId || 'm'}-${idx}`;
+      const isPlayingPara = playingSpeechId === pId;
+
+      if (isEnglishSentence && onPlayEnglish) {
+        blocks.push(
+          <div key={`p-wrapper-${idx}`} style={{ marginBottom: '0.8rem', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            <p style={{ margin: 0, lineHeight: '1.7', direction: 'ltr', textAlign: 'left', fontFamily: 'var(--font-english)' }}>
+              {parseInlineText(line, 0, onPlayEnglish, playingSpeechId, pId)}
+            </p>
+            <div style={{ display: 'flex', justifyContent: 'flex-start', marginTop: '2px' }}>
+              <button
+                type="button"
+                onClick={() => onPlayEnglish(line, pId)}
+                style={{
+                  background: isPlayingPara ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.08)',
+                  color: isPlayingPara ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                  border: isPlayingPara ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.25)',
+                  borderRadius: 'var(--radius-full)',
+                  padding: '3px 10px',
+                  cursor: 'pointer',
+                  fontSize: '0.72rem',
+                  fontWeight: 600,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  minHeight: '26px',
+                  transition: 'var(--transition)',
+                  boxShadow: isPlayingPara ? '0 0 8px rgba(255, 183, 3, 0.35)' : 'none'
+                }}
+                title="استماع للجملة بالإنجليزية"
+              >
+                {isPlayingPara ? <VolumeX size={12} /> : <Volume2 size={12} />}
+                <span>{isPlayingPara ? 'إيقاف الاستماع' : 'استماع للجملة'}</span>
+              </button>
+            </div>
+          </div>
+        );
+      } else {
+        blocks.push(
+          <p key={`p-${idx}`} style={{ marginBottom: '0.8rem', lineHeight: '1.7' }}>
+            {parseInlineText(line, 0, onPlayEnglish, playingSpeechId, pId)}
+          </p>
+        );
+      }
       idx++;
     }
 
@@ -1264,6 +1789,17 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       return <MarkdownMessage content={str} />;
     }
     return <>{parseInlineText(str)}</>;
+  };
+
+  // hasMathExpression: Detects whether a string contains LaTeX, visual math symbols, or curriculum formulas
+  const hasMathExpression = (str: string | null | undefined): boolean => {
+    if (!str) return false;
+    const text = String(str);
+    return (
+      /\\[a-zA-Z]+|\$\$|\$|\\\[|\\\(/.test(text) ||
+      /[√∛²³^×÷≠±≤≥≈∞πθαβγλωΩμρΔ→⇌°∑∫|]/.test(text) ||
+      /[سصعنرقأب0-9a-zA-Z]\s*[\/]\s*[سصعنرقأب0-9a-zA-Z]/.test(text)
+    );
   };
 
   // Interactive Quiz Card Component
@@ -1769,7 +2305,11 @@ ${studentSponsorUrl}
     onGoToFlashcards,
     onGoToSubscriptions,
     onSparkPrompt,
-    onSaveToNotebook
+    onSaveToNotebook,
+    isBookmarked,
+    onPlayEnglish,
+    playingSpeechId,
+    messageId
   }: { 
     content: string; 
     sender: 'user' | 'ai';
@@ -1780,6 +2320,10 @@ ${studentSponsorUrl}
     onGoToSubscriptions?: () => void;
     onSparkPrompt?: (text: string) => void;
     onSaveToNotebook?: (text: string) => void;
+    isBookmarked?: boolean;
+    onPlayEnglish?: (text: string, id: string) => void;
+    playingSpeechId?: string | null;
+    messageId?: string;
   }) => {
     if (sender === 'user') {
       return <div style={{ whiteSpace: 'pre-wrap', direction: 'rtl' }}>{content}</div>;
@@ -1794,10 +2338,21 @@ ${studentSponsorUrl}
     let isGeneratingExam = false;
     let isGeneratingFlashcards = false;
     let isGeneratingLessonNav = false;
+    let listeningPassages: { title: string; text: string }[] = [];
 
     if (displayContent.includes('[UPGRADE_PAYWALL]')) {
       isPaywall = true;
       displayContent = displayContent.replace('[UPGRADE_PAYWALL]', '').trim();
+    }
+
+    const listenPassageRegex = /\[LISTEN_PASSAGE(?:\s+title="([^"]*)")?\]([\s\S]*?)\[\/LISTEN_PASSAGE\]/g;
+    let lpMatch: RegExpExecArray | null;
+    while ((lpMatch = listenPassageRegex.exec(displayContent)) !== null) {
+      listeningPassages.push({
+        title: lpMatch[1] || 'مقطع استماع صوتي (Listening Passage)',
+        text: lpMatch[2].trim()
+      });
+      displayContent = displayContent.replace(lpMatch[0], '');
     }
 
     const quizRegex = /\[QUIZ_QUESTION\]([\s\S]*?)\[\/QUIZ_QUESTION\]/;
@@ -1867,6 +2422,11 @@ ${studentSponsorUrl}
     }
 
     // Intercept in-progress protocol tags before closing tags arrive
+    if (displayContent.includes('[LISTEN_PASSAGE')) {
+      const idx = displayContent.indexOf('[LISTEN_PASSAGE');
+      displayContent = displayContent.slice(0, idx).trim();
+    }
+
     if (displayContent.includes('[QUIZ_QUESTION]')) {
       isGeneratingQuiz = true;
       const idx = displayContent.indexOf('[QUIZ_QUESTION]');
@@ -1893,7 +2453,7 @@ ${studentSponsorUrl}
 
     // Strip partial tag typing at the end of streaming content
     if (isStreaming) {
-      const partialTagMatch = displayContent.match(/\[(?:QUIZ(?:_QUESTION)?|CREATE(?:_EXAM|_FLASHCARDS)?|LESSON(?:_NAV)?|UPGRADE(?:_PAYWALL)?)[^\]\n]*$/);
+      const partialTagMatch = displayContent.match(/\[(?:QUIZ(?:_QUESTION)?|CREATE(?:_EXAM|_FLASHCARDS)?|LESSON(?:_NAV)?|LISTEN(?:_PASSAGE)?|UPGRADE(?:_PAYWALL)?)[^\]\n]*$/);
       if (partialTagMatch && partialTagMatch.index !== undefined) {
         const rawTag = partialTagMatch[0];
         if (rawTag.startsWith('[QUIZ')) isGeneratingQuiz = true;
@@ -1906,7 +2466,102 @@ ${studentSponsorUrl}
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', width: '100%' }}>
-        {displayContent.trim() && <MarkdownMessage content={displayContent} isStreaming={isStreaming} />}
+        {displayContent.trim() && (
+          <MarkdownMessage 
+            content={displayContent} 
+            isStreaming={isStreaming} 
+            onPlayEnglish={onPlayEnglish}
+            playingSpeechId={playingSpeechId}
+            messageId={messageId}
+          />
+        )}
+        {listeningPassages.map((lp, lpIdx) => {
+          const lpId = `lp-${messageId || 'm'}-${lpIdx}`;
+          const isPlayingLp = playingSpeechId === lpId;
+          return (
+            <div
+              key={lpId}
+              className="listening-passage-card animate-scale-in"
+              style={{
+                padding: '16px 20px',
+                borderRadius: '14px',
+                border: '1px solid rgba(0, 180, 216, 0.35)',
+                background: 'linear-gradient(135deg, rgba(0, 180, 216, 0.09) 0%, rgba(114, 9, 183, 0.07) 100%)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '12px',
+                marginTop: '6px'
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div style={{
+                    background: 'rgba(0, 180, 216, 0.18)',
+                    color: 'var(--tech-cyan, #00B4D8)',
+                    borderRadius: '10px',
+                    padding: '8px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}>
+                    <Headphones size={20} />
+                  </div>
+                  <div>
+                    <h4 style={{ margin: 0, fontSize: '0.92rem', fontWeight: 800, color: 'var(--text-main)' }}>
+                      {lp.title}
+                    </h4>
+                    <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+                      استمع للنص الإنجليزي بالسرعة التعليمية المناسبة
+                    </span>
+                  </div>
+                </div>
+
+                {onPlayEnglish && isEnglishSpeechEligible(lp.text) && (
+                  <button
+                    type="button"
+                    onClick={() => onPlayEnglish(lp.text, lpId)}
+                    style={{
+                      background: isPlayingLp ? 'var(--primary-color)' : 'rgba(0, 180, 216, 0.16)',
+                      color: isPlayingLp ? '#0D1B2A' : 'var(--tech-cyan, #00B4D8)',
+                      border: isPlayingLp ? '1px solid var(--primary-color)' : '1px solid rgba(0, 180, 216, 0.4)',
+                      borderRadius: '10px',
+                      padding: '8px 18px',
+                      fontSize: '0.82rem',
+                      fontWeight: 800,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      minHeight: '38px',
+                      transition: 'var(--transition)',
+                      boxShadow: isPlayingLp ? '0 0 14px rgba(255, 183, 3, 0.4)' : 'none'
+                    }}
+                    title="استمع للمقطع بالإنجليزية"
+                    aria-label="استمع للمقطع بالإنجليزية"
+                  >
+                    {isPlayingLp ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                    <span>{isPlayingLp ? 'إيقاف الاستماع' : 'استمع للمقطع'}</span>
+                  </button>
+                )}
+              </div>
+
+              <div style={{
+                fontSize: '0.96rem',
+                lineHeight: '1.85',
+                color: 'var(--text-main)',
+                fontFamily: 'var(--font-english)',
+                direction: 'ltr',
+                textAlign: 'left',
+                background: 'var(--alpha-white-4)',
+                padding: '14px 16px',
+                borderRadius: '10px',
+                border: '1px solid var(--border-color)'
+              }}>
+                {lp.text}
+              </div>
+            </div>
+          );
+        })}
         {isPaywall && <MotivationalPaywallCard onGoToSubscriptions={onGoToSubscriptions} />}
 
         {/* In-stream element generation placeholders */}
@@ -2092,9 +2747,11 @@ ${studentSponsorUrl}
                   type="button"
                   onClick={() => onSaveToNotebook(displayContent)}
                   className="continuity-spark-btn"
+                  style={isBookmarked ? { borderColor: 'rgba(255, 183, 3, 0.45)', background: 'rgba(255, 183, 3, 0.12)', color: '#FFB703' } : undefined}
+                  title={isBookmarked ? 'محفوظ في دفتري الذكي — اضغط للحذف من الدفتر' : 'حفظ أهم قانون في دفتري الذكي'}
                 >
-                  <Bookmark size={12} />
-                  <span>حفظ أهم قانون في دفتري الذكي</span>
+                  {isBookmarked ? <BookmarkCheck size={12} color="#FFB703" /> : <Bookmark size={12} />}
+                  <span>{isBookmarked ? 'محفوظ في دفتري الذكي' : 'حفظ أهم قانون في دفتري الذكي'}</span>
                 </button>
               )}
             </div>
@@ -2496,7 +3153,11 @@ const CameraCaptureModal = ({
       setCapturedPhoto(null);
 
       if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-        setError('المتصفح لا يدعم الوصول المباشر للكاميرا. يمكنك استخدام كاميرا هاتفك عبر الخيار البديل أدناه.');
+        if (typeof window !== 'undefined' && !window.isSecureContext) {
+          setError('يتطلب تشغيل الكاميرا اتصالاً آمناً (HTTPS). يرجى فتح الموقع عبر رابط https:// أو استخدام خيار التقاط الصورة بالهاتف أدناه.');
+        } else {
+          setError('المتصفح لا يدعم الوصول المباشر للكاميرا. يمكنك استخدام كاميرا هاتفك عبر الخيار البديل أدناه.');
+        }
         setLoading(false);
         return;
       }
@@ -2537,9 +3198,11 @@ const CameraCaptureModal = ({
         if (!isMounted) return;
         setLoading(false);
         if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-          setError('تم رفض إذن الكاميرا من المتصفح. يرجى تفعيل إذن الكاميرا أو التقاط الصورة عبر تطبيق الكاميرا بالهاتف مباشرة.');
+          setError('تم حظر إذن الكاميرا من إعدادات المتصفح أو تم رفضه. يرجى تفعيل إذن الكاميرا من إعدادات الموقع في المتصفح أو التقاط الصورة عبر تطبيق الكاميرا بالهاتف مباشرة.');
         } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
           setError('لم يتم العثور على كاميرا في هذا الجهاز.');
+        } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+          setError('الكاميرا قيد الاستخدام من قبل تطبيق آخر في الجهاز.');
         } else {
           setError('تعذر تشغيل الكاميرا في المتصفح. يمكنك التقاط الصورة مباشرة عبر كاميرا الهاتف.');
         }
@@ -3531,6 +4194,96 @@ const CurriculumLessonPicker: React.FC<CurriculumLessonPickerProps> = ({
   );
 };
 
+const MATH_KEYPAD_TABS: Record<'calc' | 'arabic' | 'english' | 'advanced', { s: string; l: string; cursorOffset?: number }[]> = {
+  calc: [
+    { s: '+', l: '+' },
+    { s: '-', l: '-' },
+    { s: '×', l: '×' },
+    { s: '÷', l: '÷' },
+    { s: '=', l: '=' },
+    { s: '≠', l: '≠' },
+    { s: '±', l: '±' },
+    { s: '√()', l: '√x', cursorOffset: 2 },
+    { s: '∛()', l: '³√x', cursorOffset: 2 },
+    { s: '²', l: 'x²' },
+    { s: '³', l: 'x³' },
+    { s: '^( )', l: 'xʸ', cursorOffset: 2 },
+    { s: ' / ', l: 'a/b', cursorOffset: 1 },
+    { s: '( )', l: '( )', cursorOffset: 1 },
+    { s: '| |', l: '|x|', cursorOffset: 1 },
+    { s: '%', l: '%' },
+    { s: '≈', l: '≈' },
+    { s: '≤', l: '≤' },
+    { s: '≥', l: '≥' },
+    { s: '∞', l: '∞' }
+  ],
+  arabic: [
+    { s: 'س', l: 'س' },
+    { s: 'ص', l: 'ص' },
+    { s: 'ع', l: 'ع' },
+    { s: 'ن', l: 'ن' },
+    { s: 'د', l: 'د' },
+    { s: 'س²', l: 'س²' },
+    { s: 'ص²', l: 'ص²' },
+    { s: 'س/ص', l: 'س/ص' },
+    { s: '√س', l: '√س' },
+    { s: 'جا', l: 'جا' },
+    { s: 'جتا', l: 'جتا' },
+    { s: 'ظا', l: 'ظا' },
+    { s: 'ظتا', l: 'ظتا' },
+    { s: 'قا', l: 'قا' },
+    { s: 'قتا', l: 'قتا' },
+    { s: 'نها ', l: 'نها' },
+    { s: 'لو', l: 'لو' },
+    { s: 'π', l: 'ط (π)' },
+    { s: 'نق', l: 'نق' },
+    { s: 'ن ق ر', l: 'ن ق ر' },
+    { s: 'ن ل ر', l: 'ن ل ر' },
+    { s: '°', l: '°' }
+  ],
+  english: [
+    { s: 'x', l: 'x' },
+    { s: 'y', l: 'y' },
+    { s: 'z', l: 'z' },
+    { s: 't', l: 't' },
+    { s: 'n', l: 'n' },
+    { s: 'sin()', l: 'sin', cursorOffset: 4 },
+    { s: 'cos()', l: 'cos', cursorOffset: 4 },
+    { s: 'tan()', l: 'tan', cursorOffset: 4 },
+    { s: 'log()', l: 'log', cursorOffset: 4 },
+    { s: 'ln()', l: 'ln', cursorOffset: 3 },
+    { s: 'lim ', l: 'lim' },
+    { s: '∑', l: '∑' },
+    { s: '∫', l: '∫' },
+    { s: 'π', l: 'π' },
+    { s: 'θ', l: 'θ' },
+    { s: 'e', l: 'e' },
+    { s: 'i', l: 'i' },
+    { s: 'Δ', l: 'Δ' }
+  ],
+  advanced: [
+    { s: 'α', l: 'α' },
+    { s: 'β', l: 'β' },
+    { s: 'γ', l: 'γ' },
+    { s: 'λ', l: 'λ' },
+    { s: 'Ω', l: 'Ω' },
+    { s: 'μ', l: 'μ' },
+    { s: 'ρ', l: 'ρ' },
+    { s: '→', l: '→' },
+    { s: '⇌', l: '⇌' },
+    { s: '°C', l: '°C' },
+    { s: 'ΔH', l: 'ΔH' },
+    { s: '·', l: '·' },
+    { s: '⇐', l: '⇐' },
+    { s: '⇒', l: '⇒' },
+    { s: '∈', l: '∈' },
+    { s: '∉', l: '∉' },
+    { s: '⊂', l: '⊂' },
+    { s: '∪', l: '∪' },
+    { s: '∩', l: '∩' }
+  ]
+};
+
 export default function App() {
   // Initial Page Loading & Auth Gate State (prevents FOUC & premature registration flash)
   const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
@@ -3593,8 +4346,14 @@ export default function App() {
   const [dismissedNotifIds, setDismissedNotifIds] = useState<string[]>([]);
   const [showNotifCenter, setShowNotifCenter] = useState(false);
   const isNotifLoadingRef = useRef(false);
+  const lastNotifFetchTimeRef = useRef(0);
+  const NOTIF_FRESH_WINDOW_MS = 180000; // 3 minutes fresh window
 
-  const loadNotifications = async (authToken?: string | null) => {
+  const loadNotifications = async (authToken?: string | null, force: boolean = false) => {
+    const now = Date.now();
+    if (!force && lastNotifFetchTimeRef.current > 0 && (now - lastNotifFetchTimeRef.current < NOTIF_FRESH_WINDOW_MS)) {
+      return;
+    }
     if (isNotifLoadingRef.current) return;
     isNotifLoadingRef.current = true;
     try {
@@ -3604,9 +4363,14 @@ export default function App() {
         headers['Authorization'] = `Bearer ${tok}`;
       }
       const res = await fetch('/api/notifications?target=web', { headers });
+      if (res.status === 304) {
+        lastNotifFetchTimeRef.current = Date.now();
+        return;
+      }
       const data = await res.json();
       if (data.success && Array.isArray(data.notifications)) {
         setActiveNotifications(data.notifications);
+        lastNotifFetchTimeRef.current = Date.now();
       }
     } catch (e) {
       // Non-blocking
@@ -3744,6 +4508,38 @@ export default function App() {
   const [examTfCount, setExamTfCount] = useState<number>(2);
   const [examEssayCount, setExamEssayCount] = useState<number>(1);
   const [examTimeRemaining, setExamTimeRemaining] = useState<number>(0);
+  const [flaggedExamQuestions, setFlaggedExamQuestions] = useState<Record<string, boolean>>({});
+  const [showUnansweredConfirmModal, setShowUnansweredConfirmModal] = useState<boolean>(false);
+  const [generatingRemedialExam, setGeneratingRemedialExam] = useState<boolean>(false);
+
+  // Audio Speech-to-Text & Alibaba DashScope States
+  const [isRecordingAudio, setIsRecordingAudio] = useState<boolean>(false);
+  const [isAudioPaused, setIsAudioPaused] = useState<boolean>(false);
+  const [recordingDuration, setRecordingDuration] = useState<number>(0);
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState<boolean>(false);
+  const [previewAudioUrl, setPreviewAudioUrl] = useState<string | null>(null);
+  const [isPreviewPlaying, setIsPreviewPlaying] = useState<boolean>(false);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<any>(null);
+
+  // English Pronunciation Speech State
+  const [playingSpeechId, setPlayingSpeechId] = useState<string | null>(null);
+
+  // STEM Math Quick Toolbar & Calculator Keypad State
+  const [showMathToolbar, setShowMathToolbar] = useState<boolean>(false);
+  const [mathActiveTab, setMathActiveTab] = useState<'calc' | 'arabic' | 'english' | 'advanced'>('calc');
+
+  // Decluttered Composer Auxiliary Tools Tray State
+  const [showComposerTools, setShowComposerTools] = useState<boolean>(false);
+
+  // Smart Study Notebook Search & Category Filters
+  const [notebookSearchQuery, setNotebookSearchQuery] = useState<string>('');
+  const [notebookCategoryFilter, setNotebookCategoryFilter] = useState<'all' | 'formula' | 'definition' | 'solution'>('all');
+
+  // Stream Resilience
+  const [lastFailedUserQuery, setLastFailedUserQuery] = useState<{ text: string; image?: any } | null>(null);
 
   // Flashcards Lesson Picker State
   const [selectedFlashcardLesson, setSelectedFlashcardLesson] = useState<any | null>(null);
@@ -3919,8 +4715,8 @@ export default function App() {
       }
     }
     setActiveTab(prev => (prev === 'profile' || prev === 'admin' ? 'chat' : prev));
-    loadSystemConfig(deviceId, null);
-    loadNotifications(null);
+    loadSystemConfig(deviceId, null, true);
+    loadNotifications(null, true);
   };
 
   const handleSessionRevoked = () => {
@@ -4353,14 +5149,27 @@ export default function App() {
     }
   };
 
-  const fetchCurriculumStructure = async (grade: string, subject: string) => {
+  const broadcastCurriculumSync = () => {
+    if (typeof window === 'undefined') return;
+    try {
+      const channel = new BroadcastChannel('egs_curriculum_sync');
+      channel.postMessage({ type: 'CURRICULUM_UPDATED', timestamp: Date.now() });
+      channel.close();
+    } catch (e) {}
+    try {
+      localStorage.setItem('egs_curriculum_sync_timestamp', Date.now().toString());
+    } catch (e) {}
+  };
+
+  const fetchCurriculumStructure = async (grade: string, subject: string, force: boolean = false) => {
     if (!grade || !subject) return null;
     const cacheKey = `${grade}_${subject}`;
-    if (curriculumStructures[cacheKey]) return curriculumStructures[cacheKey];
+    if (!force && curriculumStructures[cacheKey]) return curriculumStructures[cacheKey];
 
     setLoadingStructure(true);
     try {
-      const res = await fetch(`/api/curriculum/structure?grade_level=${encodeURIComponent(grade)}&subject_name=${encodeURIComponent(subject)}`);
+      const url = `/api/curriculum/structure?grade_level=${encodeURIComponent(grade)}&subject_name=${encodeURIComponent(subject)}${force ? `&t=${Date.now()}` : ''}`;
+      const res = await fetch(url, { cache: force ? 'no-store' : 'default' });
       const data = await res.json();
       if (data.success) {
         const structureData = {
@@ -4514,7 +5323,15 @@ export default function App() {
 
   // Smart Study Notebook State
   const [showNotebookModal, setShowNotebookModal] = useState(false);
-  const [notebookItems, setNotebookItems] = useState<any[]>([]);
+  const [notebookItems, setNotebookItems] = useState<any[]>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('egs_study_notebook');
+        if (cached) return JSON.parse(cached);
+      } catch (e) {}
+    }
+    return [];
+  });
   const [loadingNotebook, setLoadingNotebook] = useState(false);
   const [notebookFilterSubject, setNotebookFilterSubject] = useState<string>('all');
   const [bookmarkedMsgIndexes, setBookmarkedMsgIndexes] = useState<Record<number, boolean>>({});
@@ -4689,6 +5506,7 @@ export default function App() {
   const [profileOtpStep, setProfileOtpStep] = useState(false);
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileMessage, setProfileMessage] = useState({ text: '', type: '' });
+  const [privacyCardMessage, setPrivacyCardMessage] = useState({ text: '', type: '' });
   const [improveAiLoading, setImproveAiLoading] = useState(false);
 
   // Responsive Layout & PWA Detection
@@ -4808,17 +5626,17 @@ export default function App() {
       }
       setExamTimeRemaining(durationSeconds);
       if (storedToken) {
-        fetch('/api/config', { headers: { 'Authorization': `Bearer ${storedToken}` } })
-          .then(r => r.json())
-          .then(d => {
-            if (d.user) {
-              setUser(d.user);
-              setCoins(d.user.coins ?? 5.0);
-              setPoints(d.user.points ?? 0);
-              localStorage.setItem('egs_user', JSON.stringify(d.user));
-            }
-          })
-          .catch(() => {});
+        const deducted = Number(data?.coins_deducted || 12.5);
+        setCoins(prev => {
+          const next = Math.max(0, +(prev - deducted).toFixed(2));
+          setUser((u: any) => {
+            if (!u) return u;
+            const updated = { ...u, coins: next };
+            try { localStorage.setItem('egs_user', JSON.stringify(updated)); } catch (e) {}
+            return updated;
+          });
+          return next;
+        });
       }
     } catch (e: any) {
       setPaymentErrorToast(e.message || 'فشل توليد الامتحان بالذكاء الاصطناعي');
@@ -4992,7 +5810,9 @@ export default function App() {
       const isSponsor = urlParams.get('sponsor') === 'true';
       const planTitle = isSponsor
         ? (plan === 'pro_3m' ? 'كفالة باقة 3 أشهر (120 نقطة يومياً)' : (plan === 'pro_2m' ? 'كفالة باقة شهرين (90 نقطة يومياً)' : 'كفالة باقة شهر (80 نقطة يومياً)'))
-        : (plan === 'pro_3m' ? 'باقة 3 أشهر (120 نقطة يومياً)' : (plan === 'pro_2m' ? 'باقة شهرين (90 نقطة يومياً)' : 'باقة شهر (80 نقطة يومياً)'));
+        : (plan === 'pro_3m' ? 'باقة 3 أشهر (120 نقطة يومياً)' :
+           plan === 'pro_2m' ? 'باقة شهرين (90 نقطة يومياً)' :
+           'باقة شهر (80 نقطة يومياً)');
       const bonusCoins = plan === 'pro_3m' ? 120 : (plan === 'pro_2m' ? 90 : 80);
       const amount = plan === 'pro_3m' ? 140 : (plan === 'pro_2m' ? 110 : 60);
 
@@ -5012,7 +5832,7 @@ export default function App() {
               setCoins(d.user.coins ?? 50.0);
               setPoints(d.user.points ?? 0);
               localStorage.setItem('egs_user', JSON.stringify(d.user));
-              loadNotifications(savedToken);
+              loadNotifications(savedToken, true);
             }
           })
           .catch(() => {});
@@ -5023,6 +5843,12 @@ export default function App() {
       setPaymentErrorToast('تعذرت عملية الدفع عبر كاشير أو تم إلغاؤها من قبل العميل.');
       setTimeout(() => setPaymentErrorToast(null), 6000);
       window.history.replaceState({}, '', window.location.pathname);
+    }
+
+    // Direct navigation to subscriptions via URL query params
+    const incomingTab = urlParams.get('tab');
+    if (incomingTab === 'subscriptions' || incomingTab === 'pricing') {
+      setActiveTab('subscriptions');
     }
 
     // Google Sitelinks SearchBox & External Search query handling (?q= or ?search=)
@@ -5051,6 +5877,19 @@ export default function App() {
         behavior: 'smooth'
       });
     }
+  };
+
+  const autoScrollChatToBottom = () => {
+    setTimeout(() => {
+      if (!chatScrollRef.current) return;
+      const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
+      const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+      if (distanceFromBottom <= 10) return;
+      chatScrollRef.current.scrollTo({
+        top: scrollHeight,
+        behavior: 'smooth'
+      });
+    }, 50);
   };
 
   const skipHistoryReloadRef = useRef(false);
@@ -5309,6 +6148,48 @@ export default function App() {
     }
   };
 
+  const isMessageBookmarked = (msg: ChatMessage, index?: number): boolean => {
+    if (index !== undefined && bookmarkedMsgIndexes[index]) return true;
+    if (!notebookItems || notebookItems.length === 0) return false;
+    
+    // Check by message_id
+    if (msg.id && notebookItems.some(n => n.message_id && n.message_id === msg.id)) {
+      return true;
+    }
+
+    // Check by content matching
+    if (msg.message && msg.message.trim().length > 10) {
+      const clean = msg.message.replace(/<thought[\s\S]*?<\/thought>/gi, '').trim();
+      const snippet = clean.slice(0, 50);
+      return notebookItems.some(n => {
+        if (!n.content) return false;
+        const noteClean = n.content.replace(/<thought[\s\S]*?<\/thought>/gi, '').trim();
+        return noteClean === clean || noteClean.includes(snippet) || clean.includes(noteClean.slice(0, 50));
+      });
+    }
+
+    return false;
+  };
+
+  const findBookmarkedNote = (msg: ChatMessage): any | null => {
+    if (!notebookItems || notebookItems.length === 0) return null;
+    if (msg.id) {
+      const found = notebookItems.find(n => n.message_id && n.message_id === msg.id);
+      if (found) return found;
+    }
+    if (msg.message && msg.message.trim().length > 10) {
+      const clean = msg.message.replace(/<thought[\s\S]*?<\/thought>/gi, '').trim();
+      const snippet = clean.slice(0, 50);
+      const found = notebookItems.find(n => {
+        if (!n.content) return false;
+        const noteClean = n.content.replace(/<thought[\s\S]*?<\/thought>/gi, '').trim();
+        return noteClean === clean || noteClean.includes(snippet) || clean.includes(noteClean.slice(0, 50));
+      });
+      if (found) return found;
+    }
+    return null;
+  };
+
   const loadStudyNotebook = async (subject?: string) => {
     const storedToken = localStorage.getItem('egs_token') || token;
     if (!storedToken) return;
@@ -5323,12 +6204,23 @@ export default function App() {
       const data = await res.json();
       if (data.success && Array.isArray(data.notes)) {
         setNotebookItems(data.notes);
+        if (!subject || subject === 'all') {
+          try {
+            localStorage.setItem('egs_study_notebook', JSON.stringify(data.notes));
+          } catch (e) {}
+        }
       }
     } catch (e) {
       console.error('Failed to load notebook:', e);
     } finally {
       setLoadingNotebook(false);
     }
+  };
+
+  const handleOpenNotebook = () => {
+    setShowNotebookModal(true);
+    if (isMobile) setSidebarOpen(false);
+    loadStudyNotebook();
   };
 
   const handleBookmarkMessage = async (msg: ChatMessage, index: number) => {
@@ -5338,10 +6230,47 @@ export default function App() {
       setShowAuthModal(true);
       return;
     }
-    const cleanTitle = (msg.message || '').replace(/\[[\s\S]*?\]/g, '').trim().substring(0, 45) || 'ملاحظة تعليمية';
+
+    // Toggle behavior: if already bookmarked, delete note and unmark
+    if (isMessageBookmarked(msg, index)) {
+      const existing = findBookmarkedNote(msg);
+      setBookmarkedMsgIndexes(prev => {
+        const next = { ...prev };
+        delete next[index];
+        return next;
+      });
+      if (existing && existing.id) {
+        await handleDeleteNote(existing.id);
+      }
+      return;
+    }
+
+    const cleanContent = (msg.message || '').replace(/<thought[\s\S]*?<\/thought>/gi, '').trim();
+    const cleanTitle = cleanContent.replace(/\[[\s\S]*?\]/g, '').replace(/[#*_`]/g, '').trim().substring(0, 45) || 'ملاحظة تعليمية';
     const currentGrade = user ? user.grade_level : chatGrade;
 
     setBookmarkedMsgIndexes(prev => ({ ...prev, [index]: true }));
+
+    // Optimistically save locally to provide instant response and persistence across refreshes
+    const tempId = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `note_${Date.now()}`;
+    const optimisticNote = {
+      id: tempId,
+      user_id: user?.id,
+      subject_name: chatSubject || 'ملاحظات عامة',
+      grade_level: currentGrade,
+      title: cleanTitle,
+      content: cleanContent,
+      note_type: 'formula',
+      session_id: activeSessionId || msg.session_id || null,
+      message_id: msg.id || null,
+      created_at: new Date().toISOString()
+    };
+
+    setNotebookItems(prev => {
+      const updated = [optimisticNote, ...prev.filter(n => n.id !== tempId)];
+      try { localStorage.setItem('egs_study_notebook', JSON.stringify(updated)); } catch (e) {}
+      return updated;
+    });
 
     try {
       const res = await fetch('/api/user/study-notebook', {
@@ -5354,15 +6283,20 @@ export default function App() {
           subject_name: chatSubject || 'ملاحظات عامة',
           grade_level: currentGrade,
           title: cleanTitle,
-          content: msg.message,
+          content: cleanContent,
           note_type: 'formula',
           session_id: activeSessionId || msg.session_id || null,
           message_id: msg.id || null
         })
       });
       const data = await res.json();
-      if (data.success) {
-        await loadStudyNotebook(notebookFilterSubject);
+      if (data.success && data.note) {
+        setNotebookItems(prev => {
+          const replaced = prev.map(n => n.id === tempId ? data.note : n);
+          try { localStorage.setItem('egs_study_notebook', JSON.stringify(replaced)); } catch (e) {}
+          return replaced;
+        });
+        await loadStudyNotebook();
       }
     } catch (e) {
       console.error('Failed to bookmark message:', e);
@@ -5372,7 +6306,11 @@ export default function App() {
   const handleDeleteNote = async (noteId: string) => {
     const storedToken = localStorage.getItem('egs_token') || token;
     if (!storedToken) return;
-    setNotebookItems(prev => prev.filter(n => n.id !== noteId));
+    setNotebookItems(prev => {
+      const updated = prev.filter(n => n.id !== noteId);
+      try { localStorage.setItem('egs_study_notebook', JSON.stringify(updated)); } catch (e) {}
+      return updated;
+    });
     try {
       await fetch(`/api/user/study-notebook?id=${encodeURIComponent(noteId)}`, {
         method: 'DELETE',
@@ -5474,6 +6412,14 @@ export default function App() {
     }
 
     targetChatMsgRef.current = { messageId: targetMessageId, content: note.content };
+
+    if (targetSessionId) {
+      const targetSession = sessions.find(s => s.id === targetSessionId);
+      if (targetSession?.subject_name) {
+        setChatSubject(targetSession.subject_name);
+        try { localStorage.setItem('egs_last_subject', targetSession.subject_name); } catch (e) {}
+      }
+    }
 
     if (activeSessionId === targetSessionId) {
       scrollToMessage(targetMessageId, note.content);
@@ -5775,9 +6721,36 @@ export default function App() {
     if (!showNotebookModal) return null;
     const targetGrade = user ? user.grade_level : chatGrade;
     const activeSubjs = getActiveSubjectsForGrade(targetGrade);
-    const filteredNotes = notebookFilterSubject === 'all'
+    
+    // 1. Subject filtering
+    let filteredNotes = notebookFilterSubject === 'all'
       ? notebookItems
       : notebookItems.filter(n => n.subject_name === notebookFilterSubject);
+
+    // 2. Search query filtering
+    if (notebookSearchQuery.trim()) {
+      const q = notebookSearchQuery.toLowerCase().trim();
+      filteredNotes = filteredNotes.filter(n =>
+        (n.title && n.title.toLowerCase().includes(q)) ||
+        (n.content && n.content.toLowerCase().includes(q)) ||
+        (n.subject_name && n.subject_name.toLowerCase().includes(q))
+      );
+    }
+
+    // 3. Category filtering (Formulas, Definitions, Solutions)
+    if (notebookCategoryFilter !== 'all') {
+      filteredNotes = filteredNotes.filter(n => {
+        const text = ((n.title || '') + ' ' + (n.content || '')).toLowerCase();
+        if (notebookCategoryFilter === 'formula') {
+          return text.includes('قانون') || text.includes('معادلة') || text.includes('=') || text.includes('formula');
+        } else if (notebookCategoryFilter === 'definition') {
+          return text.includes('تعريف') || text.includes('هو ') || text.includes('هي ') || text.includes('المقصود ب') || text.includes('definition');
+        } else if (notebookCategoryFilter === 'solution') {
+          return text.includes('حل') || text.includes('مسألة') || text.includes('خطوات') || text.includes('مثال');
+        }
+        return true;
+      });
+    }
 
     return (
       <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: isMobile ? '12px' : '20px', direction: 'rtl' }}>
@@ -5790,17 +6763,100 @@ export default function App() {
                   دفتري الذكي — بنك القوانين والملاحظات
                 </h3>
                 <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                  ملاحظاتك وقوانينك المحفوظة للمراجعة السريعة قبل الامتحانات ({filteredNotes.length} ملاحظة)
+                  ملاحظاتك وقوانينك المحفوظة للمراجعة السريعة قبل الامتحانات ({filteredNotes.length} من {notebookItems.length} ملاحظة)
                 </span>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setShowNotebookModal(false)}
-              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '6px', borderRadius: '8px' }}
-            >
-              <X size={18} />
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => window.print()}
+                className="btn-secondary"
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '6px 12px',
+                  borderRadius: '8px',
+                  fontSize: '0.78rem',
+                  fontWeight: 700,
+                  cursor: 'pointer'
+                }}
+                title="طباعة أو تصدير ورقة المراجعة المركزة (A4 Cheat-Sheet)"
+              >
+                <Printer size={15} />
+                <span style={{ display: isMobile ? 'none' : 'inline' }}>طباعة ورقة المراجعة</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowNotebookModal(false)}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '6px', borderRadius: '8px' }}
+                title="إغلاق"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+
+          {/* Search Bar */}
+          <div style={{ position: 'relative', display: 'flex', alignItems: 'center', marginBottom: '10px' }}>
+            <Search size={16} style={{ position: 'absolute', right: '12px', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+            <input
+              type="text"
+              value={notebookSearchQuery}
+              onChange={(e) => setNotebookSearchQuery(e.target.value)}
+              placeholder="ابحث في عناوين الملاحظات، القوانين، الشروحات..."
+              style={{
+                width: '100%',
+                padding: '8px 36px 8px 32px',
+                borderRadius: '8px',
+                border: '1px solid var(--border-color)',
+                background: 'var(--sidebar-bg)',
+                color: 'var(--text-main)',
+                fontSize: '0.82rem',
+                outline: 'none'
+              }}
+            />
+            {notebookSearchQuery && (
+              <button
+                type="button"
+                onClick={() => setNotebookSearchQuery('')}
+                style={{ position: 'absolute', left: '10px', background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', padding: 0 }}
+                title="مسح البحث"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+
+          {/* Type Category Filter Chips */}
+          <div style={{ display: 'flex', gap: '6px', marginBottom: '10px', overflowX: 'auto', paddingBottom: '4px' }} className="custom-scrollbar">
+            <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', alignSelf: 'center', fontWeight: 700, marginLeft: '4px' }}>النوع:</span>
+            {[
+              { id: 'all', label: 'جميع الأنواع' },
+              { id: 'formula', label: 'قوانين ومعادلات' },
+              { id: 'definition', label: 'تعاريف ومفاهيم' },
+              { id: 'solution', label: 'حلول ومسائل' }
+            ].map(cat => (
+              <button
+                key={cat.id}
+                type="button"
+                onClick={() => setNotebookCategoryFilter(cat.id as any)}
+                style={{
+                  background: notebookCategoryFilter === cat.id ? 'rgba(255, 183, 3, 0.18)' : 'var(--alpha-white-3)',
+                  border: notebookCategoryFilter === cat.id ? '1.5px solid #FFB703' : '1px solid var(--border-color)',
+                  color: notebookCategoryFilter === cat.id ? '#FFB703' : 'var(--text-secondary)',
+                  padding: '3px 10px',
+                  borderRadius: '6px',
+                  fontSize: '0.74rem',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {cat.label}
+              </button>
+            ))}
           </div>
 
           {/* Subject Filter Pills */}
@@ -5820,7 +6876,7 @@ export default function App() {
                 whiteSpace: 'nowrap'
               }}
             >
-              الكل ({notebookItems.length})
+              جميع المواد ({notebookItems.length})
             </button>
             {activeSubjs.map(s => {
               const count = notebookItems.filter(n => n.subject_name === s.subject_name).length;
@@ -5857,9 +6913,15 @@ export default function App() {
                 <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'rgba(255, 183, 3, 0.12)', color: '#FFB703', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
                   <Bookmark size={24} />
                 </div>
-                <h4 style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--text-main)', margin: '0 0 6px' }}>لا توجد ملاحظات محفوظة بعد</h4>
+                <h4 style={{ fontSize: '1rem', fontWeight: 800, color: 'var(--text-main)', margin: '0 0 6px' }}>
+                  {notebookSearchQuery || notebookCategoryFilter !== 'all' || notebookFilterSubject !== 'all'
+                    ? 'لا توجد نتائج مطابقة لمعايير البحث والتصفية'
+                    : 'لا توجد ملاحظات محفوظة بعد'}
+                </h4>
                 <p style={{ fontSize: '0.82rem', maxWidth: '380px', margin: '0 auto', lineHeight: '1.5' }}>
-                  اضغط على أيقونة الحفظ (Bookmark) أسفل أي شرح أو قانون يقدمه المعلم الذكي في الدردشة ليُحفظ هنا مباشرة.
+                  {notebookSearchQuery || notebookCategoryFilter !== 'all'
+                    ? 'جرّب تعديل كلمات البحث أو إلغاء فلاتر التصنيف لإظهار الملاحظات المحفوظة.'
+                    : 'اضغط على أيقونة الحفظ (Bookmark) أسفل أي شرح أو قانون يقدمه المعلم الذكي في الدردشة ليُحفظ هنا مباشرة.'}
                 </p>
               </div>
             ) : (
@@ -5906,11 +6968,11 @@ export default function App() {
                       type="button"
                       onClick={() => handleViewConversationInChat(note)}
                       className="notebook-view-chat-btn"
-                      title="View Conversation in Chat"
-                      aria-label="View Conversation in Chat"
+                      title="العودة للمحادثة الأصلية"
+                      aria-label="العودة للمحادثة الأصلية"
                     >
                       <MessageSquare size={13} />
-                      <span>View Conversation in Chat</span>
+                      <span>العودة للمحادثة الأصلية</span>
                     </button>
                   </div>
                 ))}
@@ -5948,6 +7010,10 @@ export default function App() {
                   if (isPlaceholder) {
                     setPlaceholderModalCurriculum(s);
                   } else {
+                    if (activeSessionId && chatSubject !== s.subject_name) {
+                      setActiveSessionId(null);
+                      setMessages([]);
+                    }
                     setChatSubject(s.subject_name);
                     try { localStorage.setItem('egs_last_subject', s.subject_name); } catch (e) {}
                     if (textareaRef.current) textareaRef.current.focus();
@@ -6029,6 +7095,7 @@ export default function App() {
             </div>
           </div>
 
+
           {/* Hero & Quick Summary Card */}
           <div className="tasks-hero-card">
             <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '10px' : '16px' }}>
@@ -6104,6 +7171,47 @@ export default function App() {
                 </div>
               </div>
             </div>
+
+            {/* Parent WhatsApp Progress Share Action */}
+            {user && (
+              <div style={{ marginTop: '16px', paddingTop: '14px', borderTop: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                  شارك ولي أمرك إنجازاتك الدراسية وسلسلة التزامك بضغطة واحدة:
+                </span>
+                {(() => {
+                  const studentName = user.name || 'الطالب';
+                  const gradeName = GRADE_NAMES[user.grade_level] || '';
+                  const shareMsg = `السلام عليكم ورحمة الله،\n\nتقرير مذاكرة وإنجاز الطالب: ${studentName}\nالصف: ${gradeName}\nإنجاز المهام اليومية: ${completedQuestsCount} من ${totalQuestsCount}\nمجموع نقاط الترتيب: ${user.points || points || 0} نقطة\nسلسلة الالتزام: ${user.study_streak || 1} يوم متواصل\nدروس مكتملة في ${effectiveSubj || 'المادة'}: ${completedLessonCount} من ${totalLessonCount} (${percent}%)\n\nتم استخراج التقرير عبر EGS AI للتعليم الذكي.`;
+                  const waUrl = `https://wa.me/?text=${encodeURIComponent(shareMsg)}`;
+                  return (
+                    <a
+                      href={waUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        background: 'rgba(34, 197, 94, 0.12)',
+                        color: '#22c55e',
+                        border: '1.5px solid #22c55e',
+                        borderRadius: '10px',
+                        padding: '8px 16px',
+                        fontSize: '0.82rem',
+                        fontWeight: 800,
+                        textDecoration: 'none',
+                        cursor: 'pointer',
+                        transition: 'var(--transition)'
+                      }}
+                      title="مشاركة التقرير عبر واتساب مع ولي الأمر"
+                    >
+                      <Share size={15} />
+                      <span>مشاركة التقرير مع ولي الأمر عبر WhatsApp</span>
+                    </a>
+                  );
+                })()}
+              </div>
+            )}
           </div>
 
           {/* Section 1: Daily Quests Card */}
@@ -6465,7 +7573,7 @@ export default function App() {
               </div>
 
               <div
-                onClick={() => setShowNotebookModal(true)}
+                onClick={handleOpenNotebook}
                 className="tool-accelerator-item"
                 role="button"
               >
@@ -6813,7 +7921,7 @@ export default function App() {
                   تم إرفاق الصورة بنجاح
                 </span>
                 <span style={{ fontSize: '0.72rem', color: 'var(--primary-color)' }}>
-                  جاهزة للإرسال مع السؤال (سيتم تحليلها فور الإرسال)
+                  {isRecordingAudio ? 'جاهزة للإرسال بجانب تسجيلك الصوتي (سيتم تحليلها والإجابة عنها)' : 'جاهزة للإرسال مع السؤال (سيتم تحليلها فور الإرسال)'}
                 </span>
               </div>
             </div>
@@ -6878,11 +7986,62 @@ export default function App() {
           </div>
         )}
 
-        <div id="tour-composer-dock" className="composer-dock-container">
-          {/* Main Input + Buttons Row */}
-          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', direction: 'rtl' }}>
-            
-            {/* Direct Camera capture button */}
+        {/* Advanced STEM Math & Calculator Keypad Panel */}
+        {showMathToolbar && (
+          <div className="math-calc-panel animate-fade-in">
+            <div className="math-calc-header">
+              <div className="math-calc-title">
+                <Calculator size={15} />
+                <span>لوحة العمليات والرموز الرياضية</span>
+              </div>
+
+              <div className="math-calc-tabs">
+                {[
+                  { id: 'calc', label: 'حاسبة أساسية' },
+                  { id: 'arabic', label: 'منهج مصري' },
+                  { id: 'english', label: 'English STEM' },
+                  { id: 'advanced', label: 'رموز متقدمة' }
+                ].map(t => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setMathActiveTab(t.id as any)}
+                    className={`math-calc-tab-btn ${mathActiveTab === t.id ? 'active' : ''}`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowMathToolbar(false)}
+                className="math-calc-close-btn"
+                title="إغلاق لوحة الرموز"
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            <div className="math-calc-grid">
+              {MATH_KEYPAD_TABS[mathActiveTab].map((sym, sIdx) => (
+                <button
+                  key={sIdx}
+                  type="button"
+                  onClick={() => insertMathSymbol(sym.s, sym.cursorOffset)}
+                  className={`math-calc-key ${['+', '-', '×', '÷', '=', '√x', 'a/b', 'س', 'ص', 'x', 'y'].includes(sym.l) ? 'key-accent' : ''}`}
+                  title={`إدراج ${sym.l}`}
+                >
+                  {sym.l}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Mobile Decluttered Auxiliary Tools Tray (when + is clicked) */}
+        {isMobile && showComposerTools && (
+          <div className="composer-tools-tray animate-fade-in">
             <button
               type="button"
               disabled={isDisabled}
@@ -6893,29 +8052,14 @@ export default function App() {
                   return;
                 }
                 setShowCameraModal(true);
+                setShowComposerTools(false);
               }}
-              style={{
-                width: isMobile ? '40px' : '38px',
-                height: isMobile ? '40px' : '38px',
-                borderRadius: '12px',
-                background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: isDisabled ? 'not-allowed' : 'pointer',
-                opacity: isDisabled ? 0.5 : 1,
-                flexShrink: 0,
-                transition: 'var(--transition-fast)'
-              }}
-              title="التقاط صورة مباشرة بالكاميرا"
-              aria-label="التقاط صورة مباشرة بالكاميرا"
+              className="composer-tool-item-btn"
             >
-              <Camera size={isMobile ? 18 : 17} />
+              <Camera size={15} style={{ color: 'var(--primary-color)' }} />
+              <span>كاميرا مباشرة</span>
             </button>
 
-            {/* Image attachment button */}
             <button
               type="button"
               disabled={isDisabled}
@@ -6926,107 +8070,360 @@ export default function App() {
                   return;
                 }
                 imageInputRef.current?.click();
+                setShowComposerTools(false);
               }}
-              style={{
-                width: isMobile ? '40px' : '38px',
-                height: isMobile ? '40px' : '38px',
-                borderRadius: '12px',
-                background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: isDisabled ? 'not-allowed' : 'pointer',
-                opacity: isDisabled ? 0.5 : 1,
-                flexShrink: 0,
-                transition: 'var(--transition-fast)'
-              }}
-              title="إرفاق صورة مسألة أو سؤال"
-              aria-label="إرفاق صورة مسألة أو سؤال"
+              className="composer-tool-item-btn"
             >
-              <ImageIcon size={isMobile ? 18 : 17} />
+              <ImageIcon size={15} style={{ color: 'var(--primary-color)' }} />
+              <span>إرفاق صورة</span>
             </button>
-            <input
-              type="file"
-              ref={imageInputRef}
-              onChange={handleImageSelect}
-              accept="image/*"
-              style={{ display: 'none' }}
-            />
-            <input
-              type="file"
-              ref={cameraInputRef}
-              onChange={handleImageSelect}
-              accept="image/*"
-              capture="environment"
-              style={{ display: 'none' }}
-            />
 
-            {/* Auto-growing Textarea */}
-            <textarea
-              ref={textareaRef}
-              value={inputMessage}
-              onChange={(e) => setInputMessage(e.target.value)}
-              onClick={() => {
-                if (!user) {
-                  setAuthTab('register');
-                  setShowAuthModal(true);
-                }
-              }}
-              onFocus={() => {
-                if (!user) {
-                  setAuthTab('register');
-                  setShowAuthModal(true);
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage(e as any);
-                }
-              }}
-              placeholder={placeholderText}
-              disabled={isDisabled}
-              rows={1}
-              style={{
-                flex: 1,
-                background: 'transparent',
-                border: 'none',
-                outline: 'none',
-                resize: 'none',
-                fontSize: '16px',
-                lineHeight: '1.5',
-                minHeight: isMobile ? '36px' : '38px',
-                maxHeight: '160px',
-                padding: isMobile ? '6px 4px' : '8px 4px',
-                color: 'var(--text-main)',
-                direction: 'rtl',
-                textAlign: 'right',
-                fontFamily: 'var(--font-arabic)',
-              }}
-            />
-
-            {/* Send Button */}
             <button
-              id="tour-send-button"
-              type="submit"
-              disabled={isDisabled || (!hasMessage && !pendingImage)}
-              className={`send-button ${(hasMessage || pendingImage) && !isDisabled ? 'active' : ''}`}
-              style={{
-                width: isMobile ? '40px' : '38px',
-                height: isMobile ? '40px' : '38px',
-                borderRadius: '12px',
-                flexShrink: 0,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
+              type="button"
+              onClick={() => {
+                setShowMathToolbar(prev => !prev);
+                setShowComposerTools(false);
               }}
-              title="إرسال"
+              className={`composer-tool-item-btn ${showMathToolbar ? 'active' : ''}`}
             >
-              <Send size={isMobile ? 18 : 16} />
+              <Calculator size={15} style={{ color: 'var(--primary-color)' }} />
+              <span>لوحة الرموز</span>
             </button>
           </div>
+        )}
+
+        <div id="tour-composer-dock" className="composer-dock-container">
+          {/* Hidden File Inputs */}
+          <input
+            type="file"
+            ref={imageInputRef}
+            onChange={handleImageSelect}
+            accept="image/*"
+            style={{ display: 'none' }}
+          />
+          <input
+            type="file"
+            ref={cameraInputRef}
+            onChange={handleImageSelect}
+            accept="image/*"
+            capture="environment"
+            style={{ display: 'none' }}
+          />
+
+          {isRecordingAudio ? (
+            /* Live Voice Recording Station Row */
+            <div className="composer-voice-rec-row animate-fade-in">
+              <div className="voice-rec-left-meta">
+                <span className={isAudioPaused ? "voice-rec-paused-dot" : "voice-rec-pulsing-dot"} />
+                <span className={isAudioPaused ? "voice-rec-paused-text" : "voice-rec-live-text"}>
+                  {isAudioPaused ? 'متوقف مؤقتاً' : 'جاري التسجيل...'}
+                </span>
+                <span className="voice-rec-timer">
+                  00:{recordingDuration.toString().padStart(2, '0')}
+                </span>
+                <div className={`voice-rec-bars-visualizer ${isAudioPaused ? 'is-paused' : ''}`}>
+                  <span className="voice-rec-mini-bar" style={{ animationDelay: '0s' }} />
+                  <span className="voice-rec-mini-bar" style={{ animationDelay: '0.2s' }} />
+                  <span className="voice-rec-mini-bar" style={{ animationDelay: '0.4s' }} />
+                  <span className="voice-rec-mini-bar" style={{ animationDelay: '0.1s' }} />
+                  <span className="voice-rec-mini-bar" style={{ animationDelay: '0.3s' }} />
+                </div>
+              </div>
+              <div className="voice-rec-actions-group">
+                {/* Delete / Discard Recording */}
+                <button
+                  type="button"
+                  onClick={handleCancelAudioRecording}
+                  className="voice-rec-btn-cancel"
+                  title="حذف التسجيل"
+                >
+                  <Trash2 size={16} />
+                  <span>حذف</span>
+                </button>
+
+                {/* Optional Preview Listen Button when Paused */}
+                {isAudioPaused && previewAudioUrl && (
+                  <button
+                    type="button"
+                    onClick={handleToggleAudioPreview}
+                    className="voice-rec-btn-preview"
+                    title={isPreviewPlaying ? 'إيقاف المعاينة' : 'استماع للتسجيل قبل الإرسال'}
+                  >
+                    {isPreviewPlaying ? <Pause size={14} /> : <Play size={14} />}
+                    <span>{isPreviewPlaying ? 'إيقاف' : 'معاينة'}</span>
+                  </button>
+                )}
+
+                {/* Pause / Resume Button */}
+                <button
+                  type="button"
+                  onClick={isAudioPaused ? handleResumeAudioRecording : handlePauseAudioRecording}
+                  className="voice-rec-btn-pause"
+                  title={isAudioPaused ? 'استئناف التسجيل' : 'إيقاف مؤقت'}
+                >
+                  {isAudioPaused ? <Play size={14} /> : <Pause size={14} />}
+                  <span>{isAudioPaused ? 'استئناف' : 'إيقاف'}</span>
+                </button>
+
+                {/* Send Audio Button ("إرسال الصوت") */}
+                <button
+                  type="button"
+                  onClick={handleStopAudioRecording}
+                  disabled={isTranscribingAudio}
+                  className="voice-rec-btn-send"
+                  title="إرسال الصوت مباشرة"
+                >
+                  {isTranscribingAudio ? (
+                    <Loader2 size={15} className="animate-spin" />
+                  ) : (
+                    <Send size={15} />
+                  )}
+                  <span>{isTranscribingAudio ? 'جاري إرسال الصوت...' : 'إرسال الصوت'}</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Live Mathematical Formula Preview Strip */}
+              {Boolean(inputMessage.trim()) && hasMathExpression(inputMessage) && (
+                <div className="composer-math-preview animate-fade-in">
+                  <div className="math-preview-header">
+                    <div className="math-preview-badge">
+                      <Calculator size={13} style={{ color: 'var(--primary-color)' }} />
+                      <span>المعاينة الرياضية الحية</span>
+                    </div>
+                    <span className="math-preview-hint">المظهر التنسيقي للمعادلة</span>
+                  </div>
+                  <div className="math-preview-render">
+                    {renderFormattedMath(inputMessage)}
+                  </div>
+                </div>
+              )}
+
+              {/* Main Input + Controls Row */}
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', direction: 'rtl' }}>
+              {isMobile ? (
+                /* Mobile: Expandable Action Button (+) to declutter dock */
+                <button
+                  type="button"
+                  disabled={isDisabled}
+                  onClick={() => setShowComposerTools(prev => !prev)}
+                  style={{
+                    width: '38px',
+                    height: '38px',
+                    borderRadius: '12px',
+                    background: showComposerTools || pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                    border: showComposerTools || pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                    color: showComposerTools || pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    cursor: isDisabled ? 'not-allowed' : 'pointer',
+                    flexShrink: 0,
+                    transition: 'var(--transition-fast)'
+                  }}
+                  title="المرفقات والأدوات (كاميرا، صور، رموز رياضية)"
+                  aria-label="المرفقات والأدوات"
+                >
+                  <Plus size={18} style={{ transform: showComposerTools ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s ease' }} />
+                </button>
+              ) : (
+                /* Desktop: Dedicated Action Buttons with clean spacing */
+                <>
+                  <button
+                    type="button"
+                    disabled={isDisabled}
+                    onClick={() => {
+                      if (!user) {
+                        setAuthTab('register');
+                        setShowAuthModal(true);
+                        return;
+                      }
+                      setShowCameraModal(true);
+                    }}
+                    style={{
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: '12px',
+                      background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                      border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                      color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: isDisabled ? 'not-allowed' : 'pointer',
+                      opacity: isDisabled ? 0.5 : 1,
+                      flexShrink: 0,
+                      transition: 'var(--transition-fast)'
+                    }}
+                    title="التقاط صورة مباشرة بالكاميرا"
+                    aria-label="التقاط صورة مباشرة بالكاميرا"
+                  >
+                    <Camera size={17} />
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isDisabled}
+                    onClick={() => {
+                      if (!user) {
+                        setAuthTab('register');
+                        setShowAuthModal(true);
+                        return;
+                      }
+                      imageInputRef.current?.click();
+                    }}
+                    style={{
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: '12px',
+                      background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                      border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                      color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: isDisabled ? 'not-allowed' : 'pointer',
+                      opacity: isDisabled ? 0.5 : 1,
+                      flexShrink: 0,
+                      transition: 'var(--transition-fast)'
+                    }}
+                    title="إرفاق صورة مسألة أو سؤال"
+                    aria-label="إرفاق صورة مسألة أو سؤال"
+                  >
+                    <ImageIcon size={17} />
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={isDisabled}
+                    onClick={() => setShowMathToolbar(prev => !prev)}
+                    style={{
+                      width: '38px',
+                      height: '38px',
+                      borderRadius: '12px',
+                      background: showMathToolbar ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                      border: showMathToolbar ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                      color: showMathToolbar ? 'var(--primary-color)' : 'var(--text-secondary)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: isDisabled ? 'not-allowed' : 'pointer',
+                      opacity: isDisabled ? 0.5 : 1,
+                      flexShrink: 0,
+                      transition: 'var(--transition-fast)'
+                    }}
+                    title="لوحة الرموز والعمليات الرياضية"
+                    aria-label="لوحة الرموز والعمليات الرياضية"
+                  >
+                    <Calculator size={17} />
+                  </button>
+                </>
+              )}
+
+              {/* Auto-growing Textarea - spacious, comfortable width */}
+              <textarea
+                ref={textareaRef}
+                value={inputMessage}
+                onChange={(e) => setInputMessage(e.target.value)}
+                onClick={() => {
+                  if (!user) {
+                    setAuthTab('register');
+                    setShowAuthModal(true);
+                  }
+                }}
+                onFocus={() => {
+                  if (!user) {
+                    setAuthTab('register');
+                    setShowAuthModal(true);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleSendMessage(e as any);
+                  }
+                }}
+                placeholder={placeholderText}
+                disabled={isDisabled}
+                rows={1}
+                style={{
+                  flex: 1,
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  resize: 'none',
+                  fontSize: '16px',
+                  lineHeight: '1.5',
+                  minHeight: isMobile ? '36px' : '38px',
+                  maxHeight: '160px',
+                  padding: isMobile ? '6px 8px' : '8px 6px',
+                  color: 'var(--text-main)',
+                  direction: 'rtl',
+                  textAlign: 'right',
+                  fontFamily: 'var(--font-arabic)',
+                }}
+              />
+
+              {/* Native Voice Recording Trigger Button */}
+              <button
+                type="button"
+                disabled={isDisabled || isTranscribingAudio}
+                onClick={() => {
+                  if (!user) {
+                    setAuthTab('register');
+                    setShowAuthModal(true);
+                    return;
+                  }
+                  handleStartAudioRecording();
+                }}
+                style={{
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '12px',
+                  background: isTranscribingAudio ? 'var(--primary-light)' : 'var(--alpha-white-4)',
+                  border: isTranscribingAudio ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
+                  color: isTranscribingAudio ? 'var(--primary-color)' : 'var(--text-secondary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: isDisabled ? 'not-allowed' : 'pointer',
+                  opacity: isDisabled ? 0.5 : 1,
+                  flexShrink: 0,
+                  transition: 'var(--transition-fast)'
+                }}
+                title={isTranscribingAudio ? "جاري معالجة التسجيل..." : "تسجيل رسالة صوتية للمعلم الذكي"}
+                aria-label="تسجيل رسالة صوتية"
+              >
+                {isTranscribingAudio ? (
+                  <Loader2 size={17} className="animate-spin" />
+                ) : (
+                  <Mic size={17} />
+                )}
+              </button>
+
+              {/* Send Button */}
+              <button
+                id="tour-send-button"
+                type="submit"
+                disabled={isDisabled || (!hasMessage && !pendingImage)}
+                className={`send-button ${(hasMessage || pendingImage) && !isDisabled ? 'active' : ''}`}
+                style={{
+                  width: '38px',
+                  height: '38px',
+                  borderRadius: '12px',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center'
+                }}
+                title="إرسال"
+              >
+                <Send size={16} />
+              </button>
+            </div>
+          </>
+          )}
 
           {/* Quick Controls: Distraction-Free Mobile Strip or Desktop Toolbar */}
           {isMobile ? (
@@ -7646,7 +9043,12 @@ export default function App() {
                     if (c.is_placeholder) {
                       setPlaceholderModalCurriculum(c);
                     } else {
+                      if (activeSessionId && chatSubject !== c.subject_name) {
+                        setActiveSessionId(null);
+                        setMessages([]);
+                      }
                       setChatSubject(c.subject_name);
+                      try { localStorage.setItem('egs_last_subject', c.subject_name); } catch (e) {}
                     }
                   }}
                   style={{ position: 'relative' }}
@@ -7714,8 +9116,14 @@ export default function App() {
 
 
   const isConfigLoadingRef = useRef(false);
+  const lastConfigFetchTimeRef = useRef(0);
+  const CONFIG_FRESH_WINDOW_MS = 15000; // 15 seconds fresh window
 
-  const loadSystemConfig = (devIdVal?: string, tokenVal?: string | null) => {
+  const loadSystemConfig = (devIdVal?: string, tokenVal?: string | null, force: boolean = false) => {
+    const now = Date.now();
+    if (!force && lastConfigFetchTimeRef.current > 0 && (now - lastConfigFetchTimeRef.current < CONFIG_FRESH_WINDOW_MS)) {
+      return;
+    }
     if (isConfigLoadingRef.current) return;
     isConfigLoadingRef.current = true;
     const targetDevId = devIdVal || deviceId;
@@ -7727,9 +9135,18 @@ export default function App() {
     if (activeToken) {
       headers['Authorization'] = `Bearer ${activeToken}`;
     }
-    fetch('/api/config', { headers })
-      .then(res => res.json())
+    const configUrl = `/api/config${force ? `?t=${Date.now()}` : ''}`;
+    fetch(configUrl, { headers, cache: force ? 'no-store' : 'default' })
+      .then(res => {
+        if (res.status === 304) {
+          lastConfigFetchTimeRef.current = Date.now();
+          return null;
+        }
+        return res.json();
+      })
       .then(data => {
+        if (!data) return;
+        lastConfigFetchTimeRef.current = Date.now();
         // If an active token was provided but server returned user_not_found/session_invalid/authenticated:false
         if (activeToken) {
           if (data.session_invalid || data.user_not_found || data.authenticated === false || (!data.user && activeToken)) {
@@ -7749,7 +9166,13 @@ export default function App() {
           try { localStorage.setItem('egs_active_curriculum_ids', JSON.stringify(data.active_curriculum_ids)); } catch (e) {}
         }
         if (data.all_curriculums) {
-          setCurriculums(data.all_curriculums);
+          setCurriculums(prev => {
+            const hasChanged = JSON.stringify(prev) !== JSON.stringify(data.all_curriculums);
+            if (hasChanged) {
+              setCurriculumStructures({});
+            }
+            return data.all_curriculums;
+          });
           try { localStorage.setItem('egs_curriculums_cache', JSON.stringify(data.all_curriculums)); } catch (e) {}
         }
         if (data.daily_quests) {
@@ -7971,47 +9394,83 @@ export default function App() {
     } catch (e) {}
 
     // 5. Load system configuration & active syllabus
-    loadSystemConfig(devId, storedToken);
+    loadSystemConfig(devId, storedToken, true);
 
     // 6. Load notifications and dismissed-ids
     try {
       const storedDismissed = localStorage.getItem('egs_dismissed_notifications');
       if (storedDismissed) setDismissedNotifIds(JSON.parse(storedDismissed));
     } catch (e) {}
-    loadNotifications(storedToken);
+    loadNotifications(storedToken, true);
 
     // 7. Complete initial loading smoothly to avoid FOUC / flashes
     const initTimer = setTimeout(() => {
       setIsInitialLoading(false);
     }, 120);
 
-    // 8. Tab Focus & Periodic Heartbeat for Live Session Invalidation (throttled)
+    // 8. Inactive Tab Return Sync (15s cooldown) & Background Heartbeat
     let lastVisibilityCheckTime = Date.now();
     const handleVisibilityCheck = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         const now = Date.now();
-        if (now - lastVisibilityCheckTime < 60000) return; // 60s cooldown to eliminate tab-switching and DevTools spam
+        if (now - lastVisibilityCheckTime < 15000) return; // 15s cooldown
         lastVisibilityCheckTime = now;
         const currentTok = localStorage.getItem('egs_token');
+        loadSystemConfig(devId, currentTok, true);
         if (currentTok) {
-          loadSystemConfig(devId, currentTok);
           loadNotifications(currentTok);
         }
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityCheck);
 
-    const sessionHeartbeat = setInterval(() => {
-      const currentTok = localStorage.getItem('egs_token');
-      if (currentTok) {
-        loadSystemConfig(devId, currentTok);
-        loadNotifications(currentTok);
+    // Periodic curriculum/config sync interval (every 45s for active visible tab)
+    const backgroundSyncTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        const currentTok = localStorage.getItem('egs_token');
+        loadSystemConfig(devId, currentTok, false);
       }
-    }, 60000);
+    }, 45000);
+
+    // Cross-tab synchronization for immediate curriculum & settings updates
+    let curriculumSyncChannel: BroadcastChannel | null = null;
+    try {
+      curriculumSyncChannel = new BroadcastChannel('egs_curriculum_sync');
+      curriculumSyncChannel.onmessage = (event) => {
+        if (event.data?.type === 'CURRICULUM_UPDATED') {
+          setCurriculumStructures({});
+          const currentTok = localStorage.getItem('egs_token');
+          loadSystemConfig(devId, currentTok, true);
+          if (currentTok) {
+            try {
+              const u = JSON.parse(localStorage.getItem('egs_user') || '{}');
+              if (u.role === 'admin') loadCurriculums();
+            } catch (e) {}
+          }
+        }
+      };
+    } catch (e) {}
+
+    const handleStorageSync = (e: StorageEvent) => {
+      if (e.key === 'egs_curriculum_sync_timestamp') {
+        setCurriculumStructures({});
+        const currentTok = localStorage.getItem('egs_token');
+        loadSystemConfig(devId, currentTok, true);
+        if (currentTok) {
+          try {
+            const u = JSON.parse(localStorage.getItem('egs_user') || '{}');
+            if (u.role === 'admin') loadCurriculums();
+          } catch (err) {}
+        }
+      }
+    };
+    window.addEventListener('storage', handleStorageSync);
 
     return () => {
       clearTimeout(initTimer);
-      clearInterval(sessionHeartbeat);
+      clearInterval(backgroundSyncTimer);
+      curriculumSyncChannel?.close();
+      window.removeEventListener('storage', handleStorageSync);
       document.removeEventListener('visibilitychange', handleVisibilityCheck);
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -8112,7 +9571,17 @@ export default function App() {
         checkAuthError(res.status, data);
         return;
       }
-      if (data.success && data.history) {
+      if (data.success) {
+        if (data.session) {
+          if (data.session.subject_name) {
+            setChatSubject(data.session.subject_name);
+            try { localStorage.setItem('egs_last_subject', data.session.subject_name); } catch (e) {}
+          }
+          if (data.session.mode) {
+            setChatMode(data.session.mode);
+          }
+        }
+        if (data.history) {
         const parsedHistory = data.history.map((h: any) => {
           if (h.sender === 'ai' && h.message && h.message.startsWith('<thought')) {
             const closeThoughtIndex = h.message.indexOf('</thought>');
@@ -8150,6 +9619,9 @@ export default function App() {
           };
         });
         setMessages(parsedHistory);
+        } else {
+          setMessages([]);
+        }
       } else {
         setMessages([]);
       }
@@ -8232,9 +9704,17 @@ export default function App() {
     }
   }, [token]);
 
-  // Load messages when session changes
+  // Load messages and sync subject when session changes
   useEffect(() => {
     if (activeSessionId) {
+      const activeSession = sessions.find(s => s.id === activeSessionId);
+      if (activeSession?.subject_name) {
+        setChatSubject(activeSession.subject_name);
+        try { localStorage.setItem('egs_last_subject', activeSession.subject_name); } catch (e) {}
+      }
+      if (activeSession?.mode) {
+        setChatMode(activeSession.mode);
+      }
       if (skipHistoryReloadRef.current) {
         skipHistoryReloadRef.current = false;
         return;
@@ -8243,7 +9723,7 @@ export default function App() {
     } else {
       setMessages([]);
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, sessions]);
 
   // Auto-scroll to targeted note message when messages update
   useEffect(() => {
@@ -8263,12 +9743,16 @@ export default function App() {
 
   const loadCurriculums = async () => {
     try {
-      const res = await fetch('/api/admin/curriculum', {
-        headers: { 'Authorization': `Bearer ${token}` }
+      const res = await fetch(`/api/admin/curriculum?t=${Date.now()}`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        cache: 'no-store'
       });
       const data = await res.json();
-      if (data.success) {
+      if (data.success && Array.isArray(data.curriculums)) {
         setCurriculums(data.curriculums);
+        try {
+          localStorage.setItem('egs_curriculums_cache', JSON.stringify(data.curriculums));
+        } catch (e) {}
       }
     } catch (e) {
       console.error(e);
@@ -8305,7 +9789,8 @@ export default function App() {
         setPoints(data.user.points || 0);
         setShowAuthModal(false);
         resetAuthForm();
-        loadNotifications(data.token);
+        loadSystemConfig(undefined, data.token, true);
+        loadNotifications(data.token, true);
 
         // If user has not completed onboarding
         if (data.user.grade_level === 'unselected' || !data.user.grade_level) {
@@ -8370,7 +9855,8 @@ export default function App() {
           setPoints(data.user.points || 0);
           setShowAuthModal(false);
           resetAuthForm();
-          loadNotifications(data.token);
+          loadSystemConfig(undefined, data.token, true);
+          loadNotifications(data.token, true);
 
           // Prompt user for Stage and Name sequentially
           setShowOnboardingModal(true);
@@ -8437,7 +9923,8 @@ export default function App() {
         setShowGoogleGradeModal(false);
         setGoogleTempUser(null);
         resetAuthForm();
-        loadNotifications(data.token);
+        loadSystemConfig(undefined, data.token, true);
+        loadNotifications(data.token, true);
 
         // If new user or grade_level unselected, open sequential onboarding!
         if (data.is_new_user || data.user.grade_level === 'unselected' || !data.user.grade_level) {
@@ -8596,8 +10083,8 @@ export default function App() {
     setUserDevices([]);
     setCoins(0.0);
     setActiveTab('chat');
-    loadSystemConfig(deviceId, null);
-    loadNotifications(null);
+    loadSystemConfig(deviceId, null, true);
+    loadNotifications(null, true);
   };
   const handleUpdateUserGrade = async (newGrade: string, newTrack?: string | null, newElective?: string | null) => {
     if (!user) return;
@@ -8672,9 +10159,373 @@ export default function App() {
     setPendingImage({ base64, mimeType, description: '' });
   };
 
+  // English Pronunciation Speech Handler
+  const handlePlayEnglish = (text: string, id: string) => {
+    if (playingSpeechId === id) {
+      stopSpeech();
+      setPlayingSpeechId(null);
+      return;
+    }
+    setPlayingSpeechId(id);
+    const ok = speakEnglish(text, () => setPlayingSpeechId(id), () => setPlayingSpeechId(null));
+    if (!ok) setPlayingSpeechId(null);
+  };
+
+  // Stop active speech whenever switching sessions or subjects
+  useEffect(() => {
+    stopSpeech();
+    setPlayingSpeechId(null);
+  }, [activeSessionId, chatSubject]);
+
+  // Clean up speech synthesis on component unmount
+  useEffect(() => {
+    return () => {
+      stopSpeech();
+    };
+  }, []);
+
+  // Audio Recording & Alibaba Speech-to-Text Handlers
+  const handleStartAudioRecording = async () => {
+    if (isRecordingAudio) return;
+    try {
+      if (typeof window !== 'undefined' && !window.isSecureContext) {
+        alert('يتطلب تشغيل الميكروفون اتصالاً آمناً (HTTPS). يرجى فتح الموقع عبر رابط https://');
+        return;
+      }
+
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        alert('المتصفح لا يدعم الوصول إلى الميكروفون في هذه البيئة.');
+        return;
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mime = typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/webm') 
+        ? 'audio/webm' 
+        : (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '');
+      const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorderRef.current = recorder;
+      recorder.start(250);
+      setIsRecordingAudio(true);
+      setIsAudioPaused(false);
+      setRecordingDuration(0);
+      setIsPreviewPlaying(false);
+      if (previewAudioUrl) {
+        URL.revokeObjectURL(previewAudioUrl);
+        setPreviewAudioUrl(null);
+      }
+
+      // Start recording timer
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => {
+          if (prev >= 60) {
+            handlePauseAudioRecording();
+            return 60;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } catch (err: any) {
+      console.error('Microphone access failed:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        alert('تم حظر إذن الميكروفون من إعدادات المتصفح أو تم رفضه. يرجى تفعيل إذن الميكروفون من إعدادات الموقع وإعادة المحاولة.');
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        alert('لم يتم العثور على ميكروفون في هذا الجهاز.');
+      } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        alert('الميكروفون قيد الاستخدام من قبل تطبيق آخر في الجهاز.');
+      } else {
+        alert('تعذر تشغيل الميكروفون. يرجى التأكد من توصيل الميكروفون ومنح الإذن في المتصفح.');
+      }
+    }
+  };
+
+  const handlePauseAudioRecording = () => {
+    if (!mediaRecorderRef.current || !isRecordingAudio || isAudioPaused) return;
+    try {
+      if (mediaRecorderRef.current.state === 'recording') {
+        mediaRecorderRef.current.requestData();
+        mediaRecorderRef.current.pause();
+      }
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      setIsAudioPaused(true);
+
+      const mimeType = mediaRecorderRef.current.mimeType || 'audio/webm';
+      const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+      if (audioBlob.size > 200) {
+        if (previewAudioUrl) URL.revokeObjectURL(previewAudioUrl);
+        const url = URL.createObjectURL(audioBlob);
+        setPreviewAudioUrl(url);
+      }
+    } catch (e) {
+      console.error('Failed to pause recording:', e);
+    }
+  };
+
+  const handleResumeAudioRecording = () => {
+    if (!mediaRecorderRef.current || !isRecordingAudio || !isAudioPaused) return;
+    try {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+      setIsPreviewPlaying(false);
+      if (previewAudioUrl) {
+        URL.revokeObjectURL(previewAudioUrl);
+        setPreviewAudioUrl(null);
+      }
+
+      if (mediaRecorderRef.current.state === 'paused') {
+        mediaRecorderRef.current.resume();
+      }
+      setIsAudioPaused(false);
+
+      if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingDuration(prev => {
+          if (prev >= 60) {
+            handlePauseAudioRecording();
+            return 60;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    } catch (e) {
+      console.error('Failed to resume recording:', e);
+    }
+  };
+
+  const handleToggleAudioPreview = () => {
+    if (!previewAudioUrl) return;
+    if (!previewAudioRef.current) {
+      const audio = new Audio(previewAudioUrl);
+      audio.onended = () => setIsPreviewPlaying(false);
+      audio.onerror = () => setIsPreviewPlaying(false);
+      previewAudioRef.current = audio;
+    }
+    if (previewAudioRef.current) {
+      if (isPreviewPlaying) {
+        previewAudioRef.current.pause();
+        setIsPreviewPlaying(false);
+      } else {
+        previewAudioRef.current.play().then(() => {
+          setIsPreviewPlaying(true);
+        }).catch(() => setIsPreviewPlaying(false));
+      }
+    }
+  };
+
+  const handleStopAudioRecording = async () => {
+    if (!mediaRecorderRef.current || !isRecordingAudio) return;
+
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
+    }
+    if (previewAudioUrl) {
+      URL.revokeObjectURL(previewAudioUrl);
+      setPreviewAudioUrl(null);
+    }
+    setIsPreviewPlaying(false);
+    setIsAudioPaused(false);
+
+    const recorder = mediaRecorderRef.current;
+    const finalDuration = recordingDuration;
+    const currentPendingImage = pendingImage;
+    setIsRecordingAudio(false);
+    setIsTranscribingAudio(true);
+
+    recorder.onstop = async () => {
+      try {
+        const mimeType = recorder.mimeType || 'audio/webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
+
+        // Stop all audio tracks to turn off device microphone indicator
+        recorder.stream.getTracks().forEach(track => track.stop());
+
+        if (audioBlob.size < 500) {
+          setIsTranscribingAudio(false);
+          setRecordingDuration(0);
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+          const base64Audio = (reader.result as string) || '';
+          try {
+            const storedToken = localStorage.getItem('egs_token') || token;
+            const res = await fetch('/api/chat/transcribe', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(storedToken ? { 'Authorization': `Bearer ${storedToken}` } : {})
+              },
+              body: JSON.stringify({
+                audioBase64: base64Audio,
+                mimeType,
+                durationSeconds: finalDuration
+              })
+            });
+
+            const data = await res.json();
+            if (res.ok && data.transcript) {
+              const transcriptText = data.transcript.trim();
+              let voiceMsg = '';
+              if (currentPendingImage) {
+                voiceMsg += `[IMAGE_MESSAGE:${currentPendingImage.mimeType};${currentPendingImage.base64};]`;
+              }
+              voiceMsg += `[VOICE_MESSAGE:duration=${finalDuration || 1};mime=${mimeType};audio=${base64Audio}]${transcriptText}`;
+
+              setPendingImage(null);
+              setInputMessage('');
+              handleSendMessage(undefined, voiceMsg);
+            } else if (!res.ok) {
+              alert(data.error || 'تعذر معالجة التسجيل الصوتي.');
+            }
+          } catch (e: any) {
+            console.error('Transcription request failed:', e);
+            alert('حدث خطأ أثناء معالجة التسجيل الصوتي.');
+          } finally {
+            setIsTranscribingAudio(false);
+            setRecordingDuration(0);
+          }
+        };
+        reader.readAsDataURL(audioBlob);
+      } catch (err) {
+        console.error('Error handling recorded audio:', err);
+        setIsTranscribingAudio(false);
+        setRecordingDuration(0);
+      }
+    };
+
+    recorder.stop();
+  };
+
+  const handleCancelAudioRecording = () => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
+    }
+    if (previewAudioUrl) {
+      URL.revokeObjectURL(previewAudioUrl);
+      setPreviewAudioUrl(null);
+    }
+    setIsPreviewPlaying(false);
+    setIsAudioPaused(false);
+
+    if (mediaRecorderRef.current) {
+      try {
+        mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
+        if (mediaRecorderRef.current.state !== 'inactive') {
+          mediaRecorderRef.current.stop();
+        }
+      } catch (_) {}
+    }
+    audioChunksRef.current = [];
+    setIsRecordingAudio(false);
+    setIsTranscribingAudio(false);
+    setRecordingDuration(0);
+  };
+
+  // Quick STEM Math Symbol Insertion with smart bracket cursor placement and visual formatting
+  const insertMathSymbol = (symbol: string, cursorOffset?: number) => {
+    if (!textareaRef.current) {
+      setInputMessage(prev => prev + symbol);
+      return;
+    }
+    const textarea = textareaRef.current;
+    const start = textarea.selectionStart ?? inputMessage.length;
+    const end = textarea.selectionEnd ?? inputMessage.length;
+    const selectedText = inputMessage.substring(start, end);
+    const before = inputMessage.substring(0, start);
+    const after = inputMessage.substring(end);
+
+    let insertText = symbol;
+    let newCursorPos: number;
+
+    if (selectedText.length > 0) {
+      if (symbol === '√()' || symbol === '√') {
+        insertText = `√(${selectedText})`;
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '∛()' || symbol === '∛') {
+        insertText = `∛(${selectedText})`;
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '²' || symbol === '³') {
+        insertText = `${selectedText}${symbol}`;
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '^( )') {
+        insertText = `${selectedText}^( )`;
+        newCursorPos = start + selectedText.length + 2;
+      } else if (symbol === ' / ') {
+        insertText = `(${selectedText}) / `;
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '( )') {
+        insertText = `(${selectedText})`;
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '| |') {
+        insertText = `|${selectedText}|`;
+        newCursorPos = start + insertText.length;
+      } else if (symbol.endsWith('()')) {
+        const fnName = symbol.slice(0, -2);
+        insertText = `${fnName}(${selectedText})`;
+        newCursorPos = start + insertText.length;
+      } else {
+        insertText = symbol;
+        newCursorPos = cursorOffset !== undefined ? start + cursorOffset : start + insertText.length;
+      }
+    } else {
+      const lastChar = before.slice(-1);
+      const isPrecededByAlphanumeric = /[0-9a-zA-Z\u0621-\u064A]/.test(lastChar);
+
+      if (symbol === '²') {
+        insertText = isPrecededByAlphanumeric ? '²' : 'x²';
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '³') {
+        insertText = isPrecededByAlphanumeric ? '³' : 'x³';
+        newCursorPos = start + insertText.length;
+      } else if (symbol === '^( )') {
+        insertText = isPrecededByAlphanumeric ? '^( )' : 'x^( )';
+        newCursorPos = isPrecededByAlphanumeric ? start + 2 : start + 3;
+      } else {
+        insertText = symbol;
+        newCursorPos = cursorOffset !== undefined ? start + cursorOffset : start + insertText.length;
+      }
+    }
+
+    const nextVal = before + insertText + after;
+    setInputMessage(nextVal);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(newCursorPos, newCursorPos);
+    }, 50);
+  };
+
   // Chat Operation
   const handleSendMessage = async (e?: React.FormEvent, customText?: string) => {
     if (e) e.preventDefault();
+
+    // Cancel any active speech synthesis immediately on message send so it never triggers automatically or overlaps
+    stopSpeech();
+    setPlayingSpeechId(null);
 
     // If App Tour is running, close it immediately before streaming starts so student sees full response unobstructed
     if (isTourOpen) {
@@ -8711,10 +10562,19 @@ export default function App() {
       return;
     }
 
+    // Resolve effective subject and grade for active session or current subject
+    const activeSession = activeSessionId ? sessions.find(s => s.id === activeSessionId) : null;
+    const effectiveSubject = activeSession?.subject_name || chatSubject;
+    const targetGrade = activeSession?.grade_level || (user ? user.grade_level : chatGrade);
+
+    if (activeSession?.subject_name && chatSubject !== activeSession.subject_name) {
+      setChatSubject(activeSession.subject_name);
+      try { localStorage.setItem('egs_last_subject', activeSession.subject_name); } catch (e) {}
+    }
+
     // Client-side syllabus presence verification
-    const targetGrade = user ? user.grade_level : chatGrade;
     const hasCurriculum = curriculums.some(c => 
-      c.subject_name === chatSubject && 
+      c.subject_name === effectiveSubject && 
       c.grade_level === targetGrade
     );
     if (!hasCurriculum) {
@@ -8726,21 +10586,18 @@ export default function App() {
     }
 
     // Client-side deleted/changed course verification
-    if (activeSessionId) {
-      const activeSession = sessions.find(s => s.id === activeSessionId);
-      if (activeSession) {
-        const sessionCurrValid = curriculums.some(c => 
-          c.subject_name === activeSession.subject_name && 
-          c.grade_level === activeSession.grade_level &&
-          activeCurriculumIds.includes(c.id)
-        );
-        if (!sessionCurrValid) {
-          setMessages(prev => [...prev, {
-            sender: 'ai',
-            message: 'Please continue in another chat because the course has changed or been deleted.'
-          }]);
-          return;
-        }
+    if (activeSession) {
+      const sessionCurrValid = curriculums.some(c => 
+        c.subject_name === activeSession.subject_name && 
+        c.grade_level === activeSession.grade_level &&
+        activeCurriculumIds.includes(c.id)
+      );
+      if (!sessionCurrValid) {
+        setMessages(prev => [...prev, {
+          sender: 'ai',
+          message: 'Please continue in another chat because the course has changed or been deleted.'
+        }]);
+        return;
       }
     }
 
@@ -8759,6 +10616,7 @@ export default function App() {
           message: `[UPGRADE_PAYWALL]`
         }
       ]);
+      autoScrollChatToBottom();
       setShowUpgradeSheet(true);
       return;
     }
@@ -8771,6 +10629,7 @@ export default function App() {
 
     // Optimistically update message history list
     setMessages(prev => [...prev, { sender: 'user', message: userMsg }]);
+    autoScrollChatToBottom();
 
     try {
       const headers: Record<string, string> = {
@@ -8787,8 +10646,8 @@ export default function App() {
         headers,
         body: JSON.stringify({
           message: userMsg,
-          grade_level: user ? user.grade_level : chatGrade,
-          subject_name: chatSubject,
+          grade_level: targetGrade,
+          subject_name: effectiveSubject,
           session_id: activeSessionId,
           thinking: thinkingEnabled,
           mode: chatMode,
@@ -9005,6 +10864,10 @@ export default function App() {
                       setActiveSessionId(dataObj.session_id);
                       loadSessions();
                     }
+                    if (dataObj.subject_name && chatSubject !== dataObj.subject_name) {
+                      setChatSubject(dataObj.subject_name);
+                      try { localStorage.setItem('egs_last_subject', dataObj.subject_name); } catch (e) {}
+                    }
                   } else if (dataObj.type === 'error') {
                     throw new Error(dataObj.message);
                   }
@@ -9096,7 +10959,14 @@ export default function App() {
         await new Promise(r => setTimeout(r, 250));
       }
 
-      loadCurriculums();
+      await loadCurriculums();
+      loadSystemConfig(undefined, undefined, true);
+      setCurriculumStructures({});
+      broadcastCurriculumSync();
+      if (subjectName) {
+        const activeG = user ? user.grade_level : chatGrade;
+        fetchCurriculumStructure(activeG, subjectName, true);
+      }
     } catch (err: any) {
       setEmbeddingModal(prev => prev ? { ...prev, isRunning: false, error: err.message || 'حدث خطأ أثناء معالجة المتجهات.' } : null);
     }
@@ -9142,7 +11012,10 @@ export default function App() {
           setUploadSubject('');
           setUploadTrackId('');
           setUploadIsElective(false);
-          loadCurriculums();
+          await loadCurriculums();
+          loadSystemConfig(undefined, undefined, true);
+          setCurriculumStructures({});
+          broadcastCurriculumSync();
           return;
         } else {
           throw new Error(data.error || 'فشلت إضافة المادة');
@@ -9183,7 +11056,10 @@ export default function App() {
             const fileInput = document.getElementById('curriculum_file') as HTMLInputElement;
             if (fileInput) fileInput.value = '';
 
-            loadCurriculums();
+            await loadCurriculums();
+            loadSystemConfig(undefined, undefined, true);
+            setCurriculumStructures({});
+            broadcastCurriculumSync();
 
             if (currId && pendingCount > 0) {
               runProgressiveEmbedding(currId, savedSubject, pendingCount);
@@ -9234,7 +11110,10 @@ export default function App() {
 
         setAttachCurriculumModal(null);
         setAttachFile(null);
-        loadCurriculums();
+        await loadCurriculums();
+        loadSystemConfig(undefined, undefined, true);
+        setCurriculumStructures({});
+        broadcastCurriculumSync();
 
         if (currId && pendingCount > 0) {
           runProgressiveEmbedding(currId, subject, pendingCount);
@@ -9262,7 +11141,10 @@ export default function App() {
       });
       const data = await res.json();
       if (data.success) {
-        loadCurriculums();
+        await loadCurriculums();
+        loadSystemConfig(undefined, undefined, true);
+        setCurriculumStructures({});
+        broadcastCurriculumSync();
       }
     } catch (e) {
       console.error(e);
@@ -9302,7 +11184,7 @@ export default function App() {
         })
       });
       if (res.ok) {
-        loadSystemConfig();
+        loadSystemConfig(undefined, undefined, true);
       }
     } catch (e) {
       console.error('Error saving config settings:', e);
@@ -9342,7 +11224,7 @@ export default function App() {
           active_tracks: updatedTracks
         })
       });
-      loadSystemConfig();
+      loadSystemConfig(undefined, undefined, true);
     } catch (e) {
       console.error('Error updating active tracks:', e);
     } finally {
@@ -9400,7 +11282,10 @@ export default function App() {
       if (!res.ok) throw new Error(data.error);
       setRenamingCurriculumId(null);
       setRenameSubjectValue('');
-      loadCurriculums();
+      await loadCurriculums();
+      loadSystemConfig(undefined, undefined, true);
+      setCurriculumStructures({});
+      broadcastCurriculumSync();
     } catch (e: any) {
       alert(e.message || 'فشلت إعادة تسمية المنهج');
     }
@@ -10194,12 +12079,15 @@ export default function App() {
       const pendingCount = data.stats?.pendingEmbeddingCount || 0;
 
       setEditCurriculumId(null);
-      loadCurriculums();
-      loadSystemConfig();
+      await loadCurriculums();
+      loadSystemConfig(undefined, undefined, true);
+      setCurriculumStructures({});
+      broadcastCurriculumSync();
 
       if (currId && pendingCount > 0) {
         runProgressiveEmbedding(currId, subject, pendingCount);
       } else {
+        fetchCurriculumStructure(editGrade, subject, true);
         alert('تم تحديث محتوى المنهج الدراسي بنجاح.');
       }
     } catch (err: any) {
@@ -10380,7 +12268,10 @@ export default function App() {
         return next;
       });
 
-      fetchCurriculumStructure(unitsModalCurr.grade_level, unitsModalCurr.subject_name);
+      fetchCurriculumStructure(unitsModalCurr.grade_level, unitsModalCurr.subject_name, true);
+      loadCurriculums();
+      loadSystemConfig(undefined, undefined, true);
+      broadcastCurriculumSync();
 
       setTimeout(() => {
         setUnitsModalCurr(null);
@@ -10436,6 +12327,7 @@ export default function App() {
     const nextVal = !currentVal;
     setImproveAiLoading(true);
     setProfileMessage({ text: '', type: '' });
+    setPrivacyCardMessage({ text: '', type: '' });
 
     // Optimistically update user state and localStorage
     const optimisticUser = { ...user, improve_ai_opt_in: nextVal };
@@ -10445,11 +12337,12 @@ export default function App() {
     }
 
     try {
+      const activeToken = token || (typeof window !== 'undefined' ? localStorage.getItem('egs_token') : null);
       const res = await fetch('/api/auth/update-profile', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${activeToken}`
         },
         body: JSON.stringify({
           action: 'update-improve-ai',
@@ -10475,14 +12368,15 @@ export default function App() {
         localStorage.setItem('egs_user', JSON.stringify(updatedUser));
       }
 
-      setProfileMessage({
-        text: nextVal
-          ? 'تم تفعيل خيار المساعدة في تحسين استجابات الذكاء الاصطناعي بنجاح.'
-          : 'تم إيقاف مشاركة المحادثات لتحسين الذكاء الاصطناعي بنجاح.',
-        type: 'success'
-      });
+      const msg = nextVal
+        ? 'تم تفعيل خيار المساعدة في تحسين استجابات الذكاء الاصطناعي بنجاح.'
+        : 'تم إيقاف مشاركة المحادثات لتحسين الذكاء الاصطناعي وحجبها بنجاح.';
+      setProfileMessage({ text: msg, type: 'success' });
+      setPrivacyCardMessage({ text: msg, type: 'success' });
     } catch (err: any) {
-      setProfileMessage({ text: err.message || 'حدث خطأ أثناء تحديث الإعداد.', type: 'danger' });
+      const errMsg = err.message || 'حدث خطأ أثناء تحديث الإعداد.';
+      setProfileMessage({ text: errMsg, type: 'danger' });
+      setPrivacyCardMessage({ text: errMsg, type: 'danger' });
     } finally {
       setImproveAiLoading(false);
     }
@@ -10923,7 +12817,7 @@ export default function App() {
                         تسجيل الدخول
                       </button>
                     </div>
-                  ) : sessions.filter(s => !searchQuery || s.title?.toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
+                  ) : sessions.filter(s => !searchQuery || formatSessionTitle(s.title).toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
                     <div style={{ padding: '12px 8px', textAlign: 'center' }}>
                       <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, opacity: 0.7 }}>
                         {searchQuery ? 'لا توجد نتائج مطابقة' : 'لا توجد محادثات سابقة'}
@@ -10931,18 +12825,17 @@ export default function App() {
                     </div>
                   ) : (
                     sessions
-                      .filter(s => !searchQuery || s.title?.toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase()))
+                      .filter(s => !searchQuery || formatSessionTitle(s.title).toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase()))
                       .map((s) => (
                         <div
                           key={s.id}
                           onClick={() => {
-                            if (user && s.grade_level !== user.grade_level) {
-                              alert("لا يمكنك متابعة هذه المحادثة لأنها تنتمي لصف دراسي آخر.");
-                              return;
-                            }
                             setActiveSessionId(s.id);
-                            setActiveTab('chat');
-                            if ((s as any).mode === 'socratic' || (s as any).mode === 'detailed' || (s as any).mode === 'summary') {
+                            if (s.subject_name) {
+                              setChatSubject(s.subject_name);
+                              try { localStorage.setItem('egs_last_subject', s.subject_name); } catch (e) {}
+                            }
+                            if ((s as any).mode) {
                               setChatMode((s as any).mode);
                             }
                             if (isMobile) setSidebarOpen(false);
@@ -10961,7 +12854,7 @@ export default function App() {
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, overflow: 'hidden' }}>
                             <MessageSquare size={13} style={{ opacity: 0.6, flexShrink: 0 }} />
                             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>
-                              {s.title}
+                              {formatSessionTitle(s.title)}
                             </span>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
@@ -11020,7 +12913,7 @@ export default function App() {
               ...(user ? [
                 { icon: <Brain size={16} />, label: 'المدرب الذكي (الكروت)', action: () => { setActiveTab('flashcards'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'flashcards' },
               ] : []),
-              { icon: <Bookmark size={16} />, label: 'دفتري الذكي (القوانين)', action: () => { setShowNotebookModal(true); if (isMobile) setSidebarOpen(false); }, isActive: showNotebookModal },
+              { icon: <Bookmark size={16} />, label: 'دفتري الذكي (القوانين)', action: handleOpenNotebook, isActive: showNotebookModal },
             ].map((item: any, idx) => (
               <button
                 key={idx}
@@ -11320,7 +13213,7 @@ export default function App() {
                 {/* Notebook button */}
                 <button
                   type="button"
-                  onClick={() => setShowNotebookModal(true)}
+                  onClick={handleOpenNotebook}
                   className="header-icon-btn active-gold"
                   style={{ width: isMobile ? '38px' : '34px', height: isMobile ? '38px' : '34px' }}
                   title="دفتري الذكي (القوانين والملاحظات المحفوظة)"
@@ -11336,7 +13229,15 @@ export default function App() {
                 {/* Notifications */}
                 <div style={{ position: 'relative' }}>
                   <button
-                    onClick={() => { if (!isTourOpen) setShowNotifCenter(prev => !prev); }}
+                    onClick={() => {
+                      if (!isTourOpen) {
+                        setShowNotifCenter(prev => {
+                          const next = !prev;
+                          if (next) loadNotifications();
+                          return next;
+                        });
+                      }
+                    }}
                     className="header-icon-btn"
                     style={{ width: isMobile ? '38px' : '34px', height: isMobile ? '38px' : '34px' }}
                     title="مركز الإشعارات والتنبيهات"
@@ -11656,6 +13557,7 @@ export default function App() {
                       </div>
                     )}
 
+
                     {/* Student Study Hub: Subjects Quick Selector Bar */}
                     {renderSubjectSelectorBar()}
 
@@ -11719,7 +13621,8 @@ export default function App() {
                   </div>
                 </div>
               ) : (
-                <div style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: isMobile ? '14px' : '20px', width: '100%' }}>
+                <div style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: isMobile ? '14px' : '20px', width: '100%' }} className="chat-font-md">
+
                   {messages.map((msg, index) => {
                     const isMsgStreaming = Boolean(msg.isStreaming || (chatLoading && index === messages.length - 1));
                     const isHighlighted = highlightedMessageId === (msg.id || `idx-${index}`) ||
@@ -11784,25 +13687,62 @@ export default function App() {
                         {/* Message Bubble Body */}
                         {msg.sender === 'user' ? (
                           <div className="message-bubble message-bubble-user animate-scale-in">
-                            {/* Render attached image thumbnail if message has image prefix */}
+                            {/* Render attached image thumbnail or voice message bubble */}
                             {(() => {
-                              const imgMatch = msg.message.match(/^\[IMAGE_MESSAGE:([^;]+);([^;]+)(?:;([^\]]*))?\]([\s\S]*)$/);
+                              let text = msg.message || '';
+                              let imageThumbnail: { mime: string; base64: string } | undefined;
+
+                              // 1. Check for IMAGE_MESSAGE prefix
+                              const imgMatch = text.match(/\[IMAGE_MESSAGE:([^;]+);([^;]+)(?:;([^\]]*))?\]/);
                               if (imgMatch) {
-                                const mime = imgMatch[1];
-                                const base64 = imgMatch[2];
-                                const cleanText = imgMatch[4].trim();
+                                imageThumbnail = { mime: imgMatch[1], base64: imgMatch[2] };
+                                text = text.replace(imgMatch[0], '').trim();
+                              }
+
+                              // 2. Check for VOICE_MESSAGE prefix
+                              const voiceMatch = text.match(/\[?VOICE_MESSAGE:duration=([0-9.]+);mime=([\s\S]*?);audio=([\s\S]*?)\]([\s\S]*)/);
+                              if (voiceMatch) {
+                                const duration = parseFloat(voiceMatch[1]) || 0;
+                                const mime = voiceMatch[2] || 'audio/webm';
+                                const audioData = voiceMatch[3] || '';
+                                const transcript = voiceMatch[4]?.trim() || '';
+                                return (
+                                  <AudioMessageBubble
+                                    durationSeconds={duration}
+                                    mimeType={mime}
+                                    audioBase64={audioData}
+                                    transcript={transcript}
+                                    imageThumbnail={imageThumbnail}
+                                  />
+                                );
+                              }
+
+                              // 3. Fallback to image-only display
+                              if (imageThumbnail) {
                                 return (
                                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                     <img 
-                                      src={`data:${mime};base64,${base64}`} 
+                                      src={`data:${imageThumbnail.mime};base64,${imageThumbnail.base64}`} 
                                       alt="Student upload" 
                                       style={{ maxWidth: '100%', maxHeight: '220px', borderRadius: '10px', objectFit: 'contain', border: '1px solid rgba(255,255,255,0.2)' }}
                                     />
-                                    {cleanText && <div>{cleanText}</div>}
+                                    {text && <div>{renderFormattedMath(text)}</div>}
                                   </div>
                                 );
                               }
-                              return msg.message;
+
+                              // 4. Clean fallback if a message contains a voice message tag: never show raw base64
+                              if (text.includes('VOICE_MESSAGE:')) {
+                                const clean = text.replace(/\[?VOICE_MESSAGE:[^\]]*\]?/g, '').trim();
+                                return (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <Mic size={16} />
+                                    <span>{clean || 'رسالة صوتية'}</span>
+                                  </div>
+                                );
+                              }
+
+                              return renderFormattedMath(msg.message);
                             })()}
                           </div>
                         ) : (
@@ -11812,6 +13752,9 @@ export default function App() {
                                 content={msg.message}
                                 sender="ai"
                                 isStreaming={isMsgStreaming}
+                                onPlayEnglish={handlePlayEnglish}
+                                playingSpeechId={playingSpeechId}
+                                messageId={msg.id || `msg-${index}`}
                                 onGoToExams={async (exam: any) => {
                                   if (!exam.id) {
                                     try {
@@ -11896,6 +13839,7 @@ export default function App() {
                                 onSaveToNotebook={(cleanContent: string) => {
                                   handleBookmarkMessage({ sender: 'ai', message: cleanContent, id: msg.id, session_id: msg.session_id || activeSessionId || undefined }, index);
                                 }}
+                                isBookmarked={isMessageBookmarked(msg, index)}
                               />
                             </div>
                           ) : (
@@ -11936,6 +13880,43 @@ export default function App() {
                               <Copy size={isMobile ? 16 : 13} />
                               <span>نسخ الإجابة</span>
                             </button>
+                            {/* English Pronunciation Read-Aloud Button - strictly restricted to English content */}
+                            {isEnglishSpeechEligible(msg.message) && (
+                              <button
+                                type="button"
+                                onClick={() => handlePlayEnglish(msg.message, msg.id || `msg-${index}`)}
+                                style={{
+                                  background: playingSpeechId === (msg.id || `msg-${index}`) 
+                                    ? 'rgba(255, 183, 3, 0.16)' 
+                                    : 'rgba(0, 180, 216, 0.1)',
+                                  border: playingSpeechId === (msg.id || `msg-${index}`) 
+                                    ? '1px solid var(--primary-color)' 
+                                    : '1px solid rgba(0, 180, 216, 0.35)',
+                                  borderRadius: 'var(--radius-full)',
+                                  color: playingSpeechId === (msg.id || `msg-${index}`) ? 'var(--primary-color)' : 'var(--tech-cyan, #00B4D8)',
+                                  cursor: 'pointer',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  fontSize: isMobile ? '0.78rem' : '0.74rem',
+                                  fontWeight: 700,
+                                  padding: isMobile ? '7px 14px' : '6px 14px',
+                                  minHeight: '36px',
+                                  opacity: 1,
+                                  transition: 'var(--transition)',
+                                  boxShadow: playingSpeechId === (msg.id || `msg-${index}`) ? '0 0 12px rgba(255, 183, 3, 0.35)' : 'none'
+                                }}
+                                title="استماع للنطق الكامل بالإنجليزية (Read Aloud)"
+                                aria-label="استماع للنطق الكامل بالإنجليزية"
+                              >
+                                {playingSpeechId === (msg.id || `msg-${index}`) ? (
+                                  <VolumeX size={isMobile ? 16 : 14} style={{ color: 'var(--primary-color)' }} />
+                                ) : (
+                                  <Volume2 size={isMobile ? 16 : 14} />
+                                )}
+                                <span>{playingSpeechId === (msg.id || `msg-${index}`) ? 'إيقاف النطق' : 'نطق الرسالة بالإنجليزية'}</span>
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => handleBookmarkMessage(msg, index)}
@@ -11943,7 +13924,7 @@ export default function App() {
                                 background: isMobile ? 'var(--alpha-white-4)' : 'transparent',
                                 border: isMobile ? '1px solid var(--border-color)' : 'none',
                                 borderRadius: isMobile ? 'var(--radius-full)' : '0',
-                                color: bookmarkedMsgIndexes[index] ? '#FFB703' : 'var(--text-muted)',
+                                color: isMessageBookmarked(msg, index) ? '#FFB703' : 'var(--text-muted)',
                                 cursor: 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
@@ -11951,16 +13932,52 @@ export default function App() {
                                 fontSize: isMobile ? '0.78rem' : '0.7rem',
                                 padding: isMobile ? '7px 12px' : '0',
                                 minHeight: isMobile ? '36px' : 'auto',
-                                opacity: bookmarkedMsgIndexes[index] ? 1 : 0.85,
+                                opacity: isMessageBookmarked(msg, index) ? 1 : 0.85,
                                 transition: 'var(--transition)'
                               }}
                               onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-                              onMouseLeave={(e) => e.currentTarget.style.opacity = bookmarkedMsgIndexes[index] ? '1' : '0.85'}
-                              title="حفظ في دفتري الذكي وبنك القوانين"
+                              onMouseLeave={(e) => e.currentTarget.style.opacity = isMessageBookmarked(msg, index) ? '1' : '0.85'}
+                              title={isMessageBookmarked(msg, index) ? 'محفوظ في دفتري الذكي — اضغط للحذف من الدفتر' : 'حفظ في دفتري الذكي وبنك القوانين'}
                             >
-                              {bookmarkedMsgIndexes[index] ? <BookmarkCheck size={isMobile ? 16 : 14} color="#FFB703" /> : <Bookmark size={isMobile ? 16 : 14} />}
-                              <span>{bookmarkedMsgIndexes[index] ? 'محفوظ في دفتري' : 'حفظ في دفتري'}</span>
+                              {isMessageBookmarked(msg, index) ? <BookmarkCheck size={isMobile ? 16 : 14} color="#FFB703" /> : <Bookmark size={isMobile ? 16 : 14} />}
+                              <span>{isMessageBookmarked(msg, index) ? 'محفوظ في دفتري' : 'حفظ في دفتري'}</span>
                             </button>
+                            {/* Stream Retry Button on Error / Partial Failure */}
+                            {(msg.hasError || msg.message.includes('خطأ') || msg.message.includes('Error')) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  let queryText = lastFailedUserQuery?.text || '';
+                                  for (let i = index - 1; i >= 0; i--) {
+                                    if (messages[i].sender === 'user') {
+                                      queryText = messages[i].message;
+                                      break;
+                                    }
+                                  }
+                                  if (queryText) {
+                                    handleSendMessage(undefined, queryText);
+                                  }
+                                }}
+                                style={{
+                                  background: 'rgba(239, 68, 68, 0.12)',
+                                  border: '1px solid #ef4444',
+                                  borderRadius: isMobile ? 'var(--radius-full)' : '6px',
+                                  color: '#ef4444',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  fontSize: isMobile ? '0.78rem' : '0.7rem',
+                                  padding: isMobile ? '7px 12px' : '4px 8px',
+                                  minHeight: isMobile ? '36px' : 'auto',
+                                  fontWeight: 700
+                                }}
+                                title="إعادة إرسال السؤال والمحاولة مرة أخرى"
+                              >
+                                <RotateCcw size={isMobile ? 16 : 13} />
+                                <span>إعادة المحاولة</span>
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => {
@@ -12342,7 +14359,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* 3 Pricing Cards Grid */}
+                  {/* 3 Student Pricing Cards Grid */}
                   <div id="tour-subscriptions-plans" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '20px' }}>
                     
                     {/* Plan 1: 1 Month (60 EGP) */}
@@ -12651,7 +14668,7 @@ export default function App() {
 
               {/* Support & Contact Banner */}
               <div style={{ textAlign: 'center', padding: '16px', background: 'var(--primary-light)', borderRadius: 'var(--radius-lg)', color: 'var(--primary-color)', fontSize: '0.88rem', fontWeight: 700 }}>
-                تحتاج مساعدة أو استفسار بخصوص الاشتراكات؟ تواصل معنا عبر الهاتف/واتساب: <a href="tel:01037220587" style={{ color: 'inherit', textDecoration: 'underline', direction: 'ltr', display: 'inline-block' }}>01037220587</a> أو البريد الإلكتروني: <a href="mailto:sohaib572010@gmail.com" style={{ color: 'inherit', textDecoration: 'underline' }}>sohaib572010@gmail.com</a>
+                تحتاج مساعدة أو استفسار بخصوص الاشتراكات؟ تواصل معنا عبر الهاتف/واتساب: <a href="tel:01037220587" style={{ color: 'inherit', textDecoration: 'underline', direction: 'ltr', display: 'inline-block' }}>01037220587</a> أو البريد الإلكتروني: <a href="mailto:business@egsaiedu.com" style={{ color: 'inherit', textDecoration: 'underline' }}>business@egsaiedu.com</a>
               </div>
 
               {/* Website Footer Links */}
@@ -16216,6 +18233,23 @@ export default function App() {
                   </button>
                 </div>
 
+                {privacyCardMessage.text && (
+                  <div style={{
+                    padding: '10px 14px',
+                    borderRadius: 'var(--radius-sm)',
+                    background: privacyCardMessage.type === 'success' ? 'rgba(42, 157, 143, 0.1)' : 'rgba(230, 57, 70, 0.1)',
+                    color: privacyCardMessage.type === 'success' ? 'var(--success-color)' : 'var(--danger-color)',
+                    fontSize: '0.82rem',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px'
+                  }}>
+                    {privacyCardMessage.type === 'success' ? <CheckCircle size={15} /> : <AlertCircle size={15} />}
+                    <span>{privacyCardMessage.text}</span>
+                  </div>
+                )}
+
                 {/* Explanation */}
                 <div style={{
                   padding: '14px 16px',
@@ -16574,11 +18608,18 @@ export default function App() {
                                       <button
                                         type="button"
                                         onClick={() => {
+                                          const examSubj = selectedExam?.subject_name;
                                           setSelectedExam(null);
                                           setExamResult(null);
                                           setActiveTab('chat');
                                           setChatMode('step_by_step');
-                                          setInputMessage(`اشرح لي بالتفصيل وبالمسائل والقوانين مفهوم "${c}" في مادة ${selectedExam?.subject_name || chatSubject}.`);
+                                          if (examSubj) {
+                                            setActiveSessionId(null);
+                                            setMessages([]);
+                                            setChatSubject(examSubj);
+                                            try { localStorage.setItem('egs_last_subject', examSubj); } catch (e) {}
+                                          }
+                                          setInputMessage(`اشرح لي بالتفصيل وبالمسائل والقوانين مفهوم "${c}" في مادة ${examSubj || chatSubject}.`);
                                           if (textareaRef.current) textareaRef.current.focus();
                                         }}
                                         style={{
@@ -16603,6 +18644,83 @@ export default function App() {
                               </div>
                             </div>
                           </div>
+
+                          {/* 1-Click Remedial Practice Quiz Generator */}
+                          {(examResult.diagnostic.revision_concepts || []).length > 0 && (
+                            <button
+                              type="button"
+                              disabled={generatingRemedialExam}
+                              onClick={async () => {
+                                if (generatingRemedialExam) return;
+                                setGeneratingRemedialExam(true);
+                                try {
+                                  const storedToken = localStorage.getItem('egs_token') || token;
+                                  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                                  if (storedToken) headers['Authorization'] = `Bearer ${storedToken}`;
+                                  if (deviceId) headers['x-device-id'] = deviceId;
+                                  const res = await fetch('/api/exams/generate', {
+                                    method: 'POST',
+                                    headers,
+                                    body: JSON.stringify({
+                                      subject_name: selectedExam?.subject_name || chatSubject,
+                                      grade_level: selectedExam?.grade_level || (user ? user.grade_level : chatGrade),
+                                      mode: 'remedial',
+                                      remedial_concepts: examResult.diagnostic.revision_concepts
+                                    })
+                                  });
+                                  const data = await res.json();
+                                  if (res.ok && data.exam) {
+                                    setSelectedExam(data.exam);
+                                    setActiveExamAnswers({});
+                                    setExamResult(null);
+                                    const durationSec = (data.exam.questions?.length || 3) * 120;
+                                    if (data.exam.id) {
+                                      localStorage.setItem('egs_active_exam_id', data.exam.id);
+                                      localStorage.setItem('egs_active_exam_time', String(durationSec));
+                                    }
+                                    setExamTimeRemaining(durationSec);
+                                  } else {
+                                    alert(data.error || 'تعذر توليد الاختبار العلاجي');
+                                  }
+                                } catch (e) {
+                                  console.error(e);
+                                  alert('حدث خطأ أثناء إعداد الاختبار العلاجي');
+                                } finally {
+                                  setGeneratingRemedialExam(false);
+                                }
+                              }}
+                              style={{
+                                width: '100%',
+                                padding: '10px 16px',
+                                borderRadius: '10px',
+                                fontWeight: 800,
+                                fontSize: '0.86rem',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                gap: '8px',
+                                marginTop: '14px',
+                                background: 'linear-gradient(135deg, #FFB703 0%, #f97316 100%)',
+                                color: '#0D1B2A',
+                                border: 'none',
+                                cursor: 'pointer',
+                                boxShadow: '0 4px 14px rgba(255, 183, 3, 0.25)',
+                                transition: 'var(--transition)'
+                              }}
+                            >
+                              {generatingRemedialExam ? (
+                                <>
+                                  <Loader2 size={16} className="animate-spin" />
+                                  <span>جاري إعداد الاختبار العلاجي بالذكاء الاصطناعي...</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles size={16} />
+                                  <span>بدء تدريب علاجي فوري (3 أسئلة لترسيخ المفاهيم التي تحتاج مراجعة)</span>
+                                </>
+                              )}
+                            </button>
+                          )}
                         </div>
                       )}
 
@@ -16765,24 +18883,89 @@ export default function App() {
                         </div>
                       </div>
 
+                      {/* Question Navigation Matrix */}
+                      <div className="exam-nav-matrix">
+                        <div style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                          <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>مصفوفة التنقل بين الأسئلة:</span>
+                          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--primary-color)' }} />
+                              تمت الإجابة ({(selectedExam.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length})
+                            </span>
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#FFB703' }} />
+                              مُعلّم للمراجعة ({Object.values(flaggedExamQuestions).filter(Boolean).length})
+                            </span>
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          {(selectedExam.questions || []).map((q: any, qIdx: number) => {
+                            const isAnswered = activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '';
+                            const isFlagged = Boolean(flaggedExamQuestions[q.id]);
+                            return (
+                              <button
+                                key={q.id || qIdx}
+                                type="button"
+                                onClick={() => {
+                                  const el = document.getElementById(`exam-q-${q.id || qIdx}`);
+                                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                }}
+                                className={`exam-nav-btn ${isFlagged ? 'flagged' : (isAnswered ? 'answered' : '')}`}
+                                title={isFlagged ? `سؤال ${qIdx + 1} (مُعلّم للمراجعة)` : (isAnswered ? `سؤال ${qIdx + 1} (تمت الإجابة)` : `سؤال ${qIdx + 1} (لم يُجب بعد)`)}
+                              >
+                                {qIdx + 1}
+                                {isFlagged && (
+                                  <span style={{ position: 'absolute', top: '3px', right: '3px', width: '6px', height: '6px', borderRadius: '50%', background: '#FFB703' }} />
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
                       {/* Questions List */}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
                         {(selectedExam.questions || []).map((q: any, qIdx: number) => {
                           const isEnglishExam = isEnglishSubject(selectedExam?.subject_name) || isEnglishText(q?.question);
                           return (
-                          <div key={q.id || qIdx} style={{
+                          <div id={`exam-q-${q.id || qIdx}`} key={q.id || qIdx} style={{
                             background: 'var(--sidebar-bg)',
                             padding: '20px',
                             borderRadius: '12px',
-                            border: '1px solid var(--border-color)',
+                            border: flaggedExamQuestions[q.id] ? '1.5px solid #FFB703' : '1px solid var(--border-color)',
                             direction: isEnglishExam ? 'ltr' : 'rtl',
                             textAlign: isEnglishExam ? 'left' : 'right'
                           }}>
-                            <div style={{ display: 'flex', gap: '8px', marginBottom: '14px', alignItems: 'flex-start' }}>
-                              <span style={{ background: 'var(--primary-color)', color: 'var(--text-on-primary)', borderRadius: '6px', padding: '2px 8px', fontSize: '0.78rem', fontWeight: 800 }}>
-                                {isEnglishExam ? `Q ${qIdx + 1}` : `س ${formatArabicNumerals(String(qIdx + 1), false)}`}
-                              </span>
-                              <span style={{ fontWeight: 700, fontSize: '0.98rem', lineHeight: '1.5' }}>{renderFormattedMath(q.question)}</span>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', gap: '8px' }}>
+                              <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', flex: 1 }}>
+                                <span style={{ background: 'var(--primary-color)', color: 'var(--text-on-primary)', borderRadius: '6px', padding: '2px 8px', fontSize: '0.78rem', fontWeight: 800 }}>
+                                  {isEnglishExam ? `Q ${qIdx + 1}` : `س ${formatArabicNumerals(String(qIdx + 1), false)}`}
+                                </span>
+                                <span style={{ fontWeight: 700, fontSize: '0.98rem', lineHeight: '1.5' }}>{renderFormattedMath(q.question)}</span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFlaggedExamQuestions(prev => ({ ...prev, [q.id]: !prev[q.id] }));
+                                }}
+                                style={{
+                                  background: flaggedExamQuestions[q.id] ? 'rgba(255, 183, 3, 0.18)' : 'transparent',
+                                  border: flaggedExamQuestions[q.id] ? '1px solid #FFB703' : '1px solid var(--border-color)',
+                                  color: flaggedExamQuestions[q.id] ? '#FFB703' : 'var(--text-muted)',
+                                  borderRadius: '6px',
+                                  padding: '4px 8px',
+                                  fontSize: '0.74rem',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  cursor: 'pointer',
+                                  flexShrink: 0
+                                }}
+                                title={flaggedExamQuestions[q.id] ? 'إلغاء التعليم للمراجعة' : 'تعليم السؤال للمراجعة لاحقاً'}
+                              >
+                                <Star size={13} fill={flaggedExamQuestions[q.id] ? '#FFB703' : 'none'} />
+                                <span>{flaggedExamQuestions[q.id] ? 'مُعلّم' : 'تعليم'}</span>
+                              </button>
                             </div>
 
                             {/* Answer Fields depending on type */}
@@ -16892,8 +19075,16 @@ export default function App() {
                       <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '18px', display: isMobile ? 'none' : 'flex', justifyContent: 'flex-end', gap: '10px' }}>
                         <button
                           type="button"
-                          onClick={handleSubmitExam}
-                          disabled={gradingLoading || Object.keys(activeExamAnswers).length < (selectedExam?.questions?.length || 0)}
+                          onClick={() => {
+                            const totalQ = selectedExam?.questions?.length || 0;
+                            const answeredQ = (selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length;
+                            if (answeredQ < totalQ) {
+                              setShowUnansweredConfirmModal(true);
+                            } else {
+                              handleSubmitExam();
+                            }
+                          }}
+                          disabled={gradingLoading}
                           className="btn-primary"
                           style={{
                             padding: '12px 26px',
@@ -16929,13 +19120,21 @@ export default function App() {
                       <div className="exam-progress-chip">
                         <span>تمت الإجابة:</span>
                         <strong style={{ color: 'var(--primary-color)' }}>
-                          {Object.keys(activeExamAnswers).length} / {selectedExam?.questions?.length || 0}
+                          {(selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length} / {selectedExam?.questions?.length || 0}
                         </strong>
                       </div>
                       <button
                         type="button"
-                        onClick={handleSubmitExam}
-                        disabled={gradingLoading || Object.keys(activeExamAnswers).length < (selectedExam?.questions?.length || 0)}
+                        onClick={() => {
+                          const totalQ = selectedExam?.questions?.length || 0;
+                          const answeredQ = (selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length;
+                          if (answeredQ < totalQ) {
+                            setShowUnansweredConfirmModal(true);
+                          } else {
+                            handleSubmitExam();
+                          }
+                        }}
+                        disabled={gradingLoading}
                         className="btn-primary"
                         style={{
                           padding: '8px 16px',
@@ -16962,6 +19161,45 @@ export default function App() {
                           </>
                         )}
                       </button>
+                    </div>
+                  )}
+
+                  {/* Confirmation Modal for Submitting with Unanswered Questions */}
+                  {showUnansweredConfirmModal && (
+                    <div className="modal-backdrop" style={{ zIndex: 1200 }} onClick={() => setShowUnansweredConfirmModal(false)}>
+                      <div className="glass-strong animate-scale-in" onClick={e => e.stopPropagation()} style={{ maxWidth: '440px', width: '92%', padding: '24px', borderRadius: '16px', background: 'var(--card-bg)', border: '1px solid var(--border-color)', textAlign: 'center', boxShadow: 'var(--shadow-xl)' }}>
+                        <div style={{ width: '48px', height: '48px', borderRadius: '50%', background: 'rgba(255, 183, 3, 0.15)', color: '#FFB703', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 12px' }}>
+                          <AlertTriangle size={24} />
+                        </div>
+                        <h3 style={{ fontSize: '1.15rem', fontWeight: 800, margin: '0 0 8px', color: 'var(--text-main)' }}>
+                          تنبيه: أسئلة متبقية بدون إجابة
+                        </h3>
+                        <p style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', lineHeight: '1.6', margin: '0 0 20px' }}>
+                          لقد أجبت عن <strong>{(selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length}</strong> من أصل <strong>{selectedExam?.questions?.length || 0}</strong> أسئلة.<br />
+                          يوجد <strong>{(selectedExam?.questions?.length || 0) - (selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length}</strong> سؤال بدون إجابة. هل ترغب في العودة للإكمال أم تسليم الامتحان فوراً؟
+                        </p>
+                        <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => setShowUnansweredConfirmModal(false)}
+                            className="btn-secondary"
+                            style={{ flex: 1, padding: '10px', borderRadius: '8px', fontWeight: 700, fontSize: '0.86rem', cursor: 'pointer' }}
+                          >
+                            العودة للحل
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowUnansweredConfirmModal(false);
+                              handleSubmitExam();
+                            }}
+                            className="btn-primary"
+                            style={{ flex: 1, padding: '10px', borderRadius: '8px', fontWeight: 700, fontSize: '0.86rem', background: '#ef4444', borderColor: '#ef4444', color: '#fff', cursor: 'pointer' }}
+                          >
+                            تسليم الامتحان كما هو
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -17557,9 +19795,36 @@ export default function App() {
                             <div className={`flashcard-container ${isCardFlipped ? 'flipped' : ''}`} style={{ width: '100%', height: '100%' }}>
                               <div className="flashcard-front" style={{ position: 'relative', padding: isMobile ? '16px 14px' : '20px 24px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '8px', alignItems: 'center' }}>
-                                  <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--primary-color)', fontWeight: 800 }}>
-                                    {activeCard?.deck_title || 'كارت مراجعة'}
-                                  </span>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                    <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--primary-color)', fontWeight: 800 }}>
+                                      {activeCard?.deck_title || 'كارت مراجعة'}
+                                    </span>
+                                    {isEnglishSpeechEligible(activeCard?.question) && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handlePlayEnglish(activeCard?.question, `card-q-${activeCard?.id}`);
+                                        }}
+                                        style={{
+                                          background: 'rgba(0, 180, 216, 0.12)',
+                                          border: '1px solid var(--border-primary)',
+                                          color: 'var(--primary-color)',
+                                          borderRadius: '6px',
+                                          padding: '2px 8px',
+                                          cursor: 'pointer',
+                                          fontSize: '0.72rem',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '4px'
+                                        }}
+                                        title="استماع للنطق (Listen)"
+                                      >
+                                        <Volume2 size={12} />
+                                        <span>نطق</span>
+                                      </button>
+                                    )}
+                                  </div>
                                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                                     <button
                                       onClick={() => setEditingCard(activeCard)}
@@ -17589,6 +19854,31 @@ export default function App() {
                                 <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '6px', alignItems: 'center' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--success-color)', fontWeight: 800 }}>الإجابة النموذجية</span>
+                                    {isEnglishSpeechEligible(activeCard?.answer) && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handlePlayEnglish(activeCard?.answer, `card-a-${activeCard?.id}`);
+                                        }}
+                                        style={{
+                                          background: 'rgba(0, 180, 216, 0.12)',
+                                          border: '1px solid var(--border-primary)',
+                                          color: 'var(--primary-color)',
+                                          borderRadius: '6px',
+                                          padding: '2px 8px',
+                                          cursor: 'pointer',
+                                          fontSize: '0.72rem',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: '4px'
+                                        }}
+                                        title="استماع لنطق الإجابة (Listen)"
+                                      >
+                                        <Volume2 size={12} />
+                                        <span>نطق</span>
+                                      </button>
+                                    )}
                                     <button
                                       onClick={(e) => {
                                         e.stopPropagation();
@@ -20994,7 +23284,7 @@ export default function App() {
                   if (csConversationSubjectFilter !== 'all' && s.subject !== csConversationSubjectFilter) return false;
                   if (csConversationSearch.trim()) {
                     const query = csConversationSearch.trim().toLowerCase();
-                    const titleMatch = (s.title || '').toLowerCase().includes(query);
+                    const titleMatch = formatSessionTitle(s.title || '').toLowerCase().includes(query);
                     const hasMatchingMsg = messages.some((m: any) => m.session_id === s.id && (m.message || '').toLowerCase().includes(query));
                     if (!titleMatch && !hasMatchingMsg) return false;
                   }
@@ -21125,7 +23415,7 @@ export default function App() {
                               >
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                   <span style={{ fontSize: '0.82rem', fontWeight: 800, color: isCurrent ? 'var(--primary-color)' : 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '190px' }}>
-                                    {s.title || 'محادثة عامة'}
+                                    {formatSessionTitle(s.title || 'محادثة عامة')}
                                   </span>
                                   {s.subject && (
                                     <span style={{
@@ -21230,7 +23520,36 @@ export default function App() {
                                     wordBreak: 'break-word',
                                     fontFamily: 'var(--font-arabic)'
                                   }}>
-                                    {msg.message}
+                                    {(() => {
+                                      const text = msg.message || '';
+                                      if (text.includes('VOICE_MESSAGE:')) {
+                                        const voiceMatch = text.match(/\[?VOICE_MESSAGE:duration=([0-9.]+);mime=([\s\S]*?);audio=([\s\S]*?)\]([\s\S]*)/);
+                                        if (voiceMatch) {
+                                          const duration = parseFloat(voiceMatch[1]) || 0;
+                                          const transcript = voiceMatch[4]?.trim() || '';
+                                          return (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--primary-color)', fontWeight: 700, fontSize: '0.8rem' }}>
+                                                <Mic size={14} />
+                                                <span>رسالة صوتية ({Math.round(duration)} ثانية)</span>
+                                              </div>
+                                              {transcript && (
+                                                <div style={{ fontSize: '0.82rem', color: 'var(--text-main)', background: 'var(--alpha-white-4)', padding: '6px 10px', borderRadius: '6px' }}>
+                                                  {transcript}
+                                                </div>
+                                              )}
+                                            </div>
+                                          );
+                                        }
+                                        const clean = text.replace(/\[?VOICE_MESSAGE:[^\]]*\]?/g, '').trim();
+                                        return clean || 'رسالة صوتية';
+                                      }
+                                      if (text.includes('IMAGE_MESSAGE:')) {
+                                        const clean = text.replace(/\[IMAGE_MESSAGE:[^\]]*\]/g, '').trim();
+                                        return clean || 'صورة مرفقة';
+                                      }
+                                      return text;
+                                    })()}
                                   </div>
                                 </div>
                               );

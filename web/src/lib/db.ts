@@ -54,6 +54,7 @@ export interface Profile {
   pwa_installed_at?: string | null;
   pwa_platform?: 'android' | 'ios' | 'desktop' | 'unknown' | null;
   improve_ai_opt_in?: boolean;
+  streak_shields?: number;
 }
 
 export interface PendingRegistration {
@@ -776,7 +777,7 @@ export function invalidateDashboardStatsCache() {
   lastDashboardStatsTime = 0;
 }
 
-// In-memory public system configuration caching (60s TTL)
+// In-memory public system configuration caching (30s TTL fallback)
 let cachedPublicConfig: {
   websiteLink: string;
   activeGradeLevels: string[];
@@ -785,19 +786,25 @@ let cachedPublicConfig: {
   allCurriculums: Curriculum[];
 } | null = null;
 let lastPublicConfigTime = 0;
-const PUBLIC_CONFIG_CACHE_TTL_MS = 60000; // 60 seconds
+const PUBLIC_CONFIG_CACHE_TTL_MS = 30000; // 30 seconds fallback
 
 export function invalidatePublicConfigCache() {
-  cachedPublicConfig = null;
-  lastPublicConfigTime = 0;
+  invalidateCurriculumsCache();
 }
 
-// In-memory broadcast notifications caching (30s TTL)
+export function getPublicConfigVersion(): number {
+  return lastPublicConfigTime;
+}
+
+// In-memory notifications caching (60s TTL)
 let cachedBroadcastNotifications: { target: string; data: AppNotification[]; time: number } | null = null;
-const BROADCAST_NOTIF_CACHE_TTL_MS = 30000;
+const BROADCAST_NOTIF_CACHE_TTL_MS = 60000;
+const cachedUserNotifications = new Map<string, { data: AppNotification[]; time: number }>();
+const USER_NOTIF_CACHE_TTL_MS = 60000;
 
 export function invalidateNotificationsCache() {
   cachedBroadcastNotifications = null;
+  cachedUserNotifications.clear();
 }
 
 // In-memory leaderboard caching (15s TTL)
@@ -809,13 +816,24 @@ export function invalidateLeaderboardCache() {
   invalidateUserRankCache();
 }
 
-// In-memory curriculums list caching (60s TTL)
+// In-memory curriculums list caching (30s TTL fallback)
 let cachedCurriculums: { data: Curriculum[]; time: number } | null = null;
-const CURRICULUMS_CACHE_TTL_MS = 60000;
+const CURRICULUMS_CACHE_TTL_MS = 30000; // 30 seconds fallback
+
+let onCurriculumsInvalidated: (() => void) | null = null;
+export function registerCurriculumInvalidator(fn: () => void) {
+  onCurriculumsInvalidated = fn;
+}
 
 export function invalidateCurriculumsCache() {
   cachedCurriculums = null;
   cachedPublicConfig = null;
+  lastPublicConfigTime = Date.now();
+  if (onCurriculumsInvalidated) {
+    try {
+      onCurriculumsInvalidated();
+    } catch (e) {}
+  }
 }
 
 // Single-flight request coalescing for user leaderboard rank (deduplicates concurrent in-flight requests)
@@ -941,6 +959,10 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
       
       if (diffDays === 1) {
         newStreak = (profile.study_streak || 1) + 1;
+      } else if (diffDays === 2 && (profile.streak_shields ?? 1) > 0) {
+        // Missed exactly 1 day — consume 1 shield to protect the streak
+        profile.streak_shields = Math.max(0, (profile.streak_shields ?? 1) - 1);
+        newStreak = (profile.study_streak || 1) + 1;
       } else if (diffDays > 1) {
         newStreak = 1;
       }
@@ -957,12 +979,16 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
   if (profile.improve_ai_opt_in === undefined) {
     profile.improve_ai_opt_in = true;
   }
+  if (profile.streak_shields === undefined) {
+    profile.streak_shields = 1;
+  }
 
   if (profileModified) {
     const updatePayload: Partial<Profile> = {
       last_active_date: profile.last_active_date,
       coins: toPreciseCoins(profile.coins ?? 0.0),
       study_streak: profile.study_streak,
+      streak_shields: profile.streak_shields,
       plan_type: profile.plan_type,
       subscription_status: profile.subscription_status,
       subscription_start_date: profile.subscription_start_date,
@@ -973,7 +999,7 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
     if (supabase) {
       const { error } = await supabase.from('profiles').update(updatePayload).eq('id', profile.id);
       if (error) {
-        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, ...basePayload } = updatePayload;
+        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, streak_shields, ...basePayload } = updatePayload;
         await supabase.from('profiles').update(basePayload).eq('id', profile.id);
       }
     } else {
@@ -1027,17 +1053,106 @@ function normalizeSubjectAlias(gradeLevel: string, subjectName: string): string 
   return s;
 }
 
+// AI Response Quality Improvement Opt-Out Privacy Store
+let cachedOptedOutUserIds: Set<string> | null = null;
+let lastOptedOutFetchTime = 0;
+const OPT_OUTS_CACHE_TTL_MS = 60000;
+
+export async function isUserOptedOutOfAiImprovement(userId: string): Promise<boolean> {
+  const set = await getAllOptedOutUserIds();
+  return set.has(userId);
+}
+
+export async function getAllOptedOutUserIds(): Promise<Set<string>> {
+  if (cachedOptedOutUserIds && (Date.now() - lastOptedOutFetchTime < OPT_OUTS_CACHE_TTL_MS)) {
+    return cachedOptedOutUserIds;
+  }
+
+  const set = new Set<string>();
+
+  // Check localDB memory store first
+  try {
+    const local = readLocalDB();
+    if (local?.profiles && Array.isArray(local.profiles)) {
+      for (const p of local.profiles) {
+        if (p.improve_ai_opt_in === false) {
+          set.add(p.id);
+        }
+      }
+    }
+  } catch {}
+
+  // If Supabase is enabled, load privacy opt-outs from system_settings
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from('system_settings').select('key, value').like('key', 'privacy_opt_out:%');
+      if (!error && Array.isArray(data)) {
+        for (const row of data) {
+          const uid = row.key.replace('privacy_opt_out:', '');
+          if (uid && row.value === 'true') {
+            set.add(uid);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  cachedOptedOutUserIds = set;
+  lastOptedOutFetchTime = Date.now();
+  return set;
+}
+
+export async function setUserOptOutFallback(userId: string, optIn: boolean): Promise<void> {
+  if (!cachedOptedOutUserIds) {
+    cachedOptedOutUserIds = new Set<string>();
+  }
+
+  if (!optIn) {
+    cachedOptedOutUserIds.add(userId);
+  } else {
+    cachedOptedOutUserIds.delete(userId);
+  }
+
+  // Update local DB
+  try {
+    const local = readLocalDB();
+    const p = (local.profiles || []).find((x: Profile) => x.id === userId);
+    if (p) {
+      p.improve_ai_opt_in = optIn;
+      writeLocalDB(local);
+    }
+  } catch {}
+
+  // Update Supabase system_settings
+  if (supabase) {
+    const key = `privacy_opt_out:${userId}`;
+    try {
+      if (!optIn) {
+        await supabase.from('system_settings').upsert({ key, value: 'true' });
+      } else {
+        await supabase.from('system_settings').delete().eq('key', key);
+      }
+    } catch {}
+  }
+}
+
 export const db = {
   // Profiles
   async getProfile(id: string): Promise<Profile | null> {
     if (supabase) {
       const { data, error } = await supabase.from('profiles').select('*').eq('id', id).single();
       if (error || !data) return null;
+      if (data.improve_ai_opt_in === undefined) {
+        data.improve_ai_opt_in = !(await isUserOptedOutOfAiImprovement(id));
+      }
       return await checkAndResetDailyCoins(data);
     } else {
       const data = readLocalDB();
       const profile = data.profiles.find((p: Profile) => p.id === id) || null;
       if (!profile) return null;
+      if (profile.improve_ai_opt_in === undefined) {
+        profile.improve_ai_opt_in = !(await isUserOptedOutOfAiImprovement(id));
+      }
       return await checkAndResetDailyCoins(profile);
     }
   },
@@ -1046,11 +1161,17 @@ export const db = {
     if (supabase) {
       const { data, error } = await supabase.from('profiles').select('*').eq('phone', phone).maybeSingle();
       if (error || !data) return null;
+      if (data.improve_ai_opt_in === undefined) {
+        data.improve_ai_opt_in = !(await isUserOptedOutOfAiImprovement(data.id));
+      }
       return await checkAndResetDailyCoins(data);
     } else {
       const data = readLocalDB();
       const profile = data.profiles.find((p: Profile) => p.phone === phone) || null;
       if (!profile) return null;
+      if (profile.improve_ai_opt_in === undefined) {
+        profile.improve_ai_opt_in = !(await isUserOptedOutOfAiImprovement(profile.id));
+      }
       return await checkAndResetDailyCoins(profile);
     }
   },
@@ -1059,11 +1180,17 @@ export const db = {
     if (supabase) {
       const { data, error } = await supabase.from('profiles').select('*').eq('email', email.toLowerCase()).maybeSingle();
       if (error || !data) return null;
+      if (data.improve_ai_opt_in === undefined) {
+        data.improve_ai_opt_in = !(await isUserOptedOutOfAiImprovement(data.id));
+      }
       return await checkAndResetDailyCoins(data);
     } else {
       const data = readLocalDB();
       const profile = data.profiles.find((p: Profile) => p.email?.toLowerCase() === email.toLowerCase()) || null;
       if (!profile) return null;
+      if (profile.improve_ai_opt_in === undefined) {
+        profile.improve_ai_opt_in = !(await isUserOptedOutOfAiImprovement(profile.id));
+      }
       return await checkAndResetDailyCoins(profile);
     }
   },
@@ -1088,7 +1215,7 @@ export const db = {
     if (supabase) {
       let { data, error } = await supabase.from('profiles').insert(newProfile).select().single();
       if (error) {
-        const { welcome_reward_claimed, free_plan_claimed, apology_compensation_claimed, apology_dismissed, ...safeProfile } = newProfile as any;
+        const { welcome_reward_claimed, free_plan_claimed, apology_compensation_claimed, apology_dismissed, improve_ai_opt_in, ...safeProfile } = newProfile as any;
         let retry = await supabase.from('profiles').insert(safeProfile).select().single();
         if (retry.error) {
           const missingMatch = retry.error.message?.match(/Could not find the '([^']+)' column/);
@@ -1394,6 +1521,39 @@ export const db = {
   },
 
   // Curriculum Management
+  async syncCurriculumStateMutation(curriculumId?: string, isNew: boolean = false, isDelete: boolean = false) {
+    invalidateCurriculumsCache();
+    try {
+      const versionStr = Date.now().toString();
+      await this.setSystemSetting('curriculum_version', versionStr);
+
+      if (curriculumId) {
+        const activeCurrsRaw = await this.getSystemSetting('active_curriculum_ids');
+        if (activeCurrsRaw) {
+          let activeIds: string[] = [];
+          try {
+            const parsed = JSON.parse(activeCurrsRaw);
+            if (Array.isArray(parsed)) activeIds = parsed;
+          } catch (e) {}
+
+          if (isDelete) {
+            if (activeIds.includes(curriculumId)) {
+              activeIds = activeIds.filter(id => id !== curriculumId);
+              await this.setSystemSetting('active_curriculum_ids', JSON.stringify(activeIds));
+            }
+          } else if (isNew && activeIds.length > 0 && !activeIds.includes(curriculumId)) {
+            activeIds.push(curriculumId);
+            await this.setSystemSetting('active_curriculum_ids', JSON.stringify(activeIds));
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('syncCurriculumStateMutation notice:', e);
+    } finally {
+      invalidateCurriculumsCache();
+    }
+  },
+
   async getCurriculums(): Promise<Curriculum[]> {
     if (cachedCurriculums && (Date.now() - cachedCurriculums.time < CURRICULUMS_CACHE_TTL_MS)) {
       return cachedCurriculums.data;
@@ -1500,7 +1660,7 @@ export const db = {
           throw chunkError;
         }
       }
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(curriculumId, true, false);
       return newCurriculum;
     } else {
       const data = readLocalDB();
@@ -1524,7 +1684,7 @@ export const db = {
       data.curriculum_chunks.push(...newChunks);
 
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(curriculumId, true, false);
       return newCurriculum;
     }
   },
@@ -1553,7 +1713,7 @@ export const db = {
     if (supabase) {
       const { error: currError } = await supabase.from('curriculums').insert(newCurriculum);
       if (currError) throw currError;
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(curriculumId, false, false);
       return newCurriculum;
     } else {
       const data = readLocalDB();
@@ -1563,7 +1723,7 @@ export const db = {
       }
       data.curriculums.push(newCurriculum);
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(curriculumId, false, false);
       return newCurriculum;
     }
   },
@@ -1632,7 +1792,7 @@ export const db = {
         if (chunkError) throw chunkError;
       }
 
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(curriculumId, true, false);
       return {
         ...existing,
         file_name: fileName,
@@ -1662,7 +1822,7 @@ export const db = {
       }));
       data.curriculum_chunks.push(...newChunks);
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(curriculumId, true, false);
       return existing;
     }
   },
@@ -1674,7 +1834,7 @@ export const db = {
         .from('curriculums')
         .update({ units: sanitizedUnits })
         .eq('id', id);
-      if (!error) invalidatePublicConfigCache();
+      if (!error) await this.syncCurriculumStateMutation(id, false, false);
       return !error;
     } else {
       const data = readLocalDB();
@@ -1682,7 +1842,7 @@ export const db = {
       if (!curr) return false;
       curr.units = sanitizedUnits;
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(id, false, false);
       return true;
     }
   },
@@ -1690,14 +1850,14 @@ export const db = {
   async deleteCurriculum(id: string): Promise<boolean> {
     if (supabase) {
       const { error } = await supabase.from('curriculums').delete().eq('id', id);
-      if (!error) invalidatePublicConfigCache();
+      if (!error) await this.syncCurriculumStateMutation(id, false, true);
       return !error;
     } else {
       const data = readLocalDB();
       data.curriculums = data.curriculums.filter((c: Curriculum) => c.id !== id);
       data.curriculum_chunks = data.curriculum_chunks.filter((cc: CurriculumChunk) => cc.curriculum_id !== id);
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(id, false, true);
       return true;
     }
   },
@@ -2039,6 +2199,9 @@ export const db = {
           })
         );
       }
+      if (saved > 0) {
+        await this.syncCurriculumStateMutation();
+      }
       return saved;
     } else {
       const data = readLocalDB();
@@ -2050,7 +2213,10 @@ export const db = {
           saved++;
         }
       }
-      if (saved > 0) writeLocalDB(data);
+      if (saved > 0) {
+        writeLocalDB(data);
+        await this.syncCurriculumStateMutation();
+      }
       return saved;
     }
   },
@@ -2411,7 +2577,7 @@ export const db = {
       const { data: settingsData } = await supabase
         .from('system_settings')
         .select('key, value')
-        .in('key', ['website_link', 'active_grade_levels', 'active_tracks', 'active_curriculum_ids']);
+        .in('key', ['website_link', 'active_grade_levels', 'active_tracks', 'active_curriculum_ids', 'curriculum_version']);
 
       if (settingsData && Array.isArray(settingsData)) {
         for (const row of settingsData) {
@@ -2435,6 +2601,11 @@ export const db = {
             try {
               activeCurriculumIds = JSON.parse(row.value);
             } catch (e) {}
+          } else if (row.key === 'curriculum_version' && row.value) {
+            const versionNum = parseInt(row.value, 10);
+            if (!isNaN(versionNum) && versionNum > lastPublicConfigTime) {
+              lastPublicConfigTime = versionNum;
+            }
           }
         }
       }
@@ -2468,6 +2639,14 @@ export const db = {
           activeCurriculumIds = JSON.parse(currsSetting.value);
         } catch (e) {}
       }
+
+      const verSetting = settings.find((s: any) => s.key === 'curriculum_version');
+      if (verSetting?.value) {
+        const versionNum = parseInt(verSetting.value, 10);
+        if (!isNaN(versionNum) && versionNum > lastPublicConfigTime) {
+          lastPublicConfigTime = versionNum;
+        }
+      }
     }
 
     const allCurriculums = await this.getCurriculums();
@@ -2479,7 +2658,7 @@ export const db = {
       activeCurriculumIds,
       allCurriculums
     };
-    lastPublicConfigTime = Date.now();
+    lastPublicConfigTime = Math.max(lastPublicConfigTime, Date.now());
 
     return cachedPublicConfig;
   },
@@ -2949,7 +3128,7 @@ export const db = {
         }
       }
       
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(id, false, false);
       return true;
     } else {
       const data = readLocalDB();
@@ -2974,7 +3153,7 @@ export const db = {
       data.curriculum_chunks.push(...newChunks);
       
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(id, false, false);
       return true;
     }
   },
@@ -3011,15 +3190,28 @@ export const db = {
 
   async updateImproveAiOptIn(id: string, optIn: boolean): Promise<Profile | null> {
     if (supabase) {
-      const { data, error } = await supabase.from('profiles').update({ improve_ai_opt_in: optIn }).eq('id', id).select().single();
-      if (error) return null;
-      return data;
+      try {
+        const { data, error } = await supabase.from('profiles').update({ improve_ai_opt_in: optIn }).eq('id', id).select().single();
+        if (!error && data) {
+          await setUserOptOutFallback(id, optIn).catch(() => {});
+          return await checkAndResetDailyCoins(data);
+        }
+      } catch (e) {}
+
+      // Fallback if improve_ai_opt_in column has not yet been added to profiles table
+      await setUserOptOutFallback(id, optIn);
+      const profile = await this.getProfile(id);
+      if (profile) {
+        profile.improve_ai_opt_in = optIn;
+      }
+      return profile;
     } else {
       const data = readLocalDB();
       const profile = (data.profiles || []).find((p: Profile) => p.id === id);
       if (!profile) return null;
       profile.improve_ai_opt_in = optIn;
       writeLocalDB(data);
+      await setUserOptOutFallback(id, optIn).catch(() => {});
       return profile;
     }
   },
@@ -3547,7 +3739,7 @@ export const db = {
       if (fileName) update.file_name = fileName;
       const { data, error } = await supabase.from('curriculums').update(update).eq('id', id).select().single();
       if (error) return null;
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(id, false, false);
       return data;
     } else {
       const data = readLocalDB();
@@ -3556,7 +3748,7 @@ export const db = {
       curriculum.subject_name = cleanSubject;
       if (fileName) curriculum.file_name = fileName;
       writeLocalDB(data);
-      invalidatePublicConfigCache();
+      await this.syncCurriculumStateMutation(id, false, false);
       return curriculum;
     }
   },
@@ -4011,7 +4203,18 @@ export const db = {
     if (updates.improve_ai_opt_in !== undefined) payload.improve_ai_opt_in = updates.improve_ai_opt_in;
 
     if (supabase) {
-      const { data, error } = await supabase.from('profiles').update(payload).eq('id', userId).select().single();
+      let { data, error } = await supabase.from('profiles').update(payload).eq('id', userId).select().single();
+      if (error && error.code === '42703' && payload.improve_ai_opt_in !== undefined) {
+        const { improve_ai_opt_in, ...safePayload } = payload;
+        await setUserOptOutFallback(userId, improve_ai_opt_in);
+        const retryRes = Object.keys(safePayload).length > 0
+          ? await supabase.from('profiles').update(safePayload).eq('id', userId).select().single()
+          : await supabase.from('profiles').select('*').eq('id', userId).single();
+        if (retryRes.error) return { success: false, error: 'فشل تحديث بيانات الطالب في قاعدة البيانات.' };
+        data = retryRes.data;
+        if (data) data.improve_ai_opt_in = updates.improve_ai_opt_in;
+        error = null;
+      }
       if (error) return { success: false, error: 'فشل تحديث بيانات الطالب في قاعدة البيانات.' };
       invalidateDashboardStatsCache();
       return { success: true, profile: data };
@@ -4021,6 +4224,9 @@ export const db = {
       if (!p) return { success: false, error: 'الطالب غير موجود.' };
       Object.assign(p, payload);
       writeLocalDB(data);
+      if (updates.improve_ai_opt_in !== undefined) {
+        await setUserOptOutFallback(userId, updates.improve_ai_opt_in).catch(() => {});
+      }
       invalidateDashboardStatsCache();
       return { success: true, profile: p };
     }
@@ -4078,7 +4284,13 @@ export const db = {
 
   // ─── Notifications ─────────────────────────────────────────────────────────
   async getActiveNotifications(target: 'web' | 'phone', userId?: string | null): Promise<AppNotification[]> {
-    if (!userId && cachedBroadcastNotifications && cachedBroadcastNotifications.target === target && (Date.now() - cachedBroadcastNotifications.time < BROADCAST_NOTIF_CACHE_TTL_MS)) {
+    const userCacheKey = userId ? `${target}:${userId}` : null;
+    if (userCacheKey) {
+      const cached = cachedUserNotifications.get(userCacheKey);
+      if (cached && (Date.now() - cached.time < USER_NOTIF_CACHE_TTL_MS)) {
+        return cached.data;
+      }
+    } else if (cachedBroadcastNotifications && cachedBroadcastNotifications.target === target && (Date.now() - cachedBroadcastNotifications.time < BROADCAST_NOTIF_CACHE_TTL_MS)) {
       return cachedBroadcastNotifications.data;
     }
 
@@ -4116,7 +4328,10 @@ export const db = {
         .sort((a, b) => b.created_at.localeCompare(a.created_at));
     }
 
-    if (!userId) {
+    if (userCacheKey) {
+      if (cachedUserNotifications.size > 1000) cachedUserNotifications.clear();
+      cachedUserNotifications.set(userCacheKey, { data: results, time: Date.now() });
+    } else {
       cachedBroadcastNotifications = { target, data: results, time: Date.now() };
     }
     return results;
@@ -4331,6 +4546,7 @@ export const db = {
         }
       });
 
+      const optedOutIds = await getAllOptedOutUserIds();
       const allProfiles = rawProfiles.map((p: any) => {
         const isSub = (p.subscription_status === 'active') || (p.plan_type && p.plan_type !== 'free');
         const isExp = p.subscription_status === 'expired';
@@ -4348,7 +4564,7 @@ export const db = {
           pwa_installed: !!p.pwa_installed,
           pwa_installed_at: p.pwa_installed_at || null,
           pwa_platform: p.pwa_platform || null,
-          improve_ai_opt_in: p.improve_ai_opt_in !== undefined ? !!p.improve_ai_opt_in : true
+          improve_ai_opt_in: p.improve_ai_opt_in !== undefined ? !!p.improve_ai_opt_in : !optedOutIds.has(p.id)
         };
       });
 
@@ -4491,6 +4707,7 @@ export const db = {
         );
       }
 
+      const optedOutIds = await getAllOptedOutUserIds();
       const mapped = filtered
         .sort((a: Profile, b: Profile) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
         .map(({ password_hash, ...rest }: Profile) => ({
@@ -4504,7 +4721,7 @@ export const db = {
           pwa_installed: !!rest.pwa_installed,
           pwa_installed_at: rest.pwa_installed_at || null,
           pwa_platform: rest.pwa_platform || null,
-          improve_ai_opt_in: rest.improve_ai_opt_in !== undefined ? !!rest.improve_ai_opt_in : true
+          improve_ai_opt_in: rest.improve_ai_opt_in !== undefined ? !!rest.improve_ai_opt_in : !optedOutIds.has(rest.id)
         }));
 
       return {
@@ -6000,12 +6217,16 @@ export const db = {
         let query = supabase.from('study_notebook').select('*').eq('user_id', userId).order('created_at', { ascending: false });
         if (subjectName) query = query.eq('subject_name', subjectName);
         const { data, error } = await query;
-        if (!error && data) return data;
+        if (!error && Array.isArray(data) && data.length > 0) {
+          return data;
+        }
       } catch (err) {
         console.error('Error fetching study_notebook from Supabase:', err);
       }
-      return [];
-    } else {
+    }
+
+    // Check local disk DB if Supabase is disabled, threw error, or returned empty
+    try {
       const data = readLocalDB();
       const rawNotes: StudyNotebookItem[] = (data.study_notebook || [])
         .filter((n: StudyNotebookItem) => n.user_id === userId && (!subjectName || n.subject_name === subjectName));
@@ -6032,6 +6253,9 @@ export const db = {
       });
 
       return notes.sort((a: StudyNotebookItem, b: StudyNotebookItem) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    } catch (localErr) {
+      console.error('Error reading study notebook from local DB:', localErr);
+      return [];
     }
   },
 
@@ -6045,8 +6269,11 @@ export const db = {
     sessionId?: string | null;
     messageId?: string | null;
   }): Promise<StudyNotebookItem> {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const id = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `note_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
     const nowIso = new Date().toISOString();
+    const validSessionId = (params.sessionId && uuidRegex.test(params.sessionId)) ? params.sessionId : null;
+
     const item: StudyNotebookItem = {
       id,
       user_id: params.userId,
@@ -6055,7 +6282,7 @@ export const db = {
       title: params.title.trim(),
       content: params.content.trim(),
       note_type: params.noteType || 'formula',
-      session_id: params.sessionId || null,
+      session_id: validSessionId,
       message_id: params.messageId || null,
       created_at: nowIso
     };
@@ -6063,39 +6290,63 @@ export const db = {
     if (supabase) {
       try {
         const { data, error } = await supabase.from('study_notebook').insert(item).select().single();
-        if (!error && data) return data;
+        if (error && (error.code === '23503' || (error.message && (error.message.includes('foreign key') || error.message.includes('session_id') || error.message.includes('message_id'))))) {
+          // Retry without session_id in case foreign key or schema mismatch caused failure
+          const fallbackItem = { ...item, session_id: null, message_id: null };
+          const retry = await supabase.from('study_notebook').insert(fallbackItem).select().single();
+          if (!retry.error && retry.data) {
+            return retry.data;
+          }
+        } else if (!error && data) {
+          return data;
+        } else if (error) {
+          console.error('Error saving study_notebook item in Supabase:', error);
+        }
       } catch (err) {
-        console.error('Error saving study_notebook item in Supabase:', err);
+        console.error('Exception saving study_notebook item in Supabase:', err);
       }
-    } else {
+    }
+
+    // Always ensure local disk store is updated as primary or fallback
+    try {
       const data = readLocalDB();
       if (!data.study_notebook) data.study_notebook = [];
+      data.study_notebook = data.study_notebook.filter((n: StudyNotebookItem) => n.id !== item.id);
       data.study_notebook.unshift(item);
       writeLocalDB(data);
+    } catch (localErr) {
+      console.error('Error persisting study note to local DB:', localErr);
     }
+
     return item;
   },
 
   async deleteStudyNote(noteId: string, userId: string): Promise<boolean> {
+    let success = false;
     if (supabase) {
       try {
         const { error } = await supabase.from('study_notebook').delete().eq('id', noteId).eq('user_id', userId);
-        return !error;
+        if (!error) success = true;
       } catch (err) {
         console.error('Error deleting study_notebook item from Supabase:', err);
-        return false;
       }
-    } else {
-      const data = readLocalDB();
-      if (!data.study_notebook) return false;
-      const initialLen = data.study_notebook.length;
-      data.study_notebook = data.study_notebook.filter((n: StudyNotebookItem) => !(n.id === noteId && n.user_id === userId));
-      if (data.study_notebook.length !== initialLen) {
-        writeLocalDB(data);
-        return true;
-      }
-      return false;
     }
+
+    try {
+      const data = readLocalDB();
+      if (data.study_notebook) {
+        const initialLen = data.study_notebook.length;
+        data.study_notebook = data.study_notebook.filter((n: StudyNotebookItem) => !(n.id === noteId && n.user_id === userId));
+        if (data.study_notebook.length !== initialLen) {
+          writeLocalDB(data);
+          success = true;
+        }
+      }
+    } catch (localErr) {
+      console.error('Error deleting study note from local DB:', localErr);
+    }
+
+    return success;
   },
 
   // ─── Daily Quests & Habit Formation System ──────────────────────────────────
@@ -6294,6 +6545,7 @@ export const db = {
     invalidateUserRankCache(userId);
 
     return { success: true, pointsAwarded, totalPoints };
+
   }
 };
 

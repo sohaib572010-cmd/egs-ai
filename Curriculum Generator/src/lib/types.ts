@@ -64,9 +64,12 @@ export interface JobCheckpoint {
 }
 
 export interface ProcessingSettings {
-  geminiApiKey?: string;
-  edenAiApiKey: string;
+  /** Primary Multimodal Engine: DeepSeek-V4.1-Flash (deepseek-flash) for both page vision and curriculum structuring */
   deepSeekApiKey: string;
+  /** Optional legacy fallback vision key */
+  geminiApiKey?: string;
+  /** Optional legacy fallback OCR/VQA key */
+  edenAiApiKey?: string;
   batchSize: number;
   maxConcurrentFiles: number;
   maxRetries: number;

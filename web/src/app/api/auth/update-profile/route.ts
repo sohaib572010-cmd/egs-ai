@@ -65,7 +65,7 @@ export async function POST(req: NextRequest) {
           coins: updated.coins === undefined ? 20.0 : updated.coins,
           points: updated.points || 0,
           study_streak: updated.study_streak || 1,
-          improve_ai_opt_in: updated.improve_ai_opt_in !== undefined ? updated.improve_ai_opt_in : true
+          improve_ai_opt_in: updated.improve_ai_opt_in !== undefined ? updated.improve_ai_opt_in : improve_ai_opt_in
         }
       });
     }

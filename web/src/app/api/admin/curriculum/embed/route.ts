@@ -2,7 +2,7 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, invalidateCurriculumsCache } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { generateEmbeddingBatch } from '@/lib/gemini';
 
@@ -52,6 +52,10 @@ export async function GET(req: NextRequest) {
         percentage,
         isComplete: stats.pendingCount === 0
       }
+    }, {
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate'
+      }
     });
   } catch (error: any) {
     console.error('Curriculum embedding stats error:', error);
@@ -77,6 +81,8 @@ export async function POST(req: NextRequest) {
     const { chunks, totalRemaining, totalChildren } = await db.getPendingEmbeddingChunks(curriculumId, safeLimit);
 
     if (chunks.length === 0) {
+      invalidateCurriculumsCache();
+      await db.setSystemSetting('curriculum_version', Date.now().toString()).catch(() => {});
       return NextResponse.json({
         success: true,
         complete: true,
@@ -100,6 +106,11 @@ export async function POST(req: NextRequest) {
     const percentage = totalChildren > 0
       ? Math.round(((totalChildren - newRemaining) / totalChildren) * 100)
       : 100;
+
+    if (newRemaining === 0) {
+      invalidateCurriculumsCache();
+      await db.setSystemSetting('curriculum_version', Date.now().toString()).catch(() => {});
+    }
 
     return NextResponse.json({
       success: true,

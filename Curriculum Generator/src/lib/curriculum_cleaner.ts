@@ -223,11 +223,18 @@ export function cleanAndDeduplicateCurriculumMarkdown(rawMarkdown: string): stri
       }
     }
 
-    // Check for section clutter headings to skip (Objectives, Skills & Values, Cross-cutting concepts)
+    // Check for section clutter headings to skip (Objectives, Skills & Values, Cross-cutting concepts, Prep questions, Preamble)
     if (
-      trimmed.match(/^#{1,4}\s*(أهداف الدرس|أهداف الوحدة|نواتج التعلم|مخرجات التعلم|الأهداف التعليمية|المهارات والقيم والقضايا المتضمنة|المفاهيم المتقاطعة|تهيئة الدرس|Learning Outcomes)/i)
+      trimmed.match(/^#{1,4}\s*(أهداف الدرس|أهداف الوحدة|نواتج التعلم|مخرجات التعلم|الأهداف التعليمية|المهارات والقيم والقضايا المتضمنة|المفاهيم المتقاطعة|تهيئة الدرس|التهيئة|تساؤلات تمهيدية|تساؤلات تمهيدية للدرس|سؤال الدرس|تمهيد للدرس|تمهيد|Learning Outcomes|Lesson Objectives)/i)
     ) {
       skipUntilNextHeading = true;
+      continue;
+    }
+
+    // Skip bullet points of learning outcomes / objectives
+    if (
+      trimmed.match(/^[-*•]\s*(?:للتعرف على|لاستنتاج|لتحديد|لمعرفة|أن يتعرف|أن يستنتج|أن يحدد|أن يفسر|أن يوضح|أن يميز|يتوقع من الطالب|في نهاية هذا الدرس|مع نهاية الدرس)/i)
+    ) {
       continue;
     }
 
@@ -396,13 +403,11 @@ export function cleanAndDeduplicateCurriculumMarkdown(rawMarkdown: string): stri
       continue;
     }
 
-    // If inside unit cover, strip lesson index lines & learning outcome bullet items
+    // If inside unit cover, strip all additional content until next page or heading (keep ONLY the unit title)
     if (isInsideUnitCover) {
-      if (trimmed.startsWith('#')) {
+      if (trimmed.startsWith('<!-- بداية الصفحة') || trimmed.startsWith('#')) {
         isInsideUnitCover = false;
-      } else if (
-        trimmed.match(/^(?:الدرس\s+(?:الأول|الثاني|الثالث|الرابع|الخامس|السادس|[0-9]+)|Lesson\s+[0-9]+|نواتج التعلم|أهداف|في نهاية هذه الوحدة|Learning Outcomes|[0-9]+\.\s+)/i)
-      ) {
+      } else {
         continue;
       }
     }

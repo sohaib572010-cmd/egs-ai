@@ -40,6 +40,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Ownership check: a session belongs to exactly one user, never trust the id alone
+    let sessionData = null;
     if (sessionId) {
       const session = await db.getChatSession(sessionId);
       if (!session || session.user_id !== userId) {
@@ -48,6 +49,27 @@ export async function GET(req: NextRequest) {
           { status: 403 }
         );
       }
+      let cleanTitle = session.title;
+      if (cleanTitle && (cleanTitle.includes('VOICE_MESSAGE:') || cleanTitle.includes('IMAGE_MESSAGE:'))) {
+        if (cleanTitle.includes('VOICE_MESSAGE:')) {
+          const m = cleanTitle.match(/\[?VOICE_MESSAGE:[^\]]*\]([\s\S]*)/);
+          cleanTitle = m && m[1]?.trim() ? m[1].trim() : 'تسجيل صوتي';
+        } else if (cleanTitle.includes('IMAGE_MESSAGE:')) {
+          const m = cleanTitle.match(/\[?IMAGE_MESSAGE:[^\]]*\]([\s\S]*)/);
+          cleanTitle = m && m[1]?.trim() ? m[1].trim() : 'سؤال من صورة';
+        }
+        cleanTitle = cleanTitle.replace(/\[[A-Z_]+:[^\]]*\]/g, '').trim();
+        cleanTitle = cleanTitle.replace(/^\[?VOICE_MESSAGE:[^\]]*\]?/g, '').trim();
+        cleanTitle = cleanTitle.replace(/^\[?IMAGE_MESSAGE:[^\]]*\]?/g, '').trim();
+        if (!cleanTitle) cleanTitle = 'تسجيل صوتي';
+      }
+      sessionData = {
+        id: session.id,
+        title: cleanTitle,
+        subject_name: session.subject_name,
+        grade_level: session.grade_level,
+        mode: session.mode
+      };
     }
 
     // Retrieve history
@@ -58,6 +80,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      session: sessionData,
       history: cappedHistory.map(h => ({
         id: h.id,
         session_id: h.session_id,

@@ -1,5 +1,5 @@
 export const runtime = 'edge';
-export const revalidate = 3600;
+export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { getCurriculumStructure } from '@/lib/curriculum_structure';
 
@@ -25,8 +25,7 @@ export async function GET(req: NextRequest) {
       },
       {
         headers: {
-          'Cache-Control': 'public, max-age=300, s-maxage=3600, stale-while-revalidate=86400',
-          'CDN-Cache-Control': 'max-age=3600',
+          'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate',
           'Vary': 'Accept-Encoding'
         }
       }

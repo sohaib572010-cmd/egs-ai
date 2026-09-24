@@ -228,7 +228,10 @@ ${JSON.stringify(answers, null, 2)}
 
 Grading Guidelines:
 1. Multiple Choice / True-False: Strict exact match against correct_answer.
-2. Essay Questions: Fair partial credit based on core keywords and conceptual understanding.
+2. Essay Questions & Pedagogical Rubric:
+   - For Egyptian Baccalaureate (2_high): Questions measure Critical Thinking, Deductive Logic, Evidence-based Reasoning, and Causality. STRICTLY DO NOT require verbatim textbook wording. Award full credit if the student demonstrates valid comprehension of underlying mechanisms, correct historical/scientific motives, or logical causal inferences.
+   - For Secondary Stage (1_high): Award credit for multi-step reasoning, accurate conceptual interpretation, and valid derivations.
+   - For Preparatory Stages (1_middle, 2_middle, 3_middle): Grade based on clear sequential problem-solving, formula identification, and direct conceptual explanation.
 3. Compute aggregate percentage score (0 to 100).
 4. Provide structured evaluation ("evaluation") celebrating correct answers and explaining misconceptions constructively.
 5. Populate "mastered_concepts" and "revision_concepts" accurately from the curriculum topics.

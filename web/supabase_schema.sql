@@ -423,7 +423,25 @@ CREATE INDEX IF NOT EXISTS idx_user_devices_lookup ON public.user_devices(user_i
 CREATE INDEX IF NOT EXISTS idx_user_devices_token ON public.user_devices(session_token);
 CREATE INDEX IF NOT EXISTS idx_user_devices_last_active ON public.user_devices(last_active_at DESC);
 
--- 19. Leaderboard RPC Function & Points Indexes
+-- 19. Smart Study Notebook (Formula & Definition Vault)
+CREATE TABLE IF NOT EXISTS public.study_notebook (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
+    subject_name TEXT NOT NULL,
+    grade_level TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    note_type TEXT NOT NULL DEFAULT 'formula', -- 'formula' | 'definition' | 'solution' | 'law' | 'general'
+    session_id UUID NULL REFERENCES public.chat_sessions(id) ON DELETE SET NULL,
+    message_id TEXT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_study_notebook_user ON public.study_notebook(user_id, subject_name);
+CREATE INDEX IF NOT EXISTS idx_study_notebook_session ON public.study_notebook(session_id);
+CREATE INDEX IF NOT EXISTS idx_study_notebook_created ON public.study_notebook(user_id, created_at DESC);
+
+-- 20. Leaderboard RPC Function & Points Indexes
 CREATE INDEX IF NOT EXISTS profiles_points_idx ON public.profiles(points DESC);
 CREATE INDEX IF NOT EXISTS profiles_study_streak_idx ON public.profiles(study_streak DESC);
 

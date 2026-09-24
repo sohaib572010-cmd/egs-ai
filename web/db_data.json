@@ -64,7 +64,7 @@
       "last_active_date": "2026-09-03",
       "unlimited_credit": false,
       "terms_accepted_at": "2026-09-03T16:07:15.806Z",
-      "email": "sohaib572010@gmail.com",
+      "email": "business@egsaiedu.com",
       "study_streak": 1,
       "points": 0,
       "track_id": null,
@@ -989,7 +989,8 @@
       "improve_ai_opt_in": true,
       "apology_compensation_claimed": false,
       "apology_dismissed": true,
-      "created_at": "2026-09-10T16:03:48.245Z"
+      "created_at": "2026-09-10T16:03:48.245Z",
+      "unlimited_credit": false
     },
     {
       "id": "test_existing_user_1789056228369",
@@ -1006,7 +1007,8 @@
       "improve_ai_opt_in": true,
       "apology_compensation_claimed": true,
       "apology_dismissed": true,
-      "created_at": "2026-09-01T12:00:00.000Z"
+      "created_at": "2026-09-01T12:00:00.000Z",
+      "unlimited_credit": false
     },
     {
       "id": "test_dismiss_user_1789056228369",
@@ -1023,7 +1025,8 @@
       "improve_ai_opt_in": true,
       "apology_compensation_claimed": false,
       "apology_dismissed": true,
-      "created_at": "2026-09-01T12:00:00.000Z"
+      "created_at": "2026-09-01T12:00:00.000Z",
+      "unlimited_credit": false
     },
     {
       "id": "c0000000-0000-4000-a000-000000000002",

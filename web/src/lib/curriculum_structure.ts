@@ -1,4 +1,4 @@
-import { db } from './db';
+import { db, registerCurriculumInvalidator } from './db';
 
 export interface CurriculumLesson {
   id: string;
@@ -46,11 +46,15 @@ function normalize(str: string): string {
 }
 
 const structureCache = new Map<string, { result: CurriculumStructureResult; time: number }>();
-const STRUCTURE_CACHE_TTL_MS = 300000; // 5 minutes (curriculums are static)
+const STRUCTURE_CACHE_TTL_MS = 30000; // 30 seconds fallback
 
 export function invalidateStructureCache() {
   structureCache.clear();
 }
+
+registerCurriculumInvalidator(() => {
+  structureCache.clear();
+});
 
 /**
  * Retrieves the manual curriculum structure for a given grade level and subject name

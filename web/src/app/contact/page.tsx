@@ -110,7 +110,7 @@ export default function ContactPage() {
 
           {/* Email */}
           <a
-            href="mailto:sohaib572010@gmail.com"
+            href="mailto:business@egsaiedu.com"
             className="glass"
             style={{
               padding: '24px',
@@ -131,7 +131,7 @@ export default function ContactPage() {
             <div>
               <div style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 600 }}>البريد الإلكتروني الرسمـي</div>
               <div style={{ fontSize: '0.98rem', fontWeight: 800, color: 'var(--primary-color)', direction: 'ltr', textAlign: 'right', marginTop: '4px', wordBreak: 'break-all' }}>
-                sohaib572010@gmail.com
+                business@egsaiedu.com
               </div>
             </div>
             <span style={{ fontSize: '0.82rem', color: 'var(--primary-color)', fontWeight: 700 }}>إرسال بريد إلكتروني ←</span>

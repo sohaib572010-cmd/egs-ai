@@ -10,11 +10,12 @@ import {
 } from "./types";
 import { PDFDocumentHandler, getPDFTotalPages } from "./pdf_parser";
 import { extractWithEdenAI } from "./eden_vision";
-import { organizeTextWithDeepSeek } from "./deepseek_organizer";
+import { organizePageWithDeepSeek, organizeTextWithDeepSeek } from "./deepseek_organizer";
 import { cleanAndDeduplicateCurriculumMarkdown } from "./curriculum_cleaner";
 import {
   initCheckpoint,
   loadCheckpoint,
+  saveCheckpoint,
   savePageResult,
   saveQueueState,
   loadQueueState,
@@ -240,15 +241,21 @@ export class QueueProcessor {
         item.status = "pending";
         item.errorMessage = null;
         item.failedPages = 0;
-        // Clean failed pages in checkpoint
+        // Clean failed and false-empty pages in checkpoint
         const cp = loadCheckpoint(fileId);
         if (cp) {
+          let purgedCount = 0;
           for (const [pNo, pRes] of Object.entries(cp.completedPages)) {
-            if (pRes.status === "failed") {
+            const isEmptyMarkdown = !pRes.processedMarkdown || pRes.processedMarkdown.trim().length === 0;
+            if (pRes.status === "failed" || isEmptyMarkdown) {
               delete cp.completedPages[Number(pNo)];
+              purgedCount++;
             }
           }
-          initCheckpoint(item);
+          saveCheckpoint(cp);
+          if (purgedCount > 0) {
+            this.log("info", `تم تفريغ ${purgedCount} صفحة متعثرة أو فارغة لإعادة استخراجها`, fileId);
+          }
         }
         this.log("info", `إعادة محاولة الصفحات المعلقة لـ: ${item.subjectName}`, fileId);
       }
@@ -258,6 +265,18 @@ export class QueueProcessor {
           item.status = "pending";
           item.errorMessage = null;
           item.failedPages = 0;
+          const cp = loadCheckpoint(item.id);
+          if (cp) {
+            let purgedCount = 0;
+            for (const [pNo, pRes] of Object.entries(cp.completedPages)) {
+              const isEmptyMarkdown = !pRes.processedMarkdown || pRes.processedMarkdown.trim().length === 0;
+              if (pRes.status === "failed" || isEmptyMarkdown) {
+                delete cp.completedPages[Number(pNo)];
+                purgedCount++;
+              }
+            }
+            saveCheckpoint(cp);
+          }
         }
       }
       this.log("info", "إعادة محاولة جميع المناهج والصفحات المتعثرة.");
@@ -373,7 +392,7 @@ export class QueueProcessor {
         file.id
       );
 
-      const concurrency = Math.max(1, this.settings.batchSize || 6);
+      const concurrency = Math.max(1, this.settings.batchSize || 3);
       const startTime = Date.now();
       let processedInThisRun = 0;
 
@@ -515,14 +534,14 @@ export class QueueProcessor {
     pageNumber: number,
     startTime?: number
   ): Promise<PageExtractionResult> {
-    const pageTimeoutMs = 60000;
+    const pageTimeoutMs = 120000;
     let timer: NodeJS.Timeout | null = null;
 
     const timeoutPromise = new Promise<PageExtractionResult>((resolve) => {
       timer = setTimeout(() => {
         this.log(
           "warn",
-          `تجاوزت الصفحة ${pageNumber} مهلة المعالجة القصوى (60 ثانية)، سيتم الانتقال للصفحة التالية`,
+          `تجاوزت الصفحة ${pageNumber} مهلة المعالجة القصوى (120 ثانية)، سيتم الانتقال للصفحة التالية`,
           file.id,
           pageNumber
         );
@@ -566,45 +585,64 @@ export class QueueProcessor {
         // Step 1: Extract Text & Image
         const pageContent = await docHandler.extractPage(pageNumber);
 
-        // Step 2: Vision OCR (Gemini / EdenAI / PDF Layer)
-        const rawVisionText = await extractWithEdenAI(
-          pageContent.extractedText,
-          pageContent.imageBuffer,
-          {
-            geminiApiKey: this.settings.geminiApiKey,
-            edenAiApiKey: this.settings.edenAiApiKey,
-            maxRetries: 3,
-            onNetworkWait: (att, max, delay) => {
-              this.log(
-                "warn",
-                `انتظار استقرار الاتصال بالإنترنت للصفحة ${pageNumber} (المحاولة ${att}/${max})`,
-                file.id,
-                pageNumber
-              );
-            },
-          }
-        );
-
-        // Step 3: DeepSeek RAG Structuring
+        // Step 2: Multimodal Processing via DeepSeek 4.1 (deepseek-flash)
         let processedMarkdown = "";
-        if (rawVisionText && rawVisionText.trim().length > 0) {
-          processedMarkdown = await organizeTextWithDeepSeek(rawVisionText, {
-            apiKey: this.settings.deepSeekApiKey,
-            subjectName: file.subjectName,
-            gradeLevel: file.gradeLevel,
-            maxRetries: 3,
-            onNetworkWait: (att, max, delay) => {
-              this.log(
-                "warn",
-                `انتظار خادم DeepSeek للصفحة ${pageNumber} (المحاولة ${att}/${max})`,
-                file.id,
-                pageNumber
-              );
-            },
-          });
+        let rawVisionText = pageContent.extractedText || "";
+
+        const hasDeepSeek = !!(this.settings.deepSeekApiKey || process.env.DEEPSEEK_API_KEY);
+
+        if (hasDeepSeek) {
+          processedMarkdown = await organizePageWithDeepSeek(
+            pageContent.imageBuffer,
+            pageContent.extractedText,
+            {
+              apiKey: this.settings.deepSeekApiKey,
+              subjectName: file.subjectName,
+              gradeLevel: file.gradeLevel,
+              pageNumber,
+              maxRetries: 3,
+              onNetworkWait: (att, max, delay) => {
+                this.log(
+                  "warn",
+                  `انتظار استجابة نموذج DeepSeek 4.1 للصفحة ${pageNumber} (المحاولة ${att}/${max})`,
+                  file.id,
+                  pageNumber
+                );
+              },
+            }
+          );
+        } else {
+          // Legacy fallback path if only EdenAI/Gemini key is present without DeepSeek key
+          rawVisionText = await extractWithEdenAI(
+            pageContent.extractedText,
+            pageContent.imageBuffer,
+            {
+              geminiApiKey: this.settings.geminiApiKey,
+              edenAiApiKey: this.settings.edenAiApiKey,
+              maxRetries: 3,
+              onNetworkWait: (att, max, delay) => {
+                this.log(
+                  "warn",
+                  `انتظار استقرار الاتصال بالإنترنت للصفحة ${pageNumber} (المحاولة ${att}/${max})`,
+                  file.id,
+                  pageNumber
+                );
+              },
+            }
+          );
+          if (rawVisionText && rawVisionText.trim().length > 0) {
+            processedMarkdown = await organizeTextWithDeepSeek(rawVisionText, {
+              apiKey: this.settings.deepSeekApiKey,
+              subjectName: file.subjectName,
+              gradeLevel: file.gradeLevel,
+              maxRetries: 3,
+            });
+          }
         }
 
-        const isBlank = !rawVisionText || rawVisionText.trim().length === 0;
+        const isBlank =
+          (!processedMarkdown || processedMarkdown.trim().length === 0) &&
+          (!rawVisionText || rawVisionText.trim().length === 0);
 
         const pageResult: PageExtractionResult = {
           pageNumber,
@@ -622,7 +660,14 @@ export class QueueProcessor {
         if (isBlank) {
           this.log("info", `تم تخطي الصفحة ${pageNumber} (صفحة فارغة أو بدون نصوص شرح)`, file.id, pageNumber);
         } else {
-          this.log("success", `تمت معالجة وهيكلة الصفحة ${pageNumber} بنجاح`, file.id, pageNumber);
+          this.log(
+            "success",
+            hasDeepSeek
+              ? `تمت معالجة وهيكلة الصفحة ${pageNumber} عبر DeepSeek 4.1 بنجاح`
+              : `تمت معالجة وهيكلة الصفحة ${pageNumber} بنجاح`,
+            file.id,
+            pageNumber
+          );
         }
         return pageResult;
       } catch (error: any) {

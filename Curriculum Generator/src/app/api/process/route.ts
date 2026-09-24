@@ -18,7 +18,7 @@ function getProcessor(settings?: ProcessingSettings): QueueProcessor {
       geminiApiKey: process.env.GEMINI_API_KEY || DEFAULT_GEMINI_KEY,
       edenAiApiKey: process.env.EDENAI_API_KEY || DEFAULT_EDENAI_KEY,
       deepSeekApiKey: process.env.DEEPSEEK_API_KEY || DEFAULT_DEEPSEEK_KEY,
-      batchSize: 6,
+      batchSize: 3,
       maxConcurrentFiles: 2,
       maxRetries: 3,
       delayBetweenBatchesMs: 50,
@@ -46,6 +46,8 @@ export async function GET() {
       hasGeminiKey: !!currentSettings.geminiApiKey || !!process.env.GEMINI_API_KEY,
       hasEdenKey: !!currentSettings.edenAiApiKey || !!process.env.EDENAI_API_KEY,
       hasDeepSeekKey: !!currentSettings.deepSeekApiKey || !!process.env.DEEPSEEK_API_KEY,
+      modelName: "DeepSeek-V4.1-Flash (deepseek-flash)",
+      isMultimodal: true,
     },
   });
 }

@@ -32,9 +32,27 @@ export async function GET(req: NextRequest) {
     }
 
     const sessions = await db.getChatSessions(userId, undefined);
+    const sanitizedSessions = sessions.map(s => {
+      let title = s.title;
+      if (title && (title.includes('VOICE_MESSAGE:') || title.includes('IMAGE_MESSAGE:'))) {
+        if (title.includes('VOICE_MESSAGE:')) {
+          const m = title.match(/\[?VOICE_MESSAGE:[^\]]*\]([\s\S]*)/);
+          title = m && m[1]?.trim() ? m[1].trim() : 'تسجيل صوتي';
+        } else if (title.includes('IMAGE_MESSAGE:')) {
+          const m = title.match(/\[?IMAGE_MESSAGE:[^\]]*\]([\s\S]*)/);
+          title = m && m[1]?.trim() ? m[1].trim() : 'سؤال من صورة';
+        }
+        title = title.replace(/\[[A-Z_]+:[^\]]*\]/g, '').trim();
+        title = title.replace(/^\[?VOICE_MESSAGE:[^\]]*\]?/g, '').trim();
+        title = title.replace(/^\[?IMAGE_MESSAGE:[^\]]*\]?/g, '').trim();
+        if (!title) title = 'تسجيل صوتي';
+      }
+      return { ...s, title };
+    });
+
     return NextResponse.json({
       success: true,
-      sessions
+      sessions: sanitizedSessions
     });
 
   } catch (error: any) {
@@ -82,8 +100,23 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    let cleanTitle = title.trim();
+    if (cleanTitle.includes('VOICE_MESSAGE:') || cleanTitle.includes('IMAGE_MESSAGE:')) {
+      if (cleanTitle.includes('VOICE_MESSAGE:')) {
+        const m = cleanTitle.match(/\[?VOICE_MESSAGE:[^\]]*\]([\s\S]*)/);
+        cleanTitle = m && m[1]?.trim() ? m[1].trim() : 'تسجيل صوتي';
+      } else if (cleanTitle.includes('IMAGE_MESSAGE:')) {
+        const m = cleanTitle.match(/\[?IMAGE_MESSAGE:[^\]]*\]([\s\S]*)/);
+        cleanTitle = m && m[1]?.trim() ? m[1].trim() : 'سؤال من صورة';
+      }
+      cleanTitle = cleanTitle.replace(/\[[A-Z_]+:[^\]]*\]/g, '').trim();
+      cleanTitle = cleanTitle.replace(/^\[?VOICE_MESSAGE:[^\]]*\]?/g, '').trim();
+      cleanTitle = cleanTitle.replace(/^\[?IMAGE_MESSAGE:[^\]]*\]?/g, '').trim();
+      if (!cleanTitle) cleanTitle = 'تسجيل صوتي';
+    }
+
     const session = await db.createChatSession(
-      title.trim(),
+      cleanTitle,
       subject_name.trim(),
       grade_level.trim(),
       userId,

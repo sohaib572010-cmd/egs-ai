@@ -10,8 +10,7 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, ".env.local") });
 
-import { extractWithEdenAI } from "./src/lib/eden_vision.ts";
-import { organizeTextWithDeepSeek } from "./src/lib/deepseek_organizer.ts";
+import { organizePageWithDeepSeek } from "./src/lib/deepseek_organizer.ts";
 
 async function run20PagesExtraction() {
   const filePath = path.join(__dirname, "uploads", "file_1785482750508_gq4x7_1-since.pdf");
@@ -98,23 +97,16 @@ async function run20PagesExtraction() {
         }
       }
 
-      // 3. EdenAI OCR Extraction
-      const rawVisionText = await extractWithEdenAI(pdfText, imageBuffer, {
-        apiKey: process.env.EDENAI_API_KEY || "",
-        maxRetries: 3,
-      });
-
-      console.log(`Page ${p}: EdenAI OCR Extracted ${rawVisionText.length} characters`);
-
-      // 4. DeepSeek RAG Structuring
-      const markdown = await organizeTextWithDeepSeek(rawVisionText, {
+      // 3. Unified DeepSeek 4.1 Multimodal Processing (Image + Text)
+      const markdown = await organizePageWithDeepSeek(imageBuffer, pdfText, {
         apiKey: process.env.DEEPSEEK_API_KEY || "",
         subjectName: "العلوم",
         gradeLevel: "1_middle",
+        pageNumber: p,
         maxRetries: 3,
       });
 
-      console.log(`Page ${p}: DeepSeek RAG Markdown generated (${markdown.length} chars)`);
+      console.log(`Page ${p}: DeepSeek 4.1 Multimodal Markdown generated (${markdown.length} chars)`);
       if (markdown.trim().length > 0) {
         console.log(`--- PAGE ${p} OUTPUT SAMPLE ---`);
         console.log(markdown.substring(0, 200) + "...\n");

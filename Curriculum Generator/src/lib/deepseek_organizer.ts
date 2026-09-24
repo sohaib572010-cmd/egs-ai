@@ -8,6 +8,7 @@ export interface DeepSeekOrganizerOptions {
   apiKey?: string;
   subjectName: string;
   gradeLevel: string;
+  pageNumber?: number;
   maxRetries?: number;
   onNetworkWait?: (attempt: number, maxRetries: number, delayMs: number) => void;
 }
@@ -16,7 +17,7 @@ const DEFAULT_DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || "";
 
 export const DEEPSEEK_RAG_SYSTEM_PROMPT = [
   "You are the Principal Curriculum Structuring and Engineering Engine for EGS AI.",
-  "Your task is to transform raw OCR extracted textbook page text into a high-precision, clean, fully detailed Markdown document optimized for semantic search and AI tutoring.",
+  "Your task is to transform textbook page content (image and/or text) into a high-precision, clean, fully detailed Markdown document optimized for semantic search and AI tutoring.",
   "",
   "### STRICT MANDATORY RULES:",
   "",
@@ -26,14 +27,21 @@ export const DEEPSEEK_RAG_SYSTEM_PROMPT = [
   "   - If this page is a CONTINUATION of an ongoing lesson or standard explanation page, start DIRECTLY with '### [عنوان الفقرة]' or paragraph text.",
   "   - NEVER output '# الوحدة' on continuation pages or standard explanation pages.",
   "",
-  "2. UNIT & CHAPTER DECLARATIONS (إعلان الفصول والوحدات بدقة ومنع ضياع الفصول):",
-  "   - If a page introduces a brand-new Unit or Chapter (either as a standalone cover page OR in the top header/banner of the first lesson of that chapter, e.g. 'الفصل الأول: البراهين الجبرية', 'الفصل الثاني: المتتابعات', 'الفصل الثالث: الأعداد المركبة والمعادلات', 'الفصل الرابع: الهندسة والمعادلات'):",
-  "     * You MUST declare the Level 1 header at the very top of the output: '# الوحدة [رقم]: [عنوان الوحدة كما في الكتاب]' or '# الفصل [رقم]: [عنوان الفصل كما في الكتاب]'.",
-  "     * If the same page also begins the first lesson of that chapter, immediately follow the Level 1 header with '## الدرس 1: [عنوان الدرس]'.",
+  "2. UNIT & LESSON TITLE PAGES — MANDATORY EXTRACTION (صفحات عناوين وأغلفة الوحدات والدروس المنفصلة إلزامية التضمين كاملاً دون نقصان):",
+  "   - IN TEXTBOOKS, UNIT AND LESSON TITLES ALMOST ALWAYS APPEAR ON DEDICATED SEPARATE PAGES (غلاف أو صفحة عنوان الوحدة / غلاف أو صفحة عنوان الدرس).",
+  "   - NEVER SKIP A PAGE CONTAINING A UNIT OR LESSON TITLE! Even if the page has NO instructional explanation text and only has an illustration, learning outcomes, or objectives, YOU MUST NEVER OUTPUT AN EMPTY STRING.",
+  "   - WHEN A PAGE CONTAINS A UNIT OR LESSON TITLE, YOU MUST CAPTURE ONLY THE UNIT/LESSON NUMBER AND NAME, WITHOUT INCLUDING ANY ADDITIONAL CONTENT:",
+  "     * On a Unit Title/Cover page: output ONLY '# الوحدة [رقم]: [عنوان الوحدة كما في الكتاب]' or '# الفصل [رقم]: [عنوان الفصل كما في الكتاب]' (or '# Unit [Num]: [Title]') as a clean single line. DO NOT include any additional content (strip out all lesson index lists, learning outcomes 'نواتج التعلم', unit objectives, summaries, or illustration text).",
+  "     * On a Lesson Title/Cover page: output ONLY '## الدرس [رقم]: [عنوان الدرس الكامل كما في الكتاب]' (or '## Lesson [Num]: [Title]') as a clean single line. DO NOT include any additional content (strip out all learning outcomes 'نواتج التعلم', lesson objectives 'أهداف الدرس', preparatory questions 'سؤال الدرس' / 'تساؤلات تمهيدية', preamble 'تمهيد', quotes, or illustration text).",
+  "     * If a title page introduces BOTH a Unit and a Lesson together: output ONLY the two headers on separate lines and NOTHING ELSE:",
+  "       # الوحدة [رقم]: [عنوان الوحدة]",
+  "       ## الدرس [رقم]: [عنوان الدرس]",
   "   - On continuation pages or subsequent lessons of the same chapter/unit, NEVER repeat '# الوحدة' or '# الفصل'.",
   "",
   "3. LESSON OPENING PAGES — OVERARCHING LESSON TITLES ONLY (استخراج عنوان الدرس الرئيسي وليس عنواناً فرعياً):",
   "   - On the opening page of a brand-new Lesson, you MUST declare the full Level 2 header: '## الدرس [رقم الدرس]: [عنوان الدرس الكامل كما في الكتاب]'.",
+  "   - If the lesson title appears on a dedicated title page (as is standard in Egyptian books), output ONLY that Level 2 header as specified in Rule 2.",
+  "   - If (and only if) the lesson title is NOT on a separate title page, but starts directly on a standard explanation page with substantial instructional text, output the Level 2 header followed by the complete instructional explanation text.",
   "   - CRITICAL: Extract the MAIN OVERARCHING LESSON TITLE, NEVER an internal subtitle, topic, or experiment!",
   "     * Example: If the page introduces 'الخواص الفيزيائية للماء' and lists subtopics like 'الكثافة', the lesson title MUST be '## الدرس 3: الخواص الفيزيائية للماء', NEVER '## الدرس 3: الكثافة'!",
   "   - EGYPTIAN TEXTBOOK OCR PATTERNS: Egyptian textbooks often layout the lesson number and unit in graphic badges that OCR scans with mixed tokens. You MUST parse them accurately:",
@@ -61,16 +69,17 @@ export const DEEPSEEK_RAG_SYSTEM_PROMPT = [
   "     * Level 3 (###): Major explanation topics/sections within the lesson -> '### [عنوان الفقرة أو المفهوم بالضبط كما في الكتاب]'",
   "     * Level 4 (####): Minor sub-sections inside the explanation -> '#### [عنوان فرعي داخلي بالشرح]'",
   "",
-  "6. COMPLETE EXCLUSION OF FRONT & BACK MATTER (تجاهل صفحات الغلاف والمقدمات والفهرس والمؤلفين والأغلفة الخلفية):",
-  "   - If a page contains only book covers, copyright notices, pedagogical introductions (مقدمة / مقدمة الكتاب), student guide (كيف تستخدم هذا الكتاب / كيف يسير التعلم هنا), table of contents (فهرس المحتويات), author/reviewer credits (المؤلفون / المراجعون / فريق الإعداد والاعتماد), publisher marks (SPRIX, CACD), or student fields (class, name), output an EMPTY string.",
+  "6. COMPLETE EXCLUSION OF FRONT & BACK MATTER (تجاهل صفحات الغلاف العام والمقدمات والفهرس والمؤلفين والأغلفة الخلفية):",
+  "   - If a page contains only general book covers (غلاف الكتاب الخارجي), copyright notices, pedagogical introductions to the book (مقدمة / مقدمة الكتاب), student guide (كيف تستخدم هذا الكتاب / كيف يسير التعلم هنا), general table of contents (فهرس المحتويات العام), author/reviewer credits (المؤلفون / المراجعون / فريق الإعداد والاعتماد), publisher marks (SPRIX, CACD), or student fields (class, name), output an EMPTY string.",
+  "   - ABSOLUTE EXCEPTION: THIS RULE NEVER APPLIES TO UNIT TITLE PAGES OR LESSON TITLE PAGES! Unit title pages and Lesson title pages are essential curriculum milestones and must always be captured as '# الوحدة [رقم]: [الاسم]' or '## الدرس [رقم]: [الاسم]'.",
   "   - STRICTLY FORBIDDEN to invent or hallucinate educational lessons (e.g. real numbers or general introductions) for non-content or back-cover pages.",
   "",
   "7. STRICT PROHIBITION OF EMOJIS (حظر تام لاستخدام الرموز التعبيرية):",
   "   - STRICTLY PROHIBITED to output emojis anywhere in headings, titles, or body text (no ⚠️, ⭐, 💡, 🤔, 🔎, 👆, etc.).",
   "",
-  "8. COMPLETE EXCLUSION OF QUESTIONS & EXERCISES (تجاهل جميع الأسئلة والاكتفاء بالشرح فقط):",
-  "   - If there are questions, exercises, tests, drills, problem sets, or quizzes on the lesson, you MUST COMPLETELY IGNORE AND EXCLUDE THEM.",
-  "   - Output ONLY the educational explanation, rules, facts, and concepts.",
+  "8. EXCLUSION OF PURE EXERCISES & TESTS (استخراج الشرح والمفردات والقواعد واستبعاد تدريبات الأسئلة فقط):",
+  "   - If a page contains vocabulary, definitions, grammar rules, reading passages, or instructional explanation alongside exercises: you MUST transcribe and format all vocabulary, definitions, grammar rules, reading texts, and explanations in full, and only omit the exercise question prompts.",
+  "   - Only output an EMPTY string if the page consists ENTIRELY of practice tests, quizzes, multiple-choice drills, or exam sheets with NO vocabulary, grammar, or instructional explanations.",
   "",
   "9. STRICT PROHIBITION OF META-LABELS & CONTENT CLASSIFICATION NOTES (حظر تام لملاحظات التصنيف والتمهيد):",
   "   - STRICTLY FORBIDDEN to write any meta-notes, editorial labels, content type tags, or commentary.",
@@ -83,47 +92,95 @@ export const DEEPSEEK_RAG_SYSTEM_PROMPT = [
   "   - Output pure, clean Markdown directly with NO markdown code block fences (no ```markdown), NO conversational remarks, NO meta-notes, and NO introductory or concluding greetings."
 ].join("\n");
 
-export async function organizeTextWithDeepSeek(
-  rawText: string,
+async function optimizeImageBuffer(buffer: Buffer): Promise<Buffer> {
+  if (buffer.length <= 280 * 1024) {
+    return buffer;
+  }
+  try {
+    const sharpModule = await import("sharp");
+    const sharp = (sharpModule as any).default || sharpModule;
+    return await sharp(buffer)
+      .resize({ width: 1200, height: 1600, fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 80, progressive: false })
+      .toBuffer();
+  } catch {
+    return buffer;
+  }
+}
+
+export async function organizePageWithDeepSeek(
+  imageBuffer: Buffer | null | undefined,
+  extractedText: string | undefined,
   options: DeepSeekOrganizerOptions
 ): Promise<string> {
   const rawKey = options.apiKey || process.env.DEEPSEEK_API_KEY || DEFAULT_DEEPSEEK_KEY;
   const cleanKey = rawKey.replace(/^Bearer\s+/i, "").trim();
 
-  if (!rawText || rawText.trim().length === 0) {
+  const hasImage = !!(imageBuffer && imageBuffer.length > 0);
+  const cleanText = (extractedText || "").trim();
+
+  if (!hasImage && cleanText.length === 0) {
     return "";
   }
 
   const maxRetries = options.maxRetries ?? 8;
   let attempt = 0;
 
+  const promptLines = [
+    `Subject: ${options.subjectName}`,
+    `Grade Level: ${options.gradeLevel}`,
+  ];
+  if (options.pageNumber) {
+    promptLines.push(`Page Number: ${options.pageNumber}`);
+  }
+  promptLines.push("");
+
+  if (cleanText.length > 0) {
+    promptLines.push(
+      "Extracted Digital PDF Text (Reference):",
+      "---",
+      cleanText,
+      "---",
+      ""
+    );
+  }
+
+  promptLines.push(
+    "Structure this textbook page directly into pure Markdown following all system rules:",
+    "1. TITLE PAGES FOR UNITS & LESSONS (صفحات عناوين وأغلفة الوحدات والدروس): Lesson and unit titles usually appear on a separate page. NEVER skip a page containing a unit or lesson title, even if it has no explanation text! When you encounter a page containing a lesson or unit title, capture ONLY the unit/lesson number and name (# الوحدة [رقم]: [اسم الوحدة] / ## الدرس [رقم]: [اسم الدرس]) without including any additional content (strip out all learning outcomes 'نواتج التعلم', objectives 'أهداف الدرس', intro questions 'تمهيد/سؤال الدرس/تساؤلات', lesson index lists, and image descriptions).",
+    "2. IGNORE decorative margin footers/headers (e.g. '14 | الوحدة 1...', '286 الوحدة 4...'). On continuation pages and standard explanation pages, start directly with '### [عنوان الفقرة]' or text. NEVER output '# الوحدة' or '## الدرس' from margin footers.",
+    "3. On lesson continuation & explanation pages: transcribe and structure the COMPLETE explanation text, definitions, rules, vocabulary, tables, and LaTeX formulas without omission or abbreviation.",
+    "4. Parse Egyptian textbook layout accurately: extract the correct lesson number (1..10) and full lesson title even if numbers are styled before or after 'الدرس' (e.g. '10 الدرس', '1 الدرس'). NEVER omit lesson numbers.",
+    "5. IGNORE all questions, exercises, drills (أسئلة / تدريبات / اختبر نفسك), and objectives (أهداف الدرس / نواتج التعلم).",
+    "6. STRICTLY DO NOT write meta-notes, conversational text, or classification labels."
+  );
+
+  const userPromptText = promptLines.join("\n");
+
   while (attempt < maxRetries) {
     attempt++;
     try {
-      const userPrompt = [
-        `Subject: ${options.subjectName}`,
-        `Grade Level: ${options.gradeLevel}`,
-        "",
-        "Raw Extracted Textbook Page Text:",
-        "---",
-        rawText,
-        "---",
-        "",
-        "Structure this textbook page into pure Markdown following all system rules:",
-        "1. IGNORE decorative margin footers/headers (e.g. '14 | الوحدة 1...', '286 الوحدة 4...'). On continuation pages and standard explanation pages, start directly with '### [عنوان الفقرة]' or text. NEVER output '# الوحدة' or '## الدرس' from margin footers.",
-        "2. On Unit cover pages ONLY, write ONLY the Unit header (# الوحدة [الرقم]: [اسم الوحدة الكامل]) as a single line and NOTHING ELSE. Distinguish Unit covers (index of all lessons) from Lesson opening pages. NEVER output '# الوحدة' on a Lesson opening page.",
-        "3. Declare the full Level 2 header (## الدرس [رقم]: [عنوان الدرس الكامل]) on the opening page of every lesson/chapter. ALWAYS extract the overarching Lesson Title (e.g. 'الخواص الفيزيائية للماء', 'العوامل الفيزيائية وتأثيرها في الغلاف الجوي'), NEVER an internal subtopic (e.g. NOT 'الكثافة', NOT 'تكيف الكائنات الحية'). Subtopics and introductory topics go under the '##' header as '###'.",
-        "4. Parse Egyptian textbook OCR layout properly: extract the correct lesson number (1..10) and full lesson title even if numbers are styled before or after 'الدرس' (e.g. '10 الدرس', '1 الدرس'). NEVER omit lesson numbers.",
-        "5. Write the COMPLETE explanation text without omission or abbreviation.",
-        "6. IGNORE all questions, exercises, drills (أسئلة / تدريبات / اختبر نفسك), and objectives (أهداف الدرس / نواتج التعلم).",
-        "7. STRICTLY DO NOT write meta-notes or labels saying this is introductory content or explanation.",
-      ].join("\n");
+      const userContent: Array<
+        | { type: "text"; text: string }
+        | { type: "image_url"; image_url: { url: string; detail?: string } }
+      > = [{ type: "text", text: userPromptText }];
+
+      if (hasImage && imageBuffer) {
+        const optimizedBuffer = await optimizeImageBuffer(imageBuffer);
+        const base64Image = optimizedBuffer.toString("base64");
+        userContent.push({
+          type: "image_url",
+          image_url: {
+            url: `data:image/jpeg;base64,${base64Image}`,
+            detail: "auto",
+          },
+        });
+      }
 
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 25000);
+      const timeoutId = setTimeout(() => controller.abort(), 90000);
 
       let response: Response | null = null;
-      let usedAlibaba = false;
 
       try {
         response = await fetch("https://api.deepseek.com/v1/chat/completions", {
@@ -136,7 +193,7 @@ export async function organizeTextWithDeepSeek(
             model: "deepseek-flash",
             messages: [
               { role: "system", content: DEEPSEEK_RAG_SYSTEM_PROMPT },
-              { role: "user", content: userPrompt },
+              { role: "user", content: userContent },
             ],
             thinking: { type: "disabled" },
             temperature: 0.1,
@@ -149,7 +206,6 @@ export async function organizeTextWithDeepSeek(
         const alibabaKey = (process.env.ALIBABA_API_KEY || "").trim();
         if (alibabaKey) {
           try {
-            usedAlibaba = true;
             response = await fetch("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", {
               method: "POST",
               headers: {
@@ -157,10 +213,10 @@ export async function organizeTextWithDeepSeek(
                 "Content-Type": "application/json",
               },
               body: JSON.stringify({
-                model: "qwen3.8-flash",
+                model: hasImage ? "qwen-vl-ocr-2025-11-20" : "qwen3.8-flash",
                 messages: [
                   { role: "system", content: DEEPSEEK_RAG_SYSTEM_PROMPT },
-                  { role: "user", content: userPrompt },
+                  { role: "user", content: userContent },
                 ],
                 temperature: 0.1,
                 stream: false,
@@ -180,16 +236,20 @@ export async function organizeTextWithDeepSeek(
       }
 
       const data = await response.json();
-      const content = data?.choices?.[0]?.message?.content || "";
+      const msg = data?.choices?.[0]?.message;
+      let content = (msg?.content || "").trim();
+      if (!content && msg?.reasoning_content) {
+        content = msg.reasoning_content.trim();
+      }
 
-      let cleanContent = content.trim();
+      let cleanContent = content;
       if (cleanContent.startsWith("```markdown")) {
         cleanContent = cleanContent.replace(/^```markdown\s*/, "").replace(/\s*```$/, "");
       } else if (cleanContent.startsWith("```")) {
         cleanContent = cleanContent.replace(/^```\s*/, "").replace(/\s*```$/, "");
       }
 
-      return cleanContent;
+      return cleanContent.trim();
     } catch (error: any) {
       const isNetworkError =
         error.name === "AbortError" ||
@@ -206,18 +266,35 @@ export async function organizeTextWithDeepSeek(
       }
 
       console.warn(
-        `DeepSeek attempt ${attempt}/${maxRetries} (${
+        `DeepSeek 4.1 attempt ${attempt}/${maxRetries} (${
           isNetworkError ? "Network timeout/error" : error.message
         }) - Retrying after ${Math.round(delayMs / 1000)}s...`
       );
 
       if (attempt >= maxRetries) {
-        return rawText.trim();
+        if (!hasImage && cleanText.length > 0) {
+          return cleanText;
+        }
+        throw new Error(
+          `فشل استجابة DeepSeek 4.1 بعد ${maxRetries} محاولات (${
+            isNetworkError ? "انقطاع أو تجاوز مهلة الشبكة" : error.message
+          })`
+        );
       }
 
       await new Promise((res) => setTimeout(res, delayMs));
     }
   }
 
-  return rawText.trim();
+  if (!hasImage && cleanText.length > 0) {
+    return cleanText;
+  }
+  throw new Error("تعذر استخراج محتوى الصفحة من خادم DeepSeek");
+}
+
+export async function organizeTextWithDeepSeek(
+  rawText: string,
+  options: DeepSeekOrganizerOptions
+): Promise<string> {
+  return organizePageWithDeepSeek(null, rawText, options);
 }

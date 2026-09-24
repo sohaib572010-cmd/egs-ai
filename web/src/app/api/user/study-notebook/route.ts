@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function GET(req: NextRequest) {
   try {
     const authHeader = req.headers.get('Authorization');
@@ -90,6 +92,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'المادة والعنوان والمحتوى حقول مطلوبة' }, { status: 400 });
     }
 
+    // Strip any raw thought blocks from content and title
+    const cleanContent = String(content).replace(/<thought[\s\S]*?<\/thought>/gi, '').trim();
+    const cleanTitle = String(title).replace(/<thought[\s\S]*?<\/thought>/gi, '').replace(/\[[\s\S]*?\]/g, '').trim();
+
+    if (!cleanContent) {
+      return NextResponse.json({ error: 'محتوى الملاحظة غير صالح' }, { status: 400 });
+    }
+
+    // Validate and sanitize session UUID format to prevent database constraint errors
+    const rawSessionId = session_id || sessionId || null;
+    const sanitizedSessionId = (rawSessionId && UUID_REGEX.test(rawSessionId)) ? rawSessionId : null;
+
     const profile = await db.getProfile(userId);
     const targetGrade = grade_level || profile?.grade_level || '1_high';
 
@@ -97,10 +111,10 @@ export async function POST(req: NextRequest) {
       userId,
       subjectName: subject_name,
       gradeLevel: targetGrade,
-      title,
-      content,
+      title: cleanTitle || 'ملاحظة تعليمية',
+      content: cleanContent,
       noteType: note_type || 'formula',
-      sessionId: session_id || sessionId || null,
+      sessionId: sanitizedSessionId,
       messageId: message_id || messageId || null
     });
 

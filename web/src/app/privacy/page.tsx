@@ -105,7 +105,7 @@ export default function PrivacyPolicyPage() {
             </p>
             <ul style={listStyle}>
               <li><strong>الهاتف / واتساب:</strong> <code>01037220587</code></li>
-              <li><strong>البريد الإلكتروني:</strong> <code>sohaib572010@gmail.com</code></li>
+              <li><strong>البريد الإلكتروني:</strong> <code>business@egsaiedu.com</code></li>
               <li><strong>صفحة التواصل:</strong> <Link href="/contact" style={{ color: 'var(--primary-color)', fontWeight: 700 }}>صفحة اتصل بنا</Link></li>
             </ul>
           </Section>

@@ -347,7 +347,7 @@ export default function RootLayout({
           '@type': 'ContactPoint',
           'telephone': '+201037220587',
           'contactType': 'customer support',
-          'email': 'sohaib572010@gmail.com',
+          'email': 'business@egsaiedu.com',
           'areaServed': 'EG',
           'availableLanguage': ['Arabic', 'English']
         }

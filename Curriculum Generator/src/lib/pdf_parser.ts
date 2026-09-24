@@ -82,6 +82,7 @@ export class PDFDocumentHandler {
 import fitz
 import os
 import json
+from PIL import Image
 
 pdf_path = json.loads(${JSON.stringify(JSON.stringify(this.filePath))})
 out_dir = json.loads(${JSON.stringify(JSON.stringify(this.cacheDir))})
@@ -92,8 +93,14 @@ try:
     for i, page in enumerate(doc):
         page_path = os.path.join(out_dir, f'page_{i+1}.jpg')
         if not os.path.exists(page_path):
-            pix = page.get_pixmap(dpi=180)
-            pix.save(page_path)
+            pix = page.get_pixmap(dpi=140)
+            try:
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                if img.width > 1200:
+                    img.thumbnail((1200, 1600))
+                img.save(page_path, "JPEG", quality=80, optimize=True)
+            except Exception:
+                pix.save(page_path)
 except Exception as e:
     print('Batch render error:', e)
 `;
@@ -180,6 +187,7 @@ except Exception as e:
 import fitz
 import os
 import json
+from PIL import Image
 
 pdf_path = json.loads(${JSON.stringify(JSON.stringify(this.filePath))})
 out_path = json.loads(${JSON.stringify(JSON.stringify(cachedImgPath))})
@@ -188,8 +196,14 @@ os.makedirs(os.path.dirname(out_path), exist_ok=True)
 try:
     doc = fitz.open(pdf_path)
     if ${pageNumber - 1} < len(doc):
-        pix = doc[${pageNumber - 1}].get_pixmap(dpi=180)
-        pix.save(out_path)
+        pix = doc[${pageNumber - 1}].get_pixmap(dpi=140)
+        try:
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            if img.width > 1200:
+                img.thumbnail((1200, 1600))
+            img.save(out_path, "JPEG", quality=80, optimize=True)
+        except Exception:
+            pix.save(out_path)
 except Exception as e:
     print('Single page render error:', e)
 `;

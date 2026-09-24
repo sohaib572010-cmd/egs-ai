@@ -17,31 +17,66 @@ import { getExhaustiveLessonContext, findMatchingLessonInCurriculum } from '@/li
 
 const VALID_MODES: ChatMode[] = ['socratic', 'detailed', 'summary'];
 
-function parseMessage(msg: string): { cleanText: string; imageDesc?: string; imageBase64?: string; imageMime?: string } {
+function parseMessage(msg: string): {
+  cleanText: string;
+  hasImage: boolean;
+  imageDesc?: string;
+  imageBase64?: string;
+  imageMime?: string;
+  isVoice?: boolean;
+  voiceDuration?: number;
+  voiceMime?: string;
+  voiceAudio?: string;
+} {
   let cleanText = msg || '';
   let imageDesc: string | undefined;
   let imageBase64: string | undefined;
   let imageMime: string | undefined;
+  let isVoice = false;
+  let voiceDuration: number | undefined;
+  let voiceMime: string | undefined;
+  let voiceAudio: string | undefined;
 
-  if (cleanText.startsWith('[IMAGE_MESSAGE:')) {
-    const closingBracketIndex = cleanText.indexOf(']');
-    if (closingBracketIndex !== -1) {
-      const prefix = cleanText.substring(15, closingBracketIndex);
-      const parts = prefix.split(';');
-      imageMime = parts[0] || 'image/jpeg';
-      imageBase64 = parts[1] || '';
-      if (parts[2]) {
+  // Extract IMAGE_MESSAGE prefix if present
+  if (cleanText.includes('[IMAGE_MESSAGE:')) {
+    const imgMatch = cleanText.match(/\[IMAGE_MESSAGE:([^;]+);([^;]+)(?:;([^\]]*))?\]/);
+    if (imgMatch) {
+      imageMime = imgMatch[1] || 'image/jpeg';
+      imageBase64 = imgMatch[2] || '';
+      if (imgMatch[3]) {
         try {
-          imageDesc = decodeURIComponent(parts[2]);
+          imageDesc = decodeURIComponent(imgMatch[3]);
         } catch (e) {
-          imageDesc = parts[2];
+          imageDesc = imgMatch[3];
         }
       }
-      cleanText = cleanText.substring(closingBracketIndex + 1);
+      cleanText = cleanText.replace(imgMatch[0], '').trim();
     }
   }
 
-  return { cleanText, imageDesc, imageBase64, imageMime };
+  // Extract VOICE_MESSAGE prefix if present: [VOICE_MESSAGE:duration=12;mime=audio/webm;codecs=opus;audio=...]
+  if (cleanText.includes('VOICE_MESSAGE:')) {
+    const voiceMatch = cleanText.match(/\[?VOICE_MESSAGE:duration=([0-9.]+);mime=([\s\S]*?);audio=([\s\S]*?)\]/);
+    if (voiceMatch) {
+      isVoice = true;
+      voiceDuration = parseFloat(voiceMatch[1]) || 0;
+      voiceMime = voiceMatch[2] || 'audio/webm';
+      voiceAudio = voiceMatch[3] || '';
+      cleanText = cleanText.replace(voiceMatch[0], '').trim();
+    }
+  }
+
+  return { 
+    cleanText, 
+    hasImage: !!imageBase64, 
+    imageDesc, 
+    imageBase64, 
+    imageMime, 
+    isVoice, 
+    voiceDuration, 
+    voiceMime, 
+    voiceAudio 
+  };
 }
 
 function isConversationalGreeting(text: string): boolean {
@@ -90,6 +125,20 @@ function isImageCapabilityInquiry(text: string): boolean {
   const capabilityQuestionPattern = /(?:هل|أقدر|اقدر|تقدر|بتقدر|ينفع|ممكن|عايز|عاوز|كيف|ازاي|طريقة|تدعم|بتدعم|تقبل|بيقبل|بتقبل|تفهم|بيفهم|بتفهم|تشوف|بيشوف|بتشوف|تقرأ|بتقرأ|تستقبل|بتستقبل|يمكنك|تستطيع|بتعرف|تعرف|أبعت|ابعت|ارفع|أرفع|اصور|أصور|can i|do you (?:support|accept|see|read|take)|are you (?:text|multimodal))/i;
 
   return directTextOnlyCheck || (cameraOrImagePattern.test(clean) && capabilityQuestionPattern.test(clean));
+}
+
+function isVoiceCapabilityInquiry(text: string): boolean {
+  if (!text) return false;
+  const clean = text
+    .replace(/[؟?!.،,;:~`!@#$%^&*()_+\-=\[\]{}'"]/g, ' ')
+    .trim()
+    .toLowerCase();
+  if (!clean || clean.length > 150) return false;
+
+  const voicePattern = /(?:صوتية|رسالة صوتية|رسائل صوتية|فويس|فويسات|صوت|تسجيل صوتي|تسجيل صوت|مايك|ميكروفون|تسجيلات|voice|audio|voice[- ]?note)/i;
+  const capabilityPattern = /(?:هل|أقدر|اقدر|تقدر|بتقدر|ينفع|ممكن|عايز|عاوز|كيف|ازاي|طريقة|تدعم|بتدعم|تقبل|بيقبل|بتقبل|تسمع|بيسمع|بتسمع|تفهم|بيفهم|بتفهم|تستقبل|بتستقبل|تتكلم|اتكلم|أبعت|ابعت|اسجل|أسجل|can i|do you (?:support|accept|hear|listen))/i;
+
+  return voicePattern.test(clean) && capabilityPattern.test(clean);
 }
 
 async function analyzeImageWithEdenAI(base64: string, mimeType: string): Promise<string> {
@@ -161,13 +210,24 @@ async function analyzeImageWithEdenAI(base64: string, mimeType: string): Promise
   }
 }
 
-function buildPromptText(cleanText: string, imageDesc?: string): string {
+function buildPromptText(
+  cleanText: string,
+  imageDesc?: string,
+  isVoice?: boolean,
+  voiceDuration?: number
+): string {
   const trimmed = (cleanText || '').trim();
-  if (imageDesc) {
-    const questionPart = trimmed || 'قم بقراءة وحل وشرح المسألة أو المحتوى الظاهر في الصورة بالتفصيل وفق المنهج المصري المعتمد.';
-    return `[صورة ملتقطة بالكاميرا / مرفقة من الطالب: ${imageDesc}]\n\nطلب أو سؤال الطالب حول الصورة: ${questionPart}`;
+  let textPart = trimmed;
+  if (isVoice) {
+    const durStr = voiceDuration && voiceDuration > 0 ? ` (المدة: ${Math.round(voiceDuration)} ثانية)` : '';
+    textPart = `[رسالة صوتية مسجلة بصوت الطالب${durStr} - تم تفريغها نصياً بدقة]: "${trimmed || 'استمع إلى تسجيلي الصوتي وأجبني'}"`;
   }
-  return trimmed;
+
+  if (imageDesc) {
+    const questionPart = textPart || 'قم بقراءة وحل وشرح المسألة أو المحتوى الظاهر في الصورة بالتفصيل وفق المنهج المصري المعتمد.';
+    return `[صورة ملتقطة بالكاميرا / مرفقة من الطالب${isVoice ? ' بجانب رسالته الصوتية' : ''}: ${imageDesc}]\n\nطلب أو سؤال الطالب حول الصورة: ${questionPart}`;
+  }
+  return textPart;
 }
 
 function buildHierarchicalContextString(parentChunks: CurriculumChunk[], childChunks: CurriculumChunk[] = []): string {
@@ -263,6 +323,31 @@ export async function POST(req: NextRequest) {
       }, { status: 429 });
     }
 
+    // Resolve or auto-create Chat Session
+    let activeSessionId = session_id;
+    if (activeSessionId) {
+      const existingSession = await db.getChatSession(activeSessionId);
+      if (existingSession) {
+        // Ownership check: session belongs to user
+        if (userId && existingSession.user_id && existingSession.user_id !== userId) {
+          return NextResponse.json(
+            { error: 'forbidden', message: 'ليس لديك صلاحية للوصول إلى هذه المحادثة.' },
+            { status: 403 }
+          );
+        }
+        // Authoritatively bind subject_name and grade_level from the open chat session
+        if (existingSession.subject_name) {
+          subject_name = existingSession.subject_name.trim();
+        }
+        if (existingSession.grade_level) {
+          targetGrade = existingSession.grade_level.trim();
+        }
+        if ((existingSession.mode || 'detailed') !== chatMode) {
+          await db.updateChatSessionMode(activeSessionId, chatMode);
+        }
+      }
+    }
+
     if (!targetGrade) {
       return NextResponse.json(
         { error: 'grade_level_required', message: 'السنة الدراسية مطلوبة لتحديد المنهج المناسب.' },
@@ -280,17 +365,24 @@ export async function POST(req: NextRequest) {
       }, { status: 400 });
     }
 
-    // Resolve or auto-create Chat Session
-    let activeSessionId = session_id;
+    const parsedMsg = parseMessage(message);
+
     if (!activeSessionId) {
-      const title = message.length > 35 ? message.substring(0, 35) + '...' : message;
-      const newSession = await db.createChatSession(title, subject_name, targetGrade, userId, undefined, chatMode);
-      activeSessionId = newSession.id;
-    } else {
-      const existingSession = await db.getChatSession(activeSessionId);
-      if (existingSession && (existingSession.mode || 'detailed') !== chatMode) {
-        await db.updateChatSessionMode(activeSessionId, chatMode);
+      let sessionTitle = '';
+      if (parsedMsg.cleanText && parsedMsg.cleanText.trim().length > 0) {
+        const clean = parsedMsg.cleanText.trim();
+        sessionTitle = clean.length > 35 ? clean.substring(0, 35) + '...' : clean;
+      } else if (parsedMsg.isVoice && parsedMsg.hasImage) {
+        sessionTitle = 'تسجيل صوتي مع صورة';
+      } else if (parsedMsg.isVoice) {
+        sessionTitle = 'تسجيل صوتي';
+      } else if (parsedMsg.hasImage) {
+        sessionTitle = parsedMsg.imageDesc ? (parsedMsg.imageDesc.length > 35 ? parsedMsg.imageDesc.substring(0, 35) + '...' : parsedMsg.imageDesc) : 'سؤال من صورة';
+      } else {
+        sessionTitle = 'محادثة جديدة';
       }
+      const newSession = await db.createChatSession(sessionTitle, subject_name, targetGrade, userId, undefined, chatMode);
+      activeSessionId = newSession.id;
     }
 
     let isCurriculumActive = false;
@@ -306,8 +398,8 @@ export async function POST(req: NextRequest) {
       isCurriculumActive = true;
     }
 
-    const { cleanText, imageDesc: initialImageDesc, imageBase64, imageMime } = parseMessage(message);
-    let promptText = buildPromptText(cleanText, initialImageDesc);
+    const { cleanText, imageDesc: initialImageDesc, imageBase64, imageMime, isVoice, voiceDuration } = parsedMsg;
+    let promptText = buildPromptText(cleanText, initialImageDesc, isVoice, voiceDuration);
 
     // Save user message before streaming
     await db.addChatMessage('user', message, userId, undefined, activeSessionId);
@@ -347,10 +439,10 @@ export async function POST(req: NextRequest) {
       }
 
       recentHistory = selectedHistory.map((h: any) => {
-        const { cleanText: hText, imageDesc: histDesc } = parseMessage(h.message);
+        const { cleanText: hText, imageDesc: histDesc, isVoice: hVoice, voiceDuration: hDuration } = parseMessage(h.message);
         return {
           sender: h.sender,
-          message: buildPromptText(hText, histDesc)
+          message: buildPromptText(hText, histDesc, hVoice, hDuration)
         };
       });
     }
@@ -381,7 +473,7 @@ export async function POST(req: NextRequest) {
               }
             }
             if (desc) {
-              promptText = buildPromptText(cleanText, desc);
+              promptText = buildPromptText(cleanText, desc, isVoice, voiceDuration);
             }
           }
 
@@ -392,7 +484,17 @@ export async function POST(req: NextRequest) {
           let activeSubject = subject_name;
           let activeGrade = targetGrade;
 
-          if (!imageBase64 && isImageCapabilityInquiry(cleanText)) {
+          if (!imageBase64 && isVoiceCapabilityInquiry(cleanText)) {
+            emitSearchStep('capabilities', '🎙️', 'التعرف على إمكانيات الرسائل الصوتية...');
+            ragContext = `[توجيه استفسار عن إمكانيات الرسائل الصوتية والتسجيل الصوتي]:
+الطالب يستفسر عما إذا كان يمكنه إرسال رسائل صوتية (فويس نوت) أو التحدث بالميكروفون أو هل الذكاء الاصطناعي يدعم استقبال وفهم الصوت.
+أجب الطالب بأسلوب هادئ وواثق وذكي ومهذب بالعامية المصرية التعليمية الراقية دون مبالغة:
+1. أكد له بكل وضوح واطمئنان أنك تدعم استقبال وفهم الرسائل الصوتية كمدخل أساسي واعتيادي (لست نموذجاً نصياً فقط أبداً).
+2. وضّح له أنه يستطيع تسجيل سؤاله أو استفساره بصوته مباشرة عبر الضغط على زر الميكروفون (أيقونة الميكروفون بجانب خانة الكتابة) والتحدث بحرية، كما يمكنه إرفاق صورة مع الرسالة الصوتية في نفس الوقت.
+3. أكد له أنك ستستمع لكل تفاصيل سؤاله وتشرحها وتحلها له خطوة بخطوة وفق المنهج المصري لمادة "${subject_name}".
+4. ادعه بهدوء وثقة لتجربة تسجيل رسالة صوتية الآن بالسؤال أو المسألة التي تشغله لتبدأ في شرحها معه.
+استثناء حاسم: يمنع منعاً باتاً إصدار أي تنبيه بأن المعلومة خارج المنهج أو أنك نموذج نصي فقط.`;
+          } else if (!imageBase64 && isImageCapabilityInquiry(cleanText)) {
             emitSearchStep('capabilities', '📷', 'التعرف على إمكانيات الكاميرا والصور...');
             ragContext = `[توجيه استفسار عن إمكانيات الكاميرا والصور والمرفقات]:
 الطالب يستفسر عن إمكانية إرسال أو التقاط أو رفع الصور أو استخدام الكاميرا لحل الأسئلة والمسائل أو هل الذكاء الاصطناعي يدعم الصور.
@@ -730,6 +832,7 @@ export async function POST(req: NextRequest) {
             `data: ${JSON.stringify({
               type: 'done',
               session_id: activeSessionId,
+              subject_name: subject_name,
               message_id: savedAiMsg?.id || undefined,
               duration: finalDuration,
               coins_used: coinsCost,

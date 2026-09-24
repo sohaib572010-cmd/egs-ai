@@ -47,6 +47,10 @@ export async function GET(req: NextRequest) {
       success: true,
       curriculum: detail.curriculum,
       content: detail.content
+    }, {
+      headers: {
+        'Cache-Control': 'no-store, no-cache, must-revalidate'
+      }
     });
 
   } catch (error: any) {

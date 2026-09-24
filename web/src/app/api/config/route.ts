@@ -1,7 +1,7 @@
 export const runtime = 'edge';
-export const revalidate = 300;
+export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, getPublicConfigVersion, invalidateCurriculumsCache } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 
 const DEFAULT_GRADE_LEVELS = ['1_middle', '2_middle', '3_middle', '1_high', '2_high'];
@@ -45,17 +45,25 @@ export async function GET(req: NextRequest) {
     const guestCoins = 0.0;
     
     const userNotFound = authAttempted && !authValid;
+    const publicVer = getPublicConfigVersion();
+    let etag = `"pub_${publicVer}_${allCurriculums.length}"`;
 
-    const cacheHeaders: Record<string, string> = authAttempted
-      ? {
-          'Cache-Control': 'private, no-cache, no-store, must-revalidate',
-          'Vary': 'Authorization'
-        }
-      : {
-          'Cache-Control': 'public, max-age=60, s-maxage=300, stale-while-revalidate=600',
-          'CDN-Cache-Control': 'max-age=300',
-          'Vary': 'Authorization, Accept-Encoding'
-        };
+    if (profile) {
+      etag = `"usr_${publicVer}_${profile.id}_${profile.coins}_${profile.points}_${profile.plan_type}_${profile.subscription_status}_${profile.study_streak || 1}_${dailyQuests?.streakDays || 0}_${dailyQuests?.allCompleted ? 1 : 0}"`;
+    } else if (userNotFound) {
+      etag = `"usr_invalid_${publicVer}"`;
+    }
+
+    const cacheHeaders: Record<string, string> = {
+      'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate',
+      'Vary': 'Authorization, If-None-Match',
+      'ETag': etag
+    };
+
+    const ifNoneMatch = req.headers.get('If-None-Match');
+    if (ifNoneMatch && ifNoneMatch === etag) {
+      return new NextResponse(null, { status: 304, headers: cacheHeaders });
+    }
 
     return NextResponse.json({
       website_link: websiteLink || 'http://localhost:3000',
@@ -150,6 +158,9 @@ export async function POST(req: NextRequest) {
     if (body.active_curriculum_ids !== undefined) {
       await db.setSystemSetting('active_curriculum_ids', JSON.stringify(body.active_curriculum_ids));
     }
+
+    invalidateCurriculumsCache();
+    await db.setSystemSetting('curriculum_version', Date.now().toString()).catch(() => {});
 
     return NextResponse.json({ success: true });
 
