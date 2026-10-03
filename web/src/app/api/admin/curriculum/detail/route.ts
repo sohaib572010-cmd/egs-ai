@@ -60,6 +60,7 @@ export async function GET(req: NextRequest) {
 }
 
 import { processCurriculumChunks } from '@/lib/curriculum_processor';
+import { parseCurriculumOutline } from '@/lib/curriculum_structure';
 
 // POST update curriculum Markdown content
 export async function POST(req: NextRequest) {
@@ -91,11 +92,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'تعذر تجزئة الملف. يرجى التأكد من احتوائه على نص صالح.' }, { status: 400 });
     }
 
-    // Update in DB
+    // A lesson map that was derived from the old Markdown follows the edit; an authored one is kept
+    const [previous, record] = await Promise.all([db.getCurriculumDetail(id).catch(() => null), db.getCurriculums().then(list => list.find(c => c.id === id))]);
+    const titles = (units: { title: string; lessons: { title: string }[] }[]) => JSON.stringify(units.map(u => [u.title, u.lessons.map(l => l.title)]));
+    const derivedBefore = previous?.content ? titles(parseCurriculumOutline(previous.content)) : null;
+    const followsMarkdown = !record?.units?.length || titles(record.units) === derivedBefore;
+
     const success = await db.updateCurriculumContent(id, grade_level, subject_name, allChunks, content);
 
     if (!success) {
       return NextResponse.json({ error: 'فشل تحديث محتوى المنهج' }, { status: 500 });
+    }
+    if (followsMarkdown) {
+      await db.updateCurriculumUnits(id, parseCurriculumOutline(content));
     }
 
     if (entities.length > 0) {

@@ -4,6 +4,7 @@ import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { getCurriculumContextForLesson } from '@/lib/curriculum_structure';
 import { isEnglishSubject } from '@/lib/subject_helpers';
+import { acquireAiSlot, releaseAiSlot, chargeForUsage, usageFromProvider, estimateUsage, AI_BUSY_RESPONSE } from '@/lib/metering';
 
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -22,9 +23,10 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { subject_name, grade_level, topic, count = 5 } = body;
+    const { subject_name, grade_level, topic } = body;
+    const count = Math.min(20, Math.max(1, Math.floor(Number(body.count) || 5)));
 
-    if (!subject_name || !grade_level || !topic) {
+    if (typeof subject_name !== 'string' || typeof grade_level !== 'string' || typeof topic !== 'string' || !subject_name || !grade_level || !topic) {
       return NextResponse.json({ error: 'جميع الحقول مطلوبة (المادة، الصف الدراسي، الموضوع)' }, { status: 400 });
     }
 
@@ -113,69 +115,73 @@ ${cardRules}
 JSON Output Schema:
 ${schemaExample}`;
 
-    const response = await fetch(DEEPSEEK_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'deepseek-flash',
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `Generate ${count} flashcards for topic: ${topic} as a JSON object.` }
-        ],
-        response_format: { type: 'json_object' },
-        thinking: { type: 'disabled' },
-        temperature: 0.35,
-        max_tokens: 4000
-      })
-    });
-
-    if (!response.ok) {
-      console.error('DeepSeek flashcard generation failed:', await response.text());
-      return NextResponse.json({ error: 'فشل مزود الذكاء الاصطناعي في توليد الكروت' }, { status: 502 });
+    if (!(await acquireAiSlot(userId))) {
+      return NextResponse.json(AI_BUSY_RESPONSE, { status: 429 });
     }
-
-    const data = await response.json();
-    const msg = data.choices?.[0]?.message;
-    let content = (msg?.content || msg?.reasoning_content || '').trim();
-
-    // Clean JSON markdown fences
-    if (content.startsWith('```json')) {
-      content = content.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
-    } else if (content.startsWith('```')) {
-      content = content.replace(/^```\s*/, '').replace(/\s*```$/, '');
-    }
-
-    let parsed: any;
     try {
-      parsed = JSON.parse(content);
-    } catch (e) {
-      console.error('Flashcards JSON parse error:', content);
-      return NextResponse.json({ error: 'فشل في قراءة بيانات الكروت المولدة' }, { status: 500 });
+      const response = await fetch(DEEPSEEK_API_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: 'deepseek-flash',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: `Generate ${count} flashcards for topic: ${topic} as a JSON object.` }
+          ],
+          response_format: { type: 'json_object' },
+          thinking: { type: 'disabled' },
+          temperature: 0.35,
+          max_tokens: 4000
+        })
+      });
+
+      if (!response.ok) {
+        console.error('DeepSeek flashcard generation failed:', await response.text());
+        return NextResponse.json({ error: 'فشل مزود الذكاء الاصطناعي في توليد الكروت' }, { status: 502 });
+      }
+
+      const data = await response.json();
+      const msg = data.choices?.[0]?.message;
+      let content = (msg?.content || msg?.reasoning_content || '').trim();
+      const charge = await chargeForUsage(profile, [usageFromProvider(data.usage) ?? estimateUsage(systemPrompt.length, content.length)]);
+
+      // Clean JSON markdown fences
+      if (content.startsWith('```json')) {
+        content = content.replace(/^```json\s*/i, '').replace(/\s*```$/, '');
+      } else if (content.startsWith('```')) {
+        content = content.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(content);
+      } catch (e) {
+        console.error('Flashcards JSON parse error:', content);
+        return NextResponse.json({ error: 'فشل في قراءة بيانات الكروت المولدة' }, { status: 500 });
+      }
+
+      if (!parsed.cards || !Array.isArray(parsed.cards) || parsed.cards.length === 0) {
+        return NextResponse.json({ error: 'لم يتم توليد أي كروت صالحة' }, { status: 500 });
+      }
+
+      // Save deck and cards to database
+      const deckTitle = parsed.title || (isEnglish ? `Cards: ${topic}` : `كروت: ${topic}`);
+      const newDeck = await db.createFlashcardDeck(userId, subject_name, grade_level, deckTitle, parsed.cards);
+
+      return NextResponse.json({
+        success: true,
+        deck: newDeck,
+        cards: parsed.cards,
+        coins_deducted: charge.points,
+        remaining_coins: charge.remaining
+      });
+
+    } finally {
+      await releaseAiSlot(userId);
     }
-
-    if (!parsed.cards || !Array.isArray(parsed.cards) || parsed.cards.length === 0) {
-      return NextResponse.json({ error: 'لم يتم توليد أي كروت صالحة' }, { status: 500 });
-    }
-
-    // Deduct coins for generation (standard flash rate)
-    const promptTokens = data.usage?.prompt_tokens || 0;
-    const completionTokens = data.usage?.completion_tokens || 0;
-    const egpCost = (promptTokens / 1000000) * 30 + (completionTokens / 1000000) * 50;
-    const coinsCost = egpCost * 10.0;
-    await db.deductCoins(userId, null, coinsCost);
-
-    // Save deck and cards to database
-    const deckTitle = parsed.title || (isEnglish ? `Cards: ${topic}` : `كروت: ${topic}`);
-    const newDeck = await db.createFlashcardDeck(userId, subject_name, grade_level, deckTitle, parsed.cards);
-
-    return NextResponse.json({
-      success: true,
-      deck: newDeck,
-      cards: parsed.cards
-    });
 
   } catch (error: any) {
     console.error('Generate flashcards error:', error);

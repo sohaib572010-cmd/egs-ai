@@ -4,10 +4,12 @@ import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { callGeminiFlash } from '@/lib/gemini';
 import { isEnglishSubject } from '@/lib/subject_helpers';
+import { chargeForUsage, usageFromProvider, estimateUsage } from '@/lib/metering';
+import type { TokenUsage } from '@/lib/points_pricing';
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 
-async function evaluateExamWithAI(systemPrompt: string, examId: string): Promise<{ content: string; coinsCost: number }> {
+async function evaluateExamWithAI(systemPrompt: string, examId: string): Promise<{ content: string; usage: TokenUsage | null }> {
   const deepseekApiKey = process.env.DEEPSEEK_API_KEY || '';
   if (deepseekApiKey) {
     try {
@@ -34,12 +36,8 @@ async function evaluateExamWithAI(systemPrompt: string, examId: string): Promise
         const data = await response.json();
         const msg = data.choices?.[0]?.message;
         const content = (msg?.content || msg?.reasoning_content || '').trim();
-        const promptTokens = data.usage?.prompt_tokens || 0;
-        const completionTokens = data.usage?.completion_tokens || 0;
-        const egpCost = (promptTokens / 1000000) * 30 + (completionTokens / 1000000) * 50;
-        const coinsCost = egpCost * 12.5;
         if (content) {
-          return { content, coinsCost };
+          return { content, usage: usageFromProvider(data.usage) ?? estimateUsage(systemPrompt.length, content.length) };
         }
       } else {
         console.warn('DeepSeek grading returned status:', response.status, ', falling back to Gemini Flash.');
@@ -53,10 +51,10 @@ async function evaluateExamWithAI(systemPrompt: string, examId: string): Promise
   try {
     const prompt = `${systemPrompt}\n\nUser request: Grade these answers for exam ID ${examId}`;
     const content = await callGeminiFlash(prompt, 1200);
-    return { content, coinsCost: 0.25 };
+    return { content, usage: estimateUsage(prompt.length, content.length) };
   } catch (edenError: any) {
     console.error('All AI providers failed for exam grading:', edenError);
-    return { content: JSON.stringify({ score: 75, evaluation: 'تم تقييم إجاباتك بنجاح وفق المعايير النموذجية للمنهج.' }), coinsCost: 0 };
+    return { content: JSON.stringify({ score: 75, evaluation: 'تم تقييم إجاباتك بنجاح وفق المعايير النموذجية للمنهج.' }), usage: null };
   }
 }
 
@@ -239,8 +237,7 @@ Grading Guidelines:
 JSON Output Schema:
 ${schemaExample}`;
 
-      const { content, coinsCost: evalCost } = await evaluateExamWithAI(systemPrompt, exam_id);
-      coinsCost = evalCost;
+      const { content, usage } = await evaluateExamWithAI(systemPrompt, exam_id);
       gradingResult = parseGradingResult(content);
       if (!gradingResult.mastered_concepts || gradingResult.mastered_concepts.length === 0) {
         gradingResult.mastered_concepts = masteredFallback;
@@ -248,7 +245,7 @@ ${schemaExample}`;
       if (!gradingResult.revision_concepts || gradingResult.revision_concepts.length === 0) {
         gradingResult.revision_concepts = revisionFallback;
       }
-      await db.deductCoins(userId, null, coinsCost);
+      if (usage) coinsCost = (await chargeForUsage(profile, [usage])).points;
     }
 
     const deviceId = deviceIdHeader || null;
@@ -300,6 +297,7 @@ ${schemaExample}`;
       evaluation: gradingResult.evaluation,
       points_awarded: pointsAwarded,
       total_points: totalPoints,
+      coins_deducted: coinsCost,
       questions_review: questionsReview,
       diagnostic: {
         mastered_concepts: gradingResult.mastered_concepts || masteredFallback,

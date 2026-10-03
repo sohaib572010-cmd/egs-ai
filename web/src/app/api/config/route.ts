@@ -1,4 +1,3 @@
-export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 import { NextRequest, NextResponse } from 'next/server';
 import { db, getPublicConfigVersion, invalidateCurriculumsCache } from '@/lib/db';
@@ -15,7 +14,8 @@ export async function GET(req: NextRequest) {
       activeGradeLevels,
       activeTracks,
       activeCurriculumIds,
-      allCurriculums
+      allCurriculums,
+      educationCatalog
     } = await db.getPublicConfig();
 
     // Check for authenticated user to return current coins and profile
@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
     }
 
     const cacheHeaders: Record<string, string> = {
-      'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate',
+      'Cache-Control': 'private, no-cache',
       'Vary': 'Authorization, If-None-Match',
       'ETag': etag
     };
@@ -71,6 +71,7 @@ export async function GET(req: NextRequest) {
       active_tracks: activeTracks,
       active_curriculum_ids: activeCurriculumIds,
       all_curriculums: allCurriculums,
+      education_catalog: educationCatalog,
       guest_messages_count: guestMessagesCount,
       guest_coins: guestCoins,
       authenticated: authValid,
@@ -146,13 +147,15 @@ export async function POST(req: NextRequest) {
       await db.setSystemSetting('website_link', body.website_link);
     }
     
-    if (body.active_grade_levels !== undefined) {
-      const filtered = Array.isArray(body.active_grade_levels) ? body.active_grade_levels.filter((g: string) => g !== '3_high') : body.active_grade_levels;
-      await db.setSystemSetting('active_grade_levels', JSON.stringify(filtered));
-    }
-
-    if (body.active_tracks !== undefined) {
-      await db.setSystemSetting('active_tracks', JSON.stringify(body.active_tracks));
+    if (Array.isArray(body.active_grade_levels) || Array.isArray(body.active_tracks)) {
+      const catalog = structuredClone(await db.getEducationCatalog());
+      if (Array.isArray(body.active_grade_levels)) {
+        for (const s of catalog.stages) s.active = body.active_grade_levels.includes(s.id);
+      }
+      if (Array.isArray(body.active_tracks)) {
+        for (const t of catalog.tracks) t.active = body.active_tracks.includes(t.id);
+      }
+      await db.saveEducationCatalog(catalog);
     }
     
     if (body.active_curriculum_ids !== undefined) {

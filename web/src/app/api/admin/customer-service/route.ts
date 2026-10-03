@@ -1,6 +1,6 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db, DAILY_COIN_CAPS } from '@/lib/db';
+import { findStage, tracksOfStage } from '@/lib/education_catalog';
 import { verifySessionToken } from '@/lib/auth_helpers';
 
 // ─── Helper: Authorize admin ──────────────────────────────────────────────────
@@ -234,7 +234,19 @@ export async function POST(req: NextRequest) {
       if (!userId) {
         return NextResponse.json({ error: 'معرف المستخدم مطلوب.' }, { status: 400 });
       }
-      const result = await db.updateStudentProfile(userId, { name, phone, grade_level, email, track_id });
+      let cleanTrack = track_id;
+      if (grade_level !== undefined) {
+        const catalog = await db.getEducationCatalog();
+        if (!findStage(catalog, grade_level)) {
+          return NextResponse.json({ error: 'المرحلة الدراسية غير موجودة في الأنظمة التعليمية.' }, { status: 400 });
+        }
+        const stageTracks = tracksOfStage(catalog, grade_level);
+        if (track_id && !stageTracks.some(t => t.id === track_id)) {
+          return NextResponse.json({ error: 'المسار المحدد لا يتبع هذه المرحلة.' }, { status: 400 });
+        }
+        if (stageTracks.length === 0) cleanTrack = null;
+      }
+      const result = await db.updateStudentProfile(userId, { name, phone, grade_level, email, track_id: cleanTrack });
       if (!result.success) {
         return NextResponse.json({ error: result.error || 'فشل تحديث بيانات الطالب.' }, { status: 400 });
       }

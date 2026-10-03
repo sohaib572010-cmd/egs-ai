@@ -1,6 +1,6 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { sanitizeInitialPath } from '@/lib/education_catalog';
 import { generateSessionToken, parseDeviceMetadata } from '@/lib/auth_helpers';
 
 // In-memory cache for Google's public JWK certs (1-hour TTL)
@@ -201,14 +201,14 @@ export async function POST(req: NextRequest) {
       const initialCoins = 20.0;
       const isClaimed = true;
 
-      // Create new user profile directly
+      const initialPath = sanitizeInitialPath(await db.getEducationCatalog(), grade_level, track_id, elective_subject);
       profile = await db.createProfile({
         id: userId,
         email,
         name: name || 'طالب جديد',
-        grade_level: grade_level || 'unselected',
-        track_id: track_id || null,
-        elective_subject: elective_subject || null,
+        grade_level: initialPath.gradeLevel,
+        track_id: initialPath.trackId,
+        elective_subject: initialPath.electiveSubject,
         plan_type: 'free',
         role: 'student',
         password_hash: '', // Google login does not use a password

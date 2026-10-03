@@ -1,4 +1,3 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db, DAILY_COIN_CAPS } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';

@@ -3,11 +3,12 @@ import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { checkRateLimitAsync, getClientIp } from '@/lib/rate_limiter';
 import { callDeepSeekVision } from '@/lib/gemini';
+import { chargeForUsage } from '@/lib/metering';
+import { VISION_USAGE } from '@/lib/points_pricing';
 
 const EDENAI_API_KEY = process.env.EDENAI_API_KEY || '';
 const EDENAI_BASE = 'https://api.edenai.run/v2';
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-const IMAGE_ANALYSIS_COIN_COST = 0.5;
 
 export async function POST(req: NextRequest) {
   try {
@@ -47,7 +48,7 @@ export async function POST(req: NextRequest) {
 
     const { base64, mimeType } = await req.json();
 
-    if (!base64) {
+    if (typeof base64 !== 'string' || !base64) {
       return NextResponse.json(
         { error: 'بيانات الصورة مطلوبة' },
         { status: 400 }
@@ -127,9 +128,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await db.deductCoins(userId, null, IMAGE_ANALYSIS_COIN_COST);
+    const charge = await chargeForUsage(profile, [VISION_USAGE]);
 
-    return NextResponse.json({ description });
+    return NextResponse.json({ description, coins_used: charge.points, remaining_coins: charge.remaining });
   } catch (error: any) {
     console.error('Upload Image route error:', error);
     return NextResponse.json(

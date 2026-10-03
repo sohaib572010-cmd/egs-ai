@@ -327,26 +327,31 @@ export class KnowledgeGraphEngine {
   public linkEntities(query: string, keywords: string[] = []): CurriculumEntity[] {
     const matched = new Map<string, CurriculumEntity>();
     const normQuery = normalizeArabic(query);
-    const queryTokens = tokenizeArabic(query);
-    const allSearchTerms = [...keywords.map(k => normalizeArabic(k)), ...queryTokens];
+    const queryStems = new Set(tokenizeArabic(`${query} ${keywords.join(' ')}`));
+    const normKeywords = keywords.map(k => normalizeArabic(k)).filter(k => k.length >= 4);
 
     for (const [normName, entity] of this.normalizedNameToEntity.entries()) {
-      // Direct phrase substring match in query
-      if (normName.length >= 3 && normQuery.includes(normName)) {
-        matched.set(entity.id, entity);
-        continue;
-      }
-
-      // Keyword match
-      for (const term of allSearchTerms) {
-        if (term.length >= 3 && (normName === term || normName.includes(term))) {
-          matched.set(entity.id, entity);
-          break;
-        }
-      }
+      if (normName.length < 3) continue;
+      const nameStems = this.nameStems(normName);
+      const phraseHit = normQuery.includes(normName) ||
+        normKeywords.some(k => k === normName || (normName.length >= 4 && k.includes(normName)));
+      // Every stem of the entity name must occur in the question, so a shared common word alone never links
+      const stemHit = nameStems.length > 0 && nameStems.every(s => queryStems.has(s)) &&
+        (nameStems.length > 1 || nameStems[0].length >= 3);
+      if (phraseHit || stemHit) matched.set(entity.id, entity);
     }
 
-    return Array.from(matched.values());
+    return [...matched.values()]
+      .sort((a, b) => (b.importance_score || 0) - (a.importance_score || 0))
+      .slice(0, 12);
+  }
+
+  private readonly stemCache = new Map<string, string[]>();
+
+  private nameStems(normName: string): string[] {
+    let stems = this.stemCache.get(normName);
+    if (!stems) this.stemCache.set(normName, (stems = tokenizeArabic(normName)));
+    return stems;
   }
 
   /**

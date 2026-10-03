@@ -6,10 +6,12 @@ import { getCurriculumContextForLesson } from '@/lib/curriculum_structure';
 import { callGeminiFlash } from '@/lib/gemini';
 import { isEnglishSubject } from '@/lib/subject_helpers';
 import { buildOfficialExamSystemPrompt } from '@/lib/exam_specifications';
+import { acquireAiSlot, releaseAiSlot, chargeForUsage, usageFromProvider, estimateUsage, AI_BUSY_RESPONSE } from '@/lib/metering';
+import type { TokenUsage } from '@/lib/points_pricing';
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
 
-async function generateExamWithAI(systemPrompt: string, gradeLevel: string, subjectName: string): Promise<{ content: string; coinsCost: number }> {
+async function generateExamWithAI(systemPrompt: string, gradeLevel: string, subjectName: string): Promise<{ content: string; usage: TokenUsage }> {
   const deepseekApiKey = process.env.DEEPSEEK_API_KEY || '';
   if (deepseekApiKey) {
     try {
@@ -36,12 +38,8 @@ async function generateExamWithAI(systemPrompt: string, gradeLevel: string, subj
         const data = await response.json();
         const msg = data.choices?.[0]?.message;
         const content = (msg?.content || msg?.reasoning_content || '').trim();
-        const promptTokens = data.usage?.prompt_tokens || 0;
-        const completionTokens = data.usage?.completion_tokens || 0;
-        const egpCost = (promptTokens / 1000000) * 30 + (completionTokens / 1000000) * 50;
-        const coinsCost = egpCost * 12.5;
         if (content) {
-          return { content, coinsCost };
+          return { content, usage: usageFromProvider(data.usage) ?? estimateUsage(systemPrompt.length, content.length) };
         }
       } else {
         console.warn('DeepSeek exam generation returned status:', response.status, ', falling back to Gemini Flash.');
@@ -55,7 +53,7 @@ async function generateExamWithAI(systemPrompt: string, gradeLevel: string, subj
   try {
     const prompt = `${systemPrompt}\n\nUser request: Generate an exam for grade level ${gradeLevel} and subject ${subjectName} as a strict JSON object.`;
     const content = await callGeminiFlash(prompt, 1800);
-    return { content, coinsCost: 0.5 };
+    return { content, usage: estimateUsage(prompt.length, content.length) };
   } catch (edenError: any) {
     console.error('All AI providers failed for exam generation:', edenError);
     throw new Error('تعذر إنشاء الامتحان في الوقت الحالي نظراً لانشغال مزودي الذكاء الاصطناعي. يرجى المحاولة مرة أخرى بعد قليل.');
@@ -136,65 +134,73 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'لقد استنفدت رصيدك من النقاط. يرجى تجديد اشتراكك لمتابعة الاختبارات.' }, { status: 402 });
     }
 
-    // Retrieve targeted curriculum text for the selected topic/lesson
-    const effectiveTopic = (mode === 'remedial' && Array.isArray(remedial_concepts) && remedial_concepts.length > 0)
-      ? remedial_concepts.join(' ')
-      : (topic || '');
-    const curriculumText = await getCurriculumContextForLesson(grade_level, subject_name, effectiveTopic);
-    const isEnglish = isEnglishSubject(subject_name);
-
-    const systemPrompt = buildOfficialExamSystemPrompt({
-      gradeLevel: grade_level,
-      subjectName: subject_name,
-      topic,
-      mode,
-      remedialConcepts: remedial_concepts,
-      mcqCount: mcq_count,
-      tfCount: tf_count,
-      essayCount: essay_count,
-      totalCount: total_count
-    }, curriculumText);
-
-    const { content: rawAiResponse, coinsCost } = await generateExamWithAI(systemPrompt, grade_level, subject_name);
-
-    let parsedExam: any;
+    if (!(await acquireAiSlot(userId))) {
+      return NextResponse.json(AI_BUSY_RESPONSE, { status: 429 });
+    }
     try {
-      parsedExam = parseGeneratedExam(rawAiResponse);
-    } catch (parseError) {
-      console.error('Failed to parse AI exam response:', rawAiResponse, parseError);
-      return NextResponse.json({ error: 'حدث خطأ في معالجة وتنسيق أسئلة الاختبار من الذكاء الاصطناعي.' }, { status: 500 });
-    }
+      // Retrieve targeted curriculum text for the selected topic/lesson
+      const effectiveTopic = (mode === 'remedial' && Array.isArray(remedial_concepts) && remedial_concepts.length > 0)
+        ? remedial_concepts.join(' ')
+        : (topic || '');
+      const curriculumText = await getCurriculumContextForLesson(grade_level, subject_name, effectiveTopic);
+      const isEnglish = isEnglishSubject(subject_name);
 
-    if (!parsedExam || !Array.isArray(parsedExam.questions) || parsedExam.questions.length === 0) {
-      return NextResponse.json({ error: 'لم يتم إنشاء أي أسئلة صالحة للاختبار.' }, { status: 500 });
-    }
+      const systemPrompt = buildOfficialExamSystemPrompt({
+        gradeLevel: grade_level,
+        subjectName: subject_name,
+        topic,
+        mode,
+        remedialConcepts: remedial_concepts,
+        mcqCount: mcq_count,
+        tfCount: tf_count,
+        essayCount: essay_count,
+        totalCount: total_count
+      }, curriculumText);
 
-    const savedExam = await db.createExam({
-      title: parsedExam.title || (isEnglish ? `English Exam - ${topic || 'Practice'}` : `اختبار ${subject_name}`),
-      questions: parsedExam.questions,
-      subject_name: subject_name,
-      grade_level: grade_level,
-      session_id: session_id,
-      user_id: userId,
-      device_id: deviceId || undefined
-    });
+      const { content: rawAiResponse, usage } = await generateExamWithAI(systemPrompt, grade_level, subject_name);
+      const charge = await chargeForUsage(profile, [usage]);
 
-    await db.deductCoins(userId, deviceId, coinsCost);
-
-    // Strip answers from response
-    const questionsWithoutAnswers = (savedExam.questions || []).map((q: any) => {
-      const { correct_answer, explanation, ...rest } = q;
-      return rest;
-    });
-
-    return NextResponse.json({
-      success: true,
-      coins_deducted: coinsCost,
-      exam: {
-        ...savedExam,
-        questions: questionsWithoutAnswers
+      let parsedExam: any;
+      try {
+        parsedExam = parseGeneratedExam(rawAiResponse);
+      } catch (parseError) {
+        console.error('Failed to parse AI exam response:', rawAiResponse, parseError);
+        return NextResponse.json({ error: 'حدث خطأ في معالجة وتنسيق أسئلة الاختبار من الذكاء الاصطناعي.' }, { status: 500 });
       }
-    });
+
+      if (!parsedExam || !Array.isArray(parsedExam.questions) || parsedExam.questions.length === 0) {
+        return NextResponse.json({ error: 'لم يتم إنشاء أي أسئلة صالحة للاختبار.' }, { status: 500 });
+      }
+
+      const savedExam = await db.createExam({
+        title: parsedExam.title || (isEnglish ? `English Exam - ${topic || 'Practice'}` : `اختبار ${subject_name}`),
+        questions: parsedExam.questions,
+        subject_name: subject_name,
+        grade_level: grade_level,
+        session_id: session_id,
+        user_id: userId,
+        device_id: deviceId || undefined
+      });
+
+      // Strip answers from response
+      const questionsWithoutAnswers = (savedExam.questions || []).map((q: any) => {
+        const { correct_answer, explanation, ...rest } = q;
+        return rest;
+      });
+
+      return NextResponse.json({
+        success: true,
+        coins_deducted: charge.points,
+        remaining_coins: charge.remaining,
+        exam: {
+          ...savedExam,
+          questions: questionsWithoutAnswers
+        }
+      });
+
+    } finally {
+      await releaseAiSlot(userId);
+    }
 
   } catch (error: any) {
     console.error('Exam generation error:', error);

@@ -1,6 +1,7 @@
 # IDEs and editors
 .idea/
 .vscode/
+.claude/
 *.suo
 *.ntvs*
 *.njsproj
@@ -10,6 +11,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+*.lnk
 
 # Logs and temporary files
 *.log
@@ -39,6 +41,7 @@ dist/
 Curriculum Generator/debug_page_*.jpg
 Curriculum Generator/debug_pymupdf_*.jpg
 Curriculum Generator/page_images_cache/
+*embeddings_cache.json
 
 # Test benchmarks and stray root test database
 /db_data.json

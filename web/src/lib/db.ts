@@ -1,7 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
 import { getCairoDateString, toPreciseCoins } from './currency_verifier';
-import { CurriculumEntity, CurriculumRelation, extractEntitiesAndRelationsFromChunk } from './graph_rag';
+import { CurriculumEntity, CurriculumRelation, extractEntitiesAndRelationsFromChunk, KnowledgeGraphEngine } from './graph_rag';
 import { BM25Index } from './bm25';
+import { CATALOG_SETTING_KEY, EducationCatalog, legacyActiveLists, loadCatalog, resolveCurriculum } from './education_catalog';
+import { registerStageCatalog } from './subject_helpers';
 
 export type { CurriculumEntity, CurriculumRelation } from './graph_rag';
 
@@ -55,6 +57,9 @@ export interface Profile {
   pwa_platform?: 'android' | 'ios' | 'desktop' | 'unknown' | null;
   improve_ai_opt_in?: boolean;
   streak_shields?: number;
+  coin_debt?: number;
+  sub_cost_egp?: number;
+  ai_busy_until?: string | null;
 }
 
 export interface PendingRegistration {
@@ -169,6 +174,7 @@ export interface CurriculumUnit {
   id: string;
   title: string;
   unitNumber: number;
+  groupTitle?: string;
   startPage?: number;
   lessons: CurriculumLesson[];
 }
@@ -351,9 +357,12 @@ export interface DailyQuestProgress {
   streakDays: number;
 }
 
+// Serverless hosts have a read-only filesystem: keep the local fallback store in memory there
+const NO_DISK_DB = process.env.NEXT_RUNTIME === 'edge' || !!process.env.VERCEL;
+
 // Initialize local DB file if missing
 function initLocalDB() {
-  if (process.env.NEXT_RUNTIME === 'edge') return;
+  if (NO_DISK_DB) return;
   cleanupOrphanedTmpFiles();
   const fs = require('fs');
   const DB_FILE = './db_data.json';
@@ -477,7 +486,7 @@ function getMemoryDB(): any {
 
 // Startup sweep: clean up any orphaned .tmp files left by unexpected crashes or restarts
 export function cleanupOrphanedTmpFiles() {
-  if (process.env.NEXT_RUNTIME === 'edge') return;
+  if (NO_DISK_DB) return;
   try {
     const fs = require('fs');
     const path = require('path');
@@ -503,7 +512,7 @@ let flushTimer: any = null;
 let flushQueuePromise: Promise<void> = Promise.resolve();
 
 export function flushDiskSync() {
-  if (process.env.NEXT_RUNTIME === 'edge' || !localDbMemoryStore) return;
+  if (NO_DISK_DB || !localDbMemoryStore) return;
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
@@ -524,7 +533,7 @@ export function flushDiskSync() {
 }
 
 export async function flushDiskAsync(): Promise<void> {
-  if (process.env.NEXT_RUNTIME === 'edge') return;
+  if (NO_DISK_DB) return;
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
@@ -533,7 +542,7 @@ export async function flushDiskAsync(): Promise<void> {
 }
 
 async function executeAsyncDiskFlush(): Promise<void> {
-  if (process.env.NEXT_RUNTIME === 'edge' || !localDbMemoryStore) return;
+  if (NO_DISK_DB || !localDbMemoryStore) return;
 
   // Chain write task to queue promise to guarantee sequential execution without race conditions
   flushQueuePromise = flushQueuePromise.then(async () => {
@@ -571,7 +580,7 @@ async function executeAsyncDiskFlush(): Promise<void> {
 }
 
 function scheduleDiskFlush(data?: any) {
-  if (process.env.NEXT_RUNTIME === 'edge') return;
+  if (NO_DISK_DB) return;
   if (data) {
     localDbMemoryStore = data;
   }
@@ -585,7 +594,7 @@ function scheduleDiskFlush(data?: any) {
 }
 
 // Initial sweep on module load
-if (typeof process !== 'undefined' && process.env?.NEXT_RUNTIME !== 'edge') {
+if (typeof process !== 'undefined' && !NO_DISK_DB) {
   cleanupOrphanedTmpFiles();
   const proc = process as unknown as { on?: (event: string, cb: () => void) => void };
   if (typeof proc?.on === 'function') {
@@ -599,7 +608,7 @@ if (typeof process !== 'undefined' && process.env?.NEXT_RUNTIME !== 'edge') {
 
 // Read local DB with in-memory master cache
 function readLocalDB() {
-  if (process.env.NEXT_RUNTIME === 'edge') {
+  if (NO_DISK_DB) {
     return getMemoryDB();
   }
   if (localDbMemoryStore) {
@@ -685,7 +694,7 @@ function readLocalDB() {
 
 // Write local DB (synchronous memory update + atomic scheduled disk flush)
 function writeLocalDB(data: any) {
-  if (process.env.NEXT_RUNTIME === 'edge') {
+  if (NO_DISK_DB) {
     globalThis.__egs_memory_db = data;
     return;
   }
@@ -784,6 +793,7 @@ let cachedPublicConfig: {
   activeTracks: string[];
   activeCurriculumIds: string[];
   allCurriculums: Curriculum[];
+  educationCatalog: EducationCatalog;
 } | null = null;
 let lastPublicConfigTime = 0;
 const PUBLIC_CONFIG_CACHE_TTL_MS = 30000; // 30 seconds fallback
@@ -820,20 +830,159 @@ export function invalidateLeaderboardCache() {
 let cachedCurriculums: { data: Curriculum[]; time: number } | null = null;
 const CURRICULUMS_CACHE_TTL_MS = 30000; // 30 seconds fallback
 
-let onCurriculumsInvalidated: (() => void) | null = null;
+const curriculumInvalidators = new Set<() => void>();
 export function registerCurriculumInvalidator(fn: () => void) {
-  onCurriculumsInvalidated = fn;
+  curriculumInvalidators.add(fn);
 }
 
 export function invalidateCurriculumsCache() {
   cachedCurriculums = null;
   cachedPublicConfig = null;
   lastPublicConfigTime = Date.now();
-  if (onCurriculumsInvalidated) {
+  corpusCache.clear();
+  for (const fn of curriculumInvalidators) {
     try {
-      onCurriculumsInvalidated();
-    } catch (e) {}
+      fn();
+    } catch {}
   }
+}
+
+/**
+ * Whole-curriculum retrieval corpus kept in memory: every parent section and child chunk, a BM25 index
+ * over the children and the knowledge graph. Loaded once per curriculum and reused by every chat turn.
+ */
+export interface CurriculumCorpus {
+  curriculumId: string;
+  parents: Map<string, CurriculumChunk>;
+  parentsByPosition: CurriculumChunk[];
+  children: Map<string, CurriculumChunk>;
+  index: BM25Index;
+  graph: KnowledgeGraphEngine;
+  loadedAt: number;
+}
+
+const CORPUS_CACHE_LIMIT = 12;
+const CORPUS_TTL_MS = 30 * 60 * 1000;
+const corpusCache = new Map<string, Promise<CurriculumCorpus>>();
+
+async function fetchAllRows<T>(build: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>): Promise<T[]> {
+  const rows: T[] = [];
+  for (let page = 0; ; page++) {
+    const { data, error } = await build(page * 1000, page * 1000 + 999);
+    if (error) throw error;
+    if (!data?.length) break;
+    rows.push(...data);
+    if (data.length < 1000) break;
+  }
+  return rows;
+}
+
+async function loadCurriculumCorpus(curriculumId: string): Promise<CurriculumCorpus> {
+  let chunks: CurriculumChunk[];
+  let entities: CurriculumEntity[];
+  let relations: CurriculumRelation[];
+  if (supabase) {
+    [chunks, entities, relations] = await Promise.all([
+      fetchAllRows<CurriculumChunk>((from, to) => supabase
+        .from('curriculum_chunks')
+        .select('id, content, heading, curriculum_id, chunk_level, parent_id, position_index')
+        .eq('curriculum_id', curriculumId)
+        .gte('position_index', 0)
+        .order('position_index', { ascending: true })
+        .range(from, to)),
+      fetchAllRows<CurriculumEntity>((from, to) => supabase
+        .from('curriculum_entities')
+        .select('id, curriculum_id, name, normalized_name, category, description, aliases, chunk_ids, importance_score')
+        .eq('curriculum_id', curriculumId)
+        .order('id')
+        .range(from, to)).catch(() => []),
+      fetchAllRows<CurriculumRelation>((from, to) => supabase
+        .from('curriculum_relations')
+        .select('id, curriculum_id, source_entity_id, target_entity_id, relation_type, description, weight')
+        .eq('curriculum_id', curriculumId)
+        .order('id')
+        .range(from, to)).catch(() => [])
+    ]);
+  } else {
+    const data = readLocalDB();
+    chunks = data.curriculum_chunks.filter((c: CurriculumChunk) => c.curriculum_id === curriculumId && (c.position_index ?? 0) >= 0);
+    entities = (data.curriculum_entities || []).filter((e: CurriculumEntity) => e.curriculum_id === curriculumId);
+    relations = (data.curriculum_relations || []).filter((r: CurriculumRelation) => r.curriculum_id === curriculumId);
+  }
+
+  const parents = new Map<string, CurriculumChunk>();
+  const children = new Map<string, CurriculumChunk>();
+  for (const c of chunks) {
+    if (c.heading.startsWith('__')) continue;
+    (c.chunk_level === 'child' ? children : parents).set(c.id, c);
+  }
+  const parentsByPosition = [...parents.values()].sort((a, b) => (a.position_index ?? 0) - (b.position_index ?? 0));
+  relinkChildrenToOwnSections(parentsByPosition, children);
+
+  const covered = new Set([...children.values()].map(c => c.parent_id));
+  const docs = [...children.values(), ...parentsByPosition.filter(p => !covered.has(p.id))];
+  const index = new BM25Index(docs.map(c => ({
+    id: c.id,
+    heading: c.heading,
+    content: c.content,
+    parent_id: c.parent_id,
+    position_index: c.position_index
+  })));
+  return {
+    curriculumId,
+    parents,
+    parentsByPosition,
+    children,
+    index,
+    graph: new KnowledgeGraphEngine(entities, relations),
+    loadedAt: Date.now()
+  };
+}
+
+const flatText = (s: string) => s.replace(/\s+/g, ' ').trim();
+
+/**
+ * Older uploads linked each child to the FIRST parent carrying the same breadcrumb, so a child of a repeated
+ * section ("أمثلة", split parts) pointed at an unrelated section. The owner is the parent whose text contains
+ * the child's text; same-heading parents are checked first, then any parent.
+ */
+function relinkChildrenToOwnSections(parents: CurriculumChunk[], children: Map<string, CurriculumChunk>) {
+  const flatParents = new Map(parents.map(p => [p.id, flatText(p.content)]));
+  const byHeading = new Map<string, CurriculumChunk[]>();
+  for (const p of parents) {
+    const list = byHeading.get(p.heading);
+    if (list) list.push(p);
+    else byHeading.set(p.heading, [p]);
+  }
+  for (const child of children.values()) {
+    const probe = flatText(child.content).slice(0, 80);
+    if (!probe) continue;
+    const current = child.parent_id ? flatParents.get(child.parent_id) : undefined;
+    if (current?.includes(probe)) continue;
+    const owner = (byHeading.get(child.heading) || []).find(p => flatParents.get(p.id)!.includes(probe))
+      || parents.find(p => flatParents.get(p.id)!.includes(probe));
+    if (owner) children.set(child.id, { ...child, parent_id: owner.id });
+  }
+}
+
+export function getCurriculumCorpus(curriculumId: string): Promise<CurriculumCorpus> {
+  const cached = corpusCache.get(curriculumId);
+  if (cached) {
+    corpusCache.delete(curriculumId);
+    corpusCache.set(curriculumId, cached);
+    return cached;
+  }
+  const pending = loadCurriculumCorpus(curriculumId);
+  corpusCache.set(curriculumId, pending);
+  pending
+    .then(() => setTimeout(() => {
+      if (corpusCache.get(curriculumId) === pending) corpusCache.delete(curriculumId);
+    }, CORPUS_TTL_MS).unref?.())
+    .catch(() => corpusCache.delete(curriculumId));
+  while (corpusCache.size > CORPUS_CACHE_LIMIT) {
+    corpusCache.delete(corpusCache.keys().next().value as string);
+  }
+  return pending;
 }
 
 // Single-flight request coalescing for user leaderboard rank (deduplicates concurrent in-flight requests)
@@ -946,8 +1095,10 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
     const isFree = !profile.plan_type || profile.plan_type === 'free' || effectiveStatus !== 'active';
     const cap = isFree ? (DAILY_COIN_CAPS.free ?? 5.0) : (DAILY_COIN_CAPS[profile.plan_type] ?? 80.0);
     const current = toPreciseCoins(profile.coins === undefined ? 0.0 : profile.coins);
-    // Packages replenish up to their daily cap; free accounts replenish up to the freemium lifeline cap (5.0)
-    const newCoins = toPreciseCoins(Math.max(current, cap));
+    // Packages replenish up to their daily cap minus any overdraft carried from the previous day
+    const debt = Math.max(0, profile.coin_debt ?? 0);
+    const newCoins = toPreciseCoins(Math.max(current, cap - debt, 0));
+    if (debt > 0) profile.coin_debt = toPreciseCoins(Math.max(0, debt - cap));
 
     // Calculate new streak based on Cairo calendar days
     let newStreak = profile.study_streak || 1;
@@ -993,13 +1144,14 @@ async function checkAndResetDailyCoins(profile: Profile): Promise<Profile> {
       subscription_status: profile.subscription_status,
       subscription_start_date: profile.subscription_start_date,
       subscription_end_date: profile.subscription_end_date,
-      subscription_plan_id: profile.subscription_plan_id
+      subscription_plan_id: profile.subscription_plan_id,
+      ...(profile.coin_debt !== undefined ? { coin_debt: profile.coin_debt } : {})
     };
 
     if (supabase) {
       const { error } = await supabase.from('profiles').update(updatePayload).eq('id', profile.id);
       if (error) {
-        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, streak_shields, ...basePayload } = updatePayload;
+        const { subscription_status, subscription_start_date, subscription_end_date, subscription_plan_id, streak_shields, coin_debt, ...basePayload } = updatePayload;
         await supabase.from('profiles').update(basePayload).eq('id', profile.id);
       }
     } else {
@@ -1038,6 +1190,19 @@ async function checkAndResetGuestDailyCoins(guest: DeviceGuest): Promise<DeviceG
   return guest;
 }
 
+/**
+ * Maps a student's (stage, subject) to the (grade_level, subject_name) of the curriculum that holds
+ * the content, following catalog sharing so a curriculum shared into another stage or system is
+ * searched from its single source.
+ */
+async function resolveCurriculumKey(gradeLevel: string, subjectName: string): Promise<{ grade: string; subject: string }> {
+  const grade = (gradeLevel || '').trim();
+  const subject = (subjectName || '').trim();
+  const [catalog, curricula] = await Promise.all([db.getEducationCatalog(), db.getCurriculums()]);
+  const found = resolveCurriculum(catalog, curricula, grade, subject);
+  return found ? { grade: found.grade_level, subject: found.subject_name } : { grade, subject: normalizeSubjectAlias(grade, subject) };
+}
+
 function normalizeSubjectAlias(gradeLevel: string, subjectName: string): string {
   const g = (gradeLevel || '').trim();
   const s = (subjectName || '').trim();
@@ -1049,6 +1214,12 @@ function normalizeSubjectAlias(gradeLevel: string, subjectName: string): string 
   }
   if (g === '2_high' && (s === 'الرياضيات' || s === 'رياضيات')) {
     return 'رياضيات';
+  }
+  if ((g.includes('secondary') || g.includes('stage_')) && (s === 'فيزياء' || s === 'الفيزياء')) {
+    return 'الفيزياء';
+  }
+  if ((g.includes('secondary') || g.includes('stage_')) && (s === 'كيمياء' || s === 'الكيمياء')) {
+    return 'الكيمياء';
   }
   return s;
 }
@@ -1863,8 +2034,7 @@ export const db = {
   },
 
   async getCurriculumRecord(gradeLevel: string, subjectName: string): Promise<Curriculum | null> {
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
+    const { grade: cleanGrade, subject: cleanSubject } = await resolveCurriculumKey(gradeLevel, subjectName);
     if (supabase) {
       const { data } = await supabase
         .from('curriculums')
@@ -1883,8 +2053,7 @@ export const db = {
   },
 
   async getAllChunksForCurriculum(gradeLevel: string, subjectName: string): Promise<CurriculumChunk[]> {
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
+    const { grade: cleanGrade, subject: cleanSubject } = await resolveCurriculumKey(gradeLevel, subjectName);
     if (supabase) {
       const { data: currList } = await supabase
         .from('curriculums')
@@ -1987,8 +2156,7 @@ export const db = {
     gradeLevel: string,
     subjectName: string
   ): Promise<{ entities: CurriculumEntity[]; relations: CurriculumRelation[] }> {
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
+    const { grade: cleanGrade, subject: cleanSubject } = await resolveCurriculumKey(gradeLevel, subjectName);
 
     if (supabase) {
       const { data: currList } = await supabase
@@ -2256,204 +2424,45 @@ export const db = {
   },
 
 
-  // ─── Legscy RAG search (kept for backward compat) ──────────────────────────
-  async searchCurriculum(gradeLevel: string, subjectName: string, queryKeywords: string[]): Promise<CurriculumChunk[]> {
-    return this.bm25SearchCurriculum(gradeLevel, subjectName, queryKeywords, []);
+  /** Id of the curriculum a (stage, subject) pair resolves to, including curricula shared into the stage. */
+  async resolveCurriculumId(gradeLevel: string, subjectName: string): Promise<string | null> {
+    const record = await this.getCurriculumRecord(gradeLevel, subjectName);
+    return record?.id || null;
   },
 
-  // ─── v3 RAG: BM25 / FTS keyword search (dual-language) ───────────────────
+  // ─── Lexical search over the cached whole-curriculum BM25 index ───────────
   async bm25SearchCurriculum(
     gradeLevel: string,
     subjectName: string,
     arabicKeywords: string[],
-    englishKeywords: string[]
+    englishKeywords: string[],
+    topK = 8
   ): Promise<CurriculumChunk[]> {
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
-
-    if (supabase) {
-      const { data: currList } = await supabase
-        .from('curriculums')
-        .select('id')
-        .eq('grade_level', cleanGrade)
-        .eq('subject_name', cleanSubject);
-
-      if (!currList || currList.length === 0) return [];
-      const curriculumIds = currList.map(c => c.id);
-
-      const cleanArabic = arabicKeywords.map(k => k.trim()).filter(k => k.length > 1);
-      const cleanEnglish = englishKeywords.map(k => k.trim()).filter(k => k.length > 1);
-
-      let fetchedChunks: CurriculumChunk[] = [];
-
-      // 1. Try full-text search with OR query if keywords are available
-      if (cleanArabic.length > 0) {
-        try {
-          const orQuery = cleanArabic.slice(0, 8).map(k => normalizeArabicForSearch(k)).filter(Boolean).join(' | ');
-          if (orQuery) {
-            const { data: ftsResults, error: ftsErr } = await supabase
-              .from('curriculum_chunks')
-              .select('id, content, heading, curriculum_id, chunk_level, parent_id, position_index')
-              .in('curriculum_id', curriculumIds)
-              .textSearch('fts_arabic', orQuery, { config: 'simple' })
-              .limit(100);
-
-            if (!ftsErr && ftsResults && ftsResults.length > 0) {
-              fetchedChunks = ftsResults;
-            }
-          }
-        } catch (ftsException) {
-          console.warn('FTS query error, falling back to full chunk scan:', ftsException);
-        }
-      }
-
-      // 2. If FTS returned few or no chunks, fetch chunks across the curriculum for JavaScript rankChunksV2
-      if (fetchedChunks.length < 5) {
-        const { data: allChunks } = await supabase
-          .from('curriculum_chunks')
-          .select('id, content, heading, curriculum_id, chunk_level, parent_id, position_index')
-          .in('curriculum_id', curriculumIds)
-          .limit(300);
-
-        if (allChunks && allChunks.length > 0) {
-          const existingIds = new Set(fetchedChunks.map(c => c.id));
-          const additional = allChunks.filter(c => !existingIds.has(c.id));
-          fetchedChunks.push(...additional);
-        }
-      }
-
-      if (fetchedChunks.length === 0) {
-        return [];
-      }
-
-      const bm25Docs = fetchedChunks.map(c => ({
-        id: c.id,
-        heading: c.heading,
-        content: c.content,
-        parent_id: c.parent_id,
-        position_index: c.position_index
-      }));
-      const bm25 = new BM25Index(bm25Docs);
-      const queryStr = [...cleanArabic, ...cleanEnglish].join(' ');
-      const bm25Hits = bm25.search(queryStr, 8);
-      if (bm25Hits.length > 0) {
-        const hitMap = new Map(bm25Hits.map(h => [h.doc.id, h.score]));
-        return fetchedChunks
-          .filter(c => hitMap.has(c.id))
-          .sort((a, b) => (hitMap.get(b.id) || 0) - (hitMap.get(a.id) || 0));
-      }
-
-      return rankChunksV2(fetchedChunks, arabicKeywords, englishKeywords);
-    } else {
-      // Local JSON mode: score all chunks using BM25 with fallback
-      const data = readLocalDB();
-      const curr = data.curriculums.find((c: Curriculum) =>
-        c.grade_level === cleanGrade && c.subject_name === cleanSubject
-      );
-      if (!curr) return [];
-
-      const allChunks = data.curriculum_chunks.filter(
-        (cc: CurriculumChunk) => cc.curriculum_id === curr.id
-      );
-      if (allChunks.length === 0) return [];
-
-      const bm25Docs = allChunks.map((c: CurriculumChunk) => ({
-        id: c.id,
-        heading: c.heading,
-        content: c.content,
-        parent_id: c.parent_id,
-        position_index: c.position_index
-      }));
-      const bm25 = new BM25Index(bm25Docs);
-      const queryStr = [...arabicKeywords, ...englishKeywords].join(' ');
-      const bm25Hits = bm25.search(queryStr, 8);
-      if (bm25Hits.length > 0) {
-        const hitMap = new Map(bm25Hits.map(h => [h.doc.id, h.score]));
-        return allChunks
-          .filter((c: CurriculumChunk) => hitMap.has(c.id))
-          .sort((a: CurriculumChunk, b: CurriculumChunk) => (hitMap.get(b.id) || 0) - (hitMap.get(a.id) || 0));
-      }
-
-      return rankChunksV2(allChunks, arabicKeywords, englishKeywords).slice(0, 8);
-    }
+    const curriculumId = await this.resolveCurriculumId(gradeLevel, subjectName);
+    if (!curriculumId) return [];
+    const corpus = await getCurriculumCorpus(curriculumId);
+    const query = [...arabicKeywords, ...englishKeywords].map(k => k.trim()).filter(Boolean).join(' ');
+    return corpus.index.search(query, topK)
+      .map(hit => corpus.children.get(hit.doc.id))
+      .filter((c): c is CurriculumChunk => !!c);
   },
 
-  // ─── v2 RAG: Vector similarity search (Supabase pgvector only) ───────────
-  async vectorSearchCurriculum(
-    gradeLevel: string,
-    subjectName: string,
-    queryEmbedding: number[]
-  ): Promise<CurriculumChunk[]> {
-    if (!supabase || !queryEmbedding || queryEmbedding.length === 0) return [];
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
-
-    const { data: currList } = await supabase
-      .from('curriculums')
-      .select('id')
-      .eq('grade_level', cleanGrade)
-      .eq('subject_name', cleanSubject)
-      .order('created_at', { ascending: false });
-
-    if (!currList || currList.length === 0) return [];
-    const curriculumId = currList[0].id; // use latest active curriculum
-
-    // Use the hybrid_search_curriculum RPC function
-    const { data: results, error } = await supabase.rpc('hybrid_search_curriculum', {
+  // ─── Dense vector search (pgvector HNSW through the hybrid_search_curriculum RPC) ───
+  async vectorSearchChunks(curriculumId: string, queryEmbedding: number[], matchCount = 30): Promise<CurriculumChunk[]> {
+    if (!supabase || queryEmbedding.length === 0) return [];
+    const { data, error } = await supabase.rpc('hybrid_search_curriculum', {
       p_curriculum_id: curriculumId,
       p_query_embedding: queryEmbedding,
       p_arabic_query: '',
       p_english_query: '',
-      p_match_count: 30,
+      p_match_count: matchCount,
       p_rrf_k: 60
     });
-
     if (error) {
-      console.error('vectorSearchCurriculum RPC error:', error);
+      console.error('vectorSearchChunks RPC error:', error.message);
       return [];
     }
-    return results || [];
-  },
-
-  // ─── v2 RAG: Full hybrid search via Supabase RPC ──────────────────────────
-  async hybridSearchCurriculum(
-    gradeLevel: string,
-    subjectName: string,
-    queryEmbedding: number[],
-    arabicKeywords: string[],
-    englishKeywords: string[]
-  ): Promise<CurriculumChunk[]> {
-    if (!supabase) {
-      return this.bm25SearchCurriculum(gradeLevel, subjectName, arabicKeywords, englishKeywords);
-    }
-
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
-
-    const { data: currList } = await supabase
-      .from('curriculums')
-      .select('id')
-      .eq('grade_level', cleanGrade)
-      .eq('subject_name', cleanSubject);
-
-    if (!currList || currList.length === 0) return [];
-    const curriculumId = currList[0].id;
-
-    const { data: results, error } = await supabase.rpc('hybrid_search_curriculum', {
-      p_curriculum_id: curriculumId,
-      p_query_embedding: queryEmbedding.length > 0 ? queryEmbedding : Array(768).fill(0),
-      p_arabic_query: arabicKeywords.join(' '),
-      p_english_query: englishKeywords.join(' '),
-      p_match_count: 8,
-      p_rrf_k: 60
-    });
-
-    if (error) {
-      console.error('hybridSearchCurriculum RPC error:', error);
-      // Fallback to BM25 only
-      return this.bm25SearchCurriculum(gradeLevel, subjectName, arabicKeywords, englishKeywords);
-    }
-    return results || [];
+    return data || [];
   },
 
   // ─── v2 RAG: Fetch parent chunks by their IDs ─────────────────────────────
@@ -2480,8 +2489,7 @@ export const db = {
 
   // ─── v2 RAG: Get the curriculum summary chunk ─────────────────────────────
   async getCurriculumSummary(gradeLevel: string, subjectName: string): Promise<string> {
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = normalizeSubjectAlias(cleanGrade, subjectName);
+    const { grade: cleanGrade, subject: cleanSubject } = await resolveCurriculumKey(gradeLevel, subjectName);
 
     if (supabase) {
       const { data: currList } = await supabase
@@ -2516,8 +2524,7 @@ export const db = {
 
   // ─── v2 RAG: Get full curriculum outline (all parent headings) ────────────
   async getFullCurriculumOutline(gradeLevel: string, subjectName: string): Promise<string[]> {
-    const cleanGrade = gradeLevel.trim();
-    const cleanSubject = subjectName.trim();
+    const { grade: cleanGrade, subject: cleanSubject } = await resolveCurriculumKey(gradeLevel, subjectName);
 
     if (supabase) {
       const { data: currList } = await supabase
@@ -2560,6 +2567,7 @@ export const db = {
     activeTracks: string[];
     activeCurriculumIds: string[];
     allCurriculums: Curriculum[];
+    educationCatalog: EducationCatalog;
   }> {
     if (cachedPublicConfig && (Date.now() - lastPublicConfigTime < PUBLIC_CONFIG_CACHE_TTL_MS)) {
       return cachedPublicConfig;
@@ -2572,16 +2580,19 @@ export const db = {
     let activeGradeLevels = DEFAULT_GRADE_LEVELS;
     let activeTracks = DEFAULT_TRACKS;
     let activeCurriculumIds: string[] = [];
+    let storedCatalog: string | null = null;
 
     if (supabase) {
       const { data: settingsData } = await supabase
         .from('system_settings')
         .select('key, value')
-        .in('key', ['website_link', 'active_grade_levels', 'active_tracks', 'active_curriculum_ids', 'curriculum_version']);
+        .in('key', ['website_link', 'active_grade_levels', 'active_tracks', 'active_curriculum_ids', 'curriculum_version', CATALOG_SETTING_KEY]);
 
       if (settingsData && Array.isArray(settingsData)) {
         for (const row of settingsData) {
-          if (row.key === 'website_link' && row.value) {
+          if (row.key === CATALOG_SETTING_KEY && row.value) {
+            storedCatalog = row.value;
+          } else if (row.key === 'website_link' && row.value) {
             websiteLink = row.value;
           } else if (row.key === 'active_grade_levels' && row.value) {
             try {
@@ -2614,6 +2625,7 @@ export const db = {
       const settings = (data.system_settings || []) as any[];
       const linkSetting = settings.find((s: any) => s.key === 'website_link');
       if (linkSetting?.value) websiteLink = linkSetting.value;
+      storedCatalog = settings.find((s: any) => s.key === CATALOG_SETTING_KEY)?.value || null;
 
       const gradesSetting = settings.find((s: any) => s.key === 'active_grade_levels');
       if (gradesSetting?.value) {
@@ -2650,17 +2662,58 @@ export const db = {
     }
 
     const allCurriculums = await this.getCurriculums();
+    // The catalog is the source of truth; the legacy lists seed it on first run and are derived from it afterwards.
+    const educationCatalog = loadCatalog(storedCatalog, activeGradeLevels, activeTracks);
+    const derived = legacyActiveLists(educationCatalog);
+    registerStageCatalog(educationCatalog.stages);
 
     cachedPublicConfig = {
       websiteLink,
-      activeGradeLevels,
-      activeTracks,
+      activeGradeLevels: derived.activeGradeLevels,
+      activeTracks: derived.activeTracks,
       activeCurriculumIds,
-      allCurriculums
+      allCurriculums,
+      educationCatalog
     };
     lastPublicConfigTime = Math.max(lastPublicConfigTime, Date.now());
 
     return cachedPublicConfig;
+  },
+
+  async getEducationCatalog(): Promise<EducationCatalog> {
+    return (await this.getPublicConfig()).educationCatalog;
+  },
+
+  /** Persists a validated catalog and mirrors it into the legacy grade/track activation settings. */
+  async saveEducationCatalog(catalog: EducationCatalog): Promise<void> {
+    const { activeGradeLevels, activeTracks } = legacyActiveLists(catalog);
+    await this.setSystemSetting(CATALOG_SETTING_KEY, JSON.stringify(catalog));
+    await this.setSystemSetting('active_grade_levels', JSON.stringify(activeGradeLevels));
+    await this.setSystemSetting('active_tracks', JSON.stringify(activeTracks));
+    await this.setSystemSetting('curriculum_version', String(Date.now()));
+    invalidateCurriculumsCache();
+  },
+
+  /** Student counts per stage and per track, used to protect in-use catalog entries. */
+  async getStudentPathCounts(): Promise<{ stages: Record<string, number>; tracks: Record<string, number> }> {
+    const stages: Record<string, number> = {};
+    const tracks: Record<string, number> = {};
+    const add = (grade?: string | null, track?: string | null) => {
+      if (grade) stages[grade] = (stages[grade] || 0) + 1;
+      if (track) tracks[track] = (tracks[track] || 0) + 1;
+    };
+    if (supabase) {
+      const pageSize = 1000;
+      for (let from = 0; ; from += pageSize) {
+        const { data, error } = await supabase.from('profiles').select('grade_level, track_id').range(from, from + pageSize - 1);
+        if (error || !data) break;
+        data.forEach((p: any) => add(p.grade_level, p.track_id));
+        if (data.length < pageSize) break;
+      }
+    } else {
+      (readLocalDB().profiles || []).forEach((p: any) => add(p.grade_level, p.track_id));
+    }
+    return { stages, tracks };
   },
 
   async getSystemSetting(key: string): Promise<string> {
@@ -2793,6 +2846,73 @@ export const db = {
       return newCoins;
     }
     return 0;
+  },
+
+  // Atomically deducts metered points and adds the real provider cost to the current term. Returns the new balance.
+  async chargeUsage(userId: string, points: number, costEgp: number): Promise<number> {
+    const safePoints = toPreciseCoins(Math.max(0, points));
+    const safeCost = Math.max(0, Math.round(costEgp * 10000) / 10000);
+    if (supabase) {
+      const { data, error } = await supabase.rpc('charge_usage', { p_user: userId, p_points: safePoints, p_cost_egp: safeCost });
+      if (!error) return toPreciseCoins(Number(data ?? 0));
+      console.error('charge_usage RPC unavailable, apply supabase_migration_fair_metering.sql:', error.message);
+      return this.deductCoins(userId, null, safePoints);
+    }
+    const data = readLocalDB();
+    const p = data.profiles.find((x: any) => x.id === userId);
+    if (!p || p.role === 'admin' || p.unlimited_credit) return toPreciseCoins(p?.coins ?? 0);
+    const current = p.coins ?? 0;
+    p.coin_debt = toPreciseCoins((p.coin_debt ?? 0) + Math.max(0, safePoints - current));
+    p.coins = toPreciseCoins(Math.max(0, current - safePoints));
+    p.sub_cost_egp = (p.sub_cost_egp ?? 0) + safeCost;
+    writeLocalDB(data);
+    return p.coins;
+  },
+
+  async tryAcquireAiSlot(userId: string, ttlSeconds: number): Promise<boolean> {
+    if (supabase) {
+      const { data, error } = await supabase.rpc('acquire_ai_slot', { p_user: userId, p_seconds: ttlSeconds });
+      if (!error) return data === true;
+      console.error('acquire_ai_slot RPC unavailable, apply supabase_migration_fair_metering.sql:', error.message);
+      return true;
+    }
+    const data = readLocalDB();
+    const p = data.profiles.find((x: any) => x.id === userId);
+    if (!p) return false;
+    if (p.ai_busy_until && new Date(p.ai_busy_until).getTime() > Date.now()) return false;
+    p.ai_busy_until = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    writeLocalDB(data);
+    return true;
+  },
+
+  async releaseAiSlot(userId: string): Promise<void> {
+    if (supabase) {
+      const { error } = await supabase.from('profiles').update({ ai_busy_until: null }).eq('id', userId);
+      if (error && !/ai_busy_until/.test(error.message)) console.error('releaseAiSlot error:', error.message);
+      return;
+    }
+    const data = readLocalDB();
+    const p = data.profiles.find((x: any) => x.id === userId);
+    if (p) {
+      p.ai_busy_until = null;
+      writeLocalDB(data);
+    }
+  },
+
+  // A new paid term starts with a clean cost ledger and no carried overdraft.
+  async resetMeteringTerm(userId: string): Promise<void> {
+    if (supabase) {
+      const { error } = await supabase.from('profiles').update({ sub_cost_egp: 0, coin_debt: 0 }).eq('id', userId);
+      if (error) console.error('resetMeteringTerm error (apply supabase_migration_fair_metering.sql):', error.message);
+      return;
+    }
+    const data = readLocalDB();
+    const p = data.profiles.find((x: any) => x.id === userId);
+    if (p) {
+      p.sub_cost_egp = 0;
+      p.coin_debt = 0;
+      writeLocalDB(data);
+    }
   },
 
   async getChatSession(sessionId: string): Promise<ChatSession | null> {
@@ -3753,6 +3873,27 @@ export const db = {
     }
   },
 
+  /** Changes a curriculum's track restriction, elective flag, and placeholder status within its own stage. */
+  async updateCurriculumPlacement(id: string, trackId: string | null, isElective: boolean, isPlaceholder?: boolean): Promise<Curriculum | null> {
+    const update: Record<string, any> = { track_id: trackId, is_elective: isElective };
+    if (typeof isPlaceholder === 'boolean') {
+      update.is_placeholder = isPlaceholder;
+    }
+    if (supabase) {
+      const { data, error } = await supabase.from('curriculums').update(update).eq('id', id).select().single();
+      if (error) return null;
+      await this.syncCurriculumStateMutation(id, false, false);
+      return data;
+    }
+    const data = readLocalDB();
+    const curriculum = data.curriculums.find((c: Curriculum) => c.id === id);
+    if (!curriculum) return null;
+    Object.assign(curriculum, update);
+    writeLocalDB(data);
+    await this.syncCurriculumStateMutation(id, false, false);
+    return curriculum;
+  },
+
   // ─── Reports (AI response reporting) ───────────────────────────────────────
   async createReport(report: Omit<Report, 'id' | 'created_at' | 'status'>): Promise<Report> {
     const newReport: Report = {
@@ -4100,6 +4241,7 @@ export const db = {
         if (fallbackRes.error) return { success: false, error: 'فشل تحديث بيانات الاشتراك في قاعدة البيانات.' };
         data = fallbackRes.data;
       }
+      await this.resetMeteringTerm(userId);
 
       try {
         const orderId = `admin_grant_${userId.slice(0, 8)}_${Date.now()}`;
@@ -5686,6 +5828,7 @@ export const db = {
         writeLocalDB(data);
       }
     }
+    await this.resetMeteringTerm(userId);
 
     // Create in-app confirmation notification for subscriber
     try {
@@ -6548,181 +6691,4 @@ export const db = {
 
   }
 };
-
-// ─── Arabic Normalization & Keyword Matching Helpers ──────────────────────────
-
-export function normalizeArabicForSearch(str: string): string {
-  if (!str) return '';
-  return str
-    .replace(/[\u064B-\u065F\u0670]/g, '') // strip Tashkeel (diacritics)
-    .replace(/\u0640/g, '')                 // strip Tatweel (kashida)
-    .replace(/[أإآٱ]/g, 'ا')                // unify Alef variants (preserves standalone hamza 'ء')
-    .replace(/ة/g, 'ه')                     // unify Taa Marbuta
-    .replace(/[ىي]/g, 'ي')                 // unify Yaa / Alef Maksura
-    .replace(/ؤ/g, 'و')                     // unify Waw with Hamza
-    .replace(/ئ/g, 'ي')                     // unify Yaa with Hamza
-    .replace(/[ـ\-_]/g, ' ')
-    .replace(/[^\w\u0621-\u064A0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-function getArabicKeywordVariants(keyword: string): string[] {
-  const norm = normalizeArabicForSearch(keyword);
-  if (!norm || norm.length <= 2) return norm ? [norm] : [];
-  const variants = new Set<string>([norm]);
-  // Strip common Arabic prefixes if remainder is at least 3 characters
-  const prefixes = ['ال', 'وال', 'فال', 'كال', 'بال', 'لل', 'و', 'ف', 'ب', 'ك'];
-  for (const p of prefixes) {
-    if (norm.startsWith(p) && norm.length - p.length >= 3) {
-      variants.add(norm.slice(p.length));
-    }
-  }
-  return Array.from(variants);
-}
-
-// Helper: Rank chunks based on keywords
-function rankChunks(chunks: CurriculumChunk[], keywords: string[]): CurriculumChunk[] {
-  if (keywords.length === 0) return chunks.slice(0, 5);
-
-  const scored = chunks.map(chunk => {
-    let score = 0;
-    const normHeading = normalizeArabicForSearch(chunk.heading);
-    const normContent = normalizeArabicForSearch(chunk.content);
-    const textToSearch = `${normHeading} ${normContent}`;
-    
-    keywords.forEach(keyword => {
-      if (!keyword.trim()) return;
-      const variants = getArabicKeywordVariants(keyword);
-      for (const variant of variants) {
-        if (textToSearch.includes(variant)) {
-          score += 2;
-          if (normHeading.includes(variant)) {
-            score += 6;
-          }
-        }
-      }
-    });
-
-    return { chunk, score };
-  });
-
-  let filtered = scored.filter(s => s.score > 0);
-  if (filtered.length === 0) {
-    filtered = scored.slice(0, 5);
-  }
-
-  filtered.sort((a, b) => b.score - a.score);
-
-  return filtered.slice(0, 5).map(s => s.chunk);
-}
-
-function escapeRegExp(string: string) {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-// v3: Enhanced ranking with breadcrumb hierarchy weighting, exact phrase bonuses, and term-frequency scoring
-function rankChunksV2(
-  chunks: CurriculumChunk[],
-  arabicKeywords: string[],
-  englishKeywords: string[]
-): CurriculumChunk[] {
-  const allKeywords = [...arabicKeywords, ...englishKeywords].filter(k => k.trim().length > 0);
-  if (allKeywords.length === 0) return chunks.slice(0, 8);
-
-  const cleanArabic = arabicKeywords.map(k => k.trim()).filter(Boolean);
-  const arabicPhrase = cleanArabic.length > 1 ? normalizeArabicForSearch(cleanArabic.join(' ')) : '';
-
-  const scored = chunks.map(chunk => {
-    let score = 0;
-    const normHeading = normalizeArabicForSearch(chunk.heading);
-    const normContent = normalizeArabicForSearch(chunk.content);
-    const rawHeadingLower = (chunk.heading || '').toLowerCase();
-    const rawContentLower = (chunk.content || '').toLowerCase();
-
-    // High bonus for exact multi-word phrase match in heading or content
-    if (arabicPhrase) {
-      if (normHeading.includes(arabicPhrase)) score += 30;
-      else if (normContent.includes(arabicPhrase)) score += 15;
-    }
-
-    // Score Arabic keywords with normalization and prefix-stripping
-    cleanArabic.forEach(keyword => {
-      const variants = getArabicKeywordVariants(keyword);
-      for (const variant of variants) {
-        if (!variant) continue;
-        if (normHeading.includes(variant)) {
-          score += 15; // High bonus for heading/breadcrumb match
-        }
-        if (normContent.includes(variant)) {
-          score += 4;
-        }
-      }
-    });
-
-    // Score English keywords (scientific terms)
-    englishKeywords.forEach(keyword => {
-      const cleanEng = keyword.trim().toLowerCase();
-      if (!cleanEng) return;
-      if (rawHeadingLower.includes(cleanEng)) {
-        score += 10;
-      }
-      if (rawContentLower.includes(cleanEng)) {
-        score += 4;
-      }
-    });
-
-    return { chunk, score };
-  });
-
-  let filtered = scored.filter(s => s.score > 0);
-  if (filtered.length === 0) {
-    // Return top 8 by position_index as last resort
-    return chunks
-      .sort((a, b) => (a.position_index || 0) - (b.position_index || 0))
-      .slice(0, 8);
-  }
-
-  filtered.sort((a, b) => b.score - a.score);
-  return filtered.slice(0, 8).map(s => s.chunk);
-}
-
-// v2: Cosine similarity for local vector search fallback
-export function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
-}
-
-// v2: JavaScript RRF fusion (used in local mode)
-export function applyRRF(
-  vectorResults: CurriculumChunk[],
-  bm25Results: CurriculumChunk[],
-  k: number = 60
-): CurriculumChunk[] {
-  const scores = new Map<string, { chunk: CurriculumChunk; score: number }>();
-
-  vectorResults.forEach((chunk, rank) => {
-    const score = 1 / (k + rank + 1);
-    const existing = scores.get(chunk.id);
-    scores.set(chunk.id, { chunk, score: (existing?.score || 0) + score });
-  });
-
-  bm25Results.forEach((chunk, rank) => {
-    const score = 1 / (k + rank + 1);
-    const existing = scores.get(chunk.id);
-    scores.set(chunk.id, { chunk, score: (existing?.score || 0) + score });
-  });
-
-  return Array.from(scores.values())
-    .sort((a, b) => b.score - a.score)
-    .map(({ chunk }) => chunk);
-}
 

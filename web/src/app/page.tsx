@@ -26,13 +26,14 @@ import {
   AlertCircle,
   Menu,
   X,
+  Info,
   Copy,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
   ChevronUp,
-  PanelLeftClose,
-  PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   RefreshCw,
   Search,
   LogIn,
@@ -115,12 +116,40 @@ import {
   Printer,
   FileDown,
   Star,
-  Filter
+  Filter,
+  Map as MapIcon,
+  Type,
+  AlignRight,
+  Sigma,
+  ArrowUp,
+  Flag,
+  Mail
 } from 'lucide-react';
 import AppTour, { TourScreen } from '@/components/AppTour';
-import { isEnglishSubject, isEnglishText } from '@/lib/subject_helpers';
+import { isEnglishSubject, isEnglishText, getGradeDisplayName, registerStageCatalog } from '@/lib/subject_helpers';
+import {
+  DEFAULT_EDUCATION_CATALOG,
+  UNSELECTED_STAGE,
+  curriculaForPath,
+  curriculumStageIds,
+  electiveOptions,
+  findStage,
+  findSystem,
+  isElectiveMatch,
+  resolveCurriculum,
+  sortedSystems,
+  stagesOfSystem,
+  trackName,
+  tracksOfStage,
+  type EducationCatalog,
+  type StudentPath
+} from '@/lib/education_catalog';
+import StudyPathPicker, { isPathComplete, pathSubjects } from '@/components/StudyPathPicker';
+import EducationCatalogManager from '@/components/EducationCatalogManager';
 import { speakEnglish, stopSpeech, isPureEnglishVocab, isEnglishSpeechEligible } from '@/lib/speech_helpers';
 import { DEFAULT_STATIC_CURRICULUMS, DEFAULT_DAILY_QUESTS, DEFAULT_DAILY_QUESTS_DATA } from '@/lib/default_curriculums';
+import { buildPricingSnapshot, peakWindowsLabel, type PricingSnapshot } from '@/lib/points_pricing';
+import { KASHIER_PLANS } from '@/lib/plans';
 
 interface SearchStep {
   step: string;
@@ -140,6 +169,9 @@ interface ChatMessage {
   hasError?: boolean;
   searchSteps?: SearchStep[]; // v2 RAG search steps for display
   isStreaming?: boolean;
+  coinsUsed?: number;
+  peakRate?: boolean;
+  fairUseRate?: boolean;
 }
 
 
@@ -174,14 +206,45 @@ interface Curriculum {
   created_at: string;
 }
 
-const GRADE_NAMES: Record<string, string> = {
-  '1_middle': 'الصف الأول الإعدادي',
-  '2_middle': 'الصف الثاني الإعدادي',
-  '3_middle': 'الصف الثالث الإعدادي',
-  '1_high': 'الصف الأول الثانوي',
-  '2_high': 'السنة الثانية بكالوريا (الصف الثاني الثانوي)',
-  'unselected': 'لم يتم تحديد المرحلة'
+registerStageCatalog(DEFAULT_EDUCATION_CATALOG.stages);
+
+const gradeName = (id?: string | null): string =>
+  !id || id === UNSELECTED_STAGE ? 'لم يتم تحديد المرحلة' : getGradeDisplayName(id);
+
+const BrandMark = ({ size = 40, glow = false, className = '' }: { size?: number; glow?: boolean; className?: string }) => (
+  <span className={`brand-mark${glow ? ' glow' : ''}${className ? ` ${className}` : ''}`} style={{ width: size, height: size, borderRadius: Math.round(size * 0.28), overflow: 'hidden' }} aria-hidden="true">
+    <img src="/logo.png" alt="EGS AI" style={{ width: '88%', height: '88%', objectFit: 'contain', display: 'block' }} />
+  </span>
+);
+
+const BrandWordmark = ({ size = '1.2rem' }: { size?: string }) => (
+  <span className="brand-wordmark" style={{ fontSize: size }}>EGS<span>&nbsp;AI</span></span>
+);
+
+const QUEST_SHORT_LABELS: Record<string, string> = {
+  quest_interactive_quiz: 'سؤال ذكي',
+  quest_exam_challenge: 'اختبار قصير',
+  quest_concept_review: 'كارت مراجعة'
 };
+
+const daysAr = (n: number): string => n === 1 ? 'يوم واحد' : n === 2 ? 'يومين' : n >= 3 && n <= 10 ? `${n} أيام` : `${n} يوماً`;
+
+function timeAgoAr(value?: string | null): string {
+  if (!value) return '';
+  const diff = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(diff)) return '';
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return 'الآن';
+  if (min < 60) return min === 1 ? 'منذ دقيقة' : min === 2 ? 'منذ دقيقتين' : min <= 10 ? `منذ ${min} دقائق` : `منذ ${min} دقيقة`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return hours === 1 ? 'منذ ساعة' : hours === 2 ? 'منذ ساعتين' : hours <= 10 ? `منذ ${hours} ساعات` : `منذ ${hours} ساعة`;
+  const days = Math.floor(hours / 24);
+  if (days === 1) return 'أمس';
+  if (days === 2) return 'منذ يومين';
+  if (days <= 10) return `منذ ${days} أيام`;
+  if (days < 30) return `منذ ${days} يوماً`;
+  return new Date(value).toLocaleDateString('ar-EG', { day: 'numeric', month: 'short' });
+}
 
 function normalizeArabicText(str: string): string {
   if (!str) return '';
@@ -246,40 +309,6 @@ function calculateSearchRelevance(queryNorm: string, targetText: string): number
   return 0;
 }
 
-export interface BaccalaureateTrack {
-  id: string;
-  name: string;
-  englishName: string;
-  description: string;
-}
-
-export const BACCALAUREATE_TRACKS: Record<string, BaccalaureateTrack> = {
-  'medicine_life_sciences': {
-    id: 'medicine_life_sciences',
-    name: 'مسار الطب وعلوم الحياة',
-    englishName: 'Medicine & Life Sciences Track',
-    description: 'العلوم الحيوية والطبية والصيدلانية'
-  },
-  'engineering_cs': {
-    id: 'engineering_cs',
-    name: 'مسار الهندسة وعلوم الحاسب',
-    englishName: 'Engineering & Computer Science Track',
-    description: 'الرياضيات المتقدمة والهندسة والتكنولوجيا'
-  },
-  'business': {
-    id: 'business',
-    name: 'مسار إدارة الأعمال',
-    englishName: 'Business Track',
-    description: 'الاقتصاد والمحاسبة والعلوم المالية والإدارية'
-  },
-  'arts_literature': {
-    id: 'arts_literature',
-    name: 'مسار الآداب والفنون',
-    englishName: 'Arts & Literature Track',
-    description: 'الفنون والعلوم الإنسانية واللغات والفلسفة'
-  }
-};
-
 const CodeBlock = ({ code, language }: { code: string; language: string }) => {
   const [copied, setCopied] = useState(false);
 
@@ -343,70 +372,20 @@ const ThoughtBlock = ({
   if (!thought && !isThinking) return null;
 
   return (
-    <div
-      className="thought-block"
-      style={{
-        background: 'var(--sidebar-bg)',
-        border: '1px solid var(--border-color)',
-        borderRadius: '14px',
-        padding: '10px 14px',
-        marginBottom: '10px',
-        fontSize: '0.82rem',
-        color: 'var(--text-secondary)',
-        direction: 'rtl',
-        overflow: 'hidden',
-        transition: 'all 0.3s ease',
-        width: '100%'
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          cursor: 'pointer',
-          marginBottom: expanded && thought ? '8px' : 0,
-          userSelect: 'none'
-        }}
-        onClick={() => setExpanded(e => !e)}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--primary-color)' }}>
-            <Brain size={16} className={isThinking ? 'animate-spin' : ''} />
-          </span>
-          <span style={{ fontWeight: 700, color: 'var(--primary-color)', fontSize: '0.8rem' }}>
-            {isThinking 
-              ? `جارٍ التفكير والتحليل (${duration || 0} ثانية)...` 
-              : `خطوات التفكير الذكي (${duration || 1} ثانية)`}
-          </span>
-        </div>
-        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none' }}>
-          <span>{expanded ? 'إخفاء' : 'عرض'}</span>
-          <ChevronRight size={15} style={{ transform: expanded ? 'rotate(90deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }} />
+    <div className={`meta-pill thinking ${expanded ? 'open' : ''}`}>
+      <button type="button" className="meta-pill-head" onClick={() => setExpanded(e => !e)} aria-expanded={expanded}>
+        <Brain size={17} className={isThinking ? 'pulse-soft' : ''} />
+        <span className="meta-pill-label">
+          {isThinking ? `بيفكر خطوة بخطوة... ${duration || 0} ث` : `فكّر لمدة ${duration || 1} ${(duration || 1) > 10 ? 'ثانية' : (duration || 1) >= 3 ? 'ثوانٍ' : 'ثانية'}`}
         </span>
-      </div>
-      
+        <span className="meta-pill-toggle">
+          {expanded ? 'إخفاء' : 'عرض'}
+          <ChevronDown size={14} style={{ transform: expanded ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }} />
+        </span>
+      </button>
       {expanded && (
-        <div
-          className="thought-content"
-          style={{
-            margin: 0,
-            padding: '10px 12px',
-            borderTop: '1px solid var(--border-color)',
-            borderRight: 'none',
-            color: 'var(--text-secondary)',
-            fontSize: '0.82rem',
-            lineHeight: '1.65',
-            whiteSpace: 'pre-wrap',
-            textAlign: 'right',
-            direction: 'rtl',
-            background: 'transparent',
-            borderRadius: 0,
-            fontStyle: thought ? 'normal' : 'italic',
-            opacity: thought ? 1 : 0.8
-          }}
-        >
-          {thought || 'جارٍ توليد وتحليل خطوات التفكير...'}
+        <div className="meta-pill-body thought-content">
+          {thought || 'جارٍ توليد خطوات التفكير...'}
         </div>
       )}
     </div>
@@ -1838,81 +1817,36 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       }
     };
 
+    const letters = isEnglishQuiz ? ['A', 'B', 'C', 'D', 'E', 'F'] : ['أ', 'ب', 'ج', 'د', 'هـ', 'و'];
+    const optionState = (isSel: boolean, isRight: boolean) =>
+      submitted ? (isRight ? 'correct' : isSel ? 'wrong' : 'dim') : isSel ? 'selected' : '';
+
     return (
-      <div style={{
-        background: 'var(--sidebar-bg)',
-        border: '1.5px solid var(--primary-color)',
-        borderRadius: '16px',
-        padding: '18px',
-        margin: '12px 0',
-        direction: isEnglishQuiz ? 'ltr' : 'rtl',
-        boxShadow: 'var(--shadow-sm)',
-        maxWidth: '500px',
-        width: '100%',
-        color: 'var(--text-main)',
-        textAlign: isEnglishQuiz ? 'left' : 'right'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-          <FileText size={16} style={{ color: 'var(--primary-color)' }} />
-          <span style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--primary-color)' }}>
-            {isEnglishQuiz ? 'Test your understanding with EGS AI:' : 'اختبر فهمك مع EGS AI:'}
-          </span>
-        </div>
-        
-        <div style={{ fontWeight: 700, fontSize: '0.98rem', marginBottom: '16px', lineHeight: '1.5' }}>
-          {renderFormattedMath(quiz.question)}
+      <div className="quiz-card" dir={isEnglishQuiz ? 'ltr' : 'rtl'}>
+        <div className="quiz-card-head">
+          <span className="quiz-tag">{isEnglishQuiz ? 'Quick check' : 'سؤال تفاعلي'}</span>
+          <div className="quiz-question">{renderFormattedMath(quiz.question)}</div>
         </div>
 
         {quiz.type === 'multiple_choice' && quiz.options && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div className={`quiz-options ${quiz.options.length > 4 ? 'many' : ''}`}>
             {quiz.options.map((opt: string, idx: number) => {
-              const isSelected = selected === idx;
-              let btnStyle: React.CSSProperties = {
-                padding: '10px 14px',
-                borderRadius: '10px',
-                border: '1.5px solid var(--border-color)',
-                background: 'var(--card-bg)',
-                color: 'var(--text-main)',
-                textAlign: isEnglishQuiz ? 'left' : 'right',
-                cursor: 'pointer',
-                fontWeight: 600,
-                fontSize: '0.88rem',
-                transition: 'var(--transition)'
-              };
-
-              if (isSelected) {
-                btnStyle.borderColor = 'var(--primary-color)';
-                btnStyle.background = 'var(--primary-light)';
-                btnStyle.color = 'var(--primary-color)';
-              }
-
-              if (submitted) {
-                const isOptCorrect = opt === quiz.correct_answer;
-                if (isOptCorrect) {
-                  btnStyle.borderColor = 'var(--success-color)';
-                  btnStyle.background = 'rgba(42, 157, 143, 0.1)';
-                  btnStyle.color = 'var(--success-color)';
-                } else if (isSelected) {
-                  btnStyle.borderColor = 'var(--danger-color)';
-                  btnStyle.background = 'rgba(230, 57, 70, 0.1)';
-                  btnStyle.color = 'var(--danger-color)';
-                }
-              }
-
+              const state = optionState(selected === idx, opt === quiz.correct_answer);
               return (
                 <button
                   key={idx}
+                  type="button"
                   disabled={submitted}
                   onClick={() => {
                     setSelected(idx);
                     handleSubmit(opt);
                   }}
-                  style={btnStyle}
+                  className={`quiz-option ${state}`}
                 >
-                  <span style={{ marginLeft: isEnglishQuiz ? '6px' : '0', marginRight: isEnglishQuiz ? '0' : '6px' }}>
-                    {isEnglishQuiz ? `${idx + 1}.` : `${['١', '٢', '٣', '٤', '٥', '٦'][idx] || idx + 1}.`}
-                  </span>
-                  <span>{parseInlineText(opt)}</span>
+                  <span className="quiz-option-letter">{letters[idx] || idx + 1}</span>
+                  <span className="quiz-option-text">{parseInlineText(opt)}</span>
+                  {state === 'correct' && <Check size={18} strokeWidth={2.5} className="quiz-option-mark" />}
+                  {state === 'wrong' && <X size={18} strokeWidth={2.5} className="quiz-option-mark" />}
                 </button>
               );
             })}
@@ -1920,56 +1854,26 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
         )}
 
         {quiz.type === 'true_false' && (
-          <div style={{ display: 'flex', gap: '12px' }}>
+          <div className="quiz-options two">
             {[
-              { val: true, label: isEnglishQuiz ? 'True' : 'صح', color: 'var(--success-color)', bg: 'rgba(42, 157, 143, 0.1)' },
-              { val: false, label: isEnglishQuiz ? 'False' : 'خطأ', color: 'var(--danger-color)', bg: 'rgba(230, 57, 70, 0.1)' }
+              { val: true, label: isEnglishQuiz ? 'True' : 'صح' },
+              { val: false, label: isEnglishQuiz ? 'False' : 'خطأ' }
             ].map((btn) => {
-              const isSelected = tfAnswer === btn.val;
-              let btnStyle: React.CSSProperties = {
-                flex: 1,
-                padding: '12px',
-                borderRadius: '10px',
-                border: '1.5px solid var(--border-color)',
-                background: 'var(--card-bg)',
-                color: 'var(--text-main)',
-                fontWeight: 700,
-                cursor: 'pointer',
-                textAlign: 'center',
-                fontSize: '0.9rem',
-                transition: 'var(--transition)'
-              };
-
-              if (isSelected) {
-                btnStyle.borderColor = btn.color;
-                btnStyle.background = btn.bg;
-                btnStyle.color = btn.color;
-              }
-
-              if (submitted) {
-                const isBtnCorrect = String(btn.val) === String(quiz.correct_answer);
-                if (isBtnCorrect) {
-                  btnStyle.borderColor = 'var(--success-color)';
-                  btnStyle.background = 'rgba(42, 157, 143, 0.1)';
-                  btnStyle.color = 'var(--success-color)';
-                } else if (isSelected) {
-                  btnStyle.borderColor = 'var(--danger-color)';
-                  btnStyle.background = 'rgba(230, 57, 70, 0.1)';
-                  btnStyle.color = 'var(--danger-color)';
-                }
-              }
-
+              const state = optionState(tfAnswer === btn.val, String(btn.val) === String(quiz.correct_answer));
               return (
                 <button
                   key={String(btn.val)}
+                  type="button"
                   disabled={submitted}
                   onClick={() => {
                     setTfAnswer(btn.val);
                     handleSubmit(String(btn.val));
                   }}
-                  style={btnStyle}
+                  className={`quiz-option center ${state}`}
                 >
-                  {btn.label}
+                  <span className="quiz-option-text">{btn.label}</span>
+                  {state === 'correct' && <Check size={18} strokeWidth={2.5} className="quiz-option-mark" />}
+                  {state === 'wrong' && <X size={18} strokeWidth={2.5} className="quiz-option-mark" />}
                 </button>
               );
             })}
@@ -1977,99 +1881,48 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
         )}
 
         {quiz.type === 'essay' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div className="quiz-essay">
             <textarea
               disabled={submitted}
               value={essayAnswer}
               onChange={(e) => setEssayAnswer(e.target.value)}
-              placeholder={isEnglishQuiz ? "Type your answer here..." : "اكتب إجابتك النموذجية هنا..."}
+              placeholder={isEnglishQuiz ? 'Type your answer here...' : 'اكتب إجابتك هنا...'}
               rows={3}
-              style={{
-                width: '100%',
-                padding: '10px',
-                borderRadius: '8px',
-                border: '1.5px solid var(--border-color)',
-                background: 'var(--card-bg)',
-                color: 'var(--text-main)',
-                outline: 'none',
-                fontSize: '0.88rem',
-                direction: isEnglishQuiz ? 'ltr' : 'rtl',
-                textAlign: isEnglishQuiz ? 'left' : 'right'
-              }}
+              className="form-input"
+              dir={isEnglishQuiz ? 'ltr' : 'rtl'}
             />
             <button
+              type="button"
               disabled={submitted || !essayAnswer.trim()}
               onClick={() => handleSubmit(essayAnswer)}
               className="btn-primary"
-              style={{
-                alignSelf: 'flex-start',
-                padding: '8px 16px',
-                borderRadius: '8px',
-                fontSize: '0.82rem',
-                fontWeight: 700
-              }}
+              style={{ alignSelf: 'flex-start', padding: '9px 18px', fontSize: '0.86rem' }}
             >
-              {isEnglishQuiz ? 'Submit Answer' : 'إرسال الإجابة للتقييم'}
+              {isEnglishQuiz ? 'Submit answer' : 'إرسال الإجابة'}
             </button>
           </div>
         )}
 
         {submitted && (
-          <div style={{
-            marginTop: '16px',
-            padding: '12px',
-            borderRadius: '10px',
-            background: 'var(--card-bg)',
-            borderLeft: `4px solid ${quiz.type === 'essay' ? 'var(--primary-color)' : (isCorrect() ? 'var(--success-color)' : 'var(--danger-color)')}`,
-            fontSize: '0.85rem',
-            lineHeight: '1.5',
-            direction: isEnglishQuiz ? 'ltr' : 'rtl',
-            textAlign: isEnglishQuiz ? 'left' : 'right'
-          }}>
-            {quiz.type !== 'essay' && (
-              <p style={{ fontWeight: 800, color: isCorrect() ? 'var(--success-color)' : 'var(--danger-color)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                {isCorrect() ? (
-                  <>
-                    <Award size={16} />
-                    <span>{isEnglishQuiz ? 'Correct answer! Great job (+2 ranking points)!' : 'إجابة صحيحة! أحسنت يا بطل (+2 نقطة في الترتيب)!'}</span>
-                  </>
-                ) : (
-                  <span>{isEnglishQuiz ? 'Incorrect, keep practicing to master this!' : 'إجابة خاطئة، لا بأس فالهدف هو التعلم!'}</span>
-                )}
-              </p>
-            )}
-            {quiz.type === 'essay' && (
-              <p style={{ fontWeight: 800, color: 'var(--primary-color)', marginBottom: '4px' }}>
-                {isEnglishQuiz ? 'Your answer has been submitted for evaluation!' : 'تم إرسال إجابتك للتحليل!'}
-              </p>
-            )}
-            <div style={{ color: 'var(--text-secondary)', marginBottom: onGoToExams ? '10px' : '0' }}>
-              <strong>{isEnglishQuiz ? 'Explanation: ' : 'الشرح والتوضيح: '}</strong>
-              {renderFormattedMath(quiz.explanation)}
+          <div className="quiz-feedback">
+            <div className="quiz-feedback-text">
+              {quiz.type !== 'essay' ? (
+                <strong className={isCorrect() ? 'ok' : 'bad'}>
+                  {isCorrect()
+                    ? (isEnglishQuiz ? 'Correct!' : 'إجابة صحيحة!')
+                    : (isEnglishQuiz ? 'Not quite — keep practicing.' : 'إجابة غير صحيحة، ولا يهمك — الهدف إنك تتعلم.')}
+                </strong>
+              ) : (
+                <strong className="ok">{isEnglishQuiz ? 'Answer submitted.' : 'تم إرسال إجابتك.'}</strong>
+              )}{' '}
+              {quiz.explanation && <span>{renderFormattedMath(quiz.explanation)}</span>}
             </div>
+            {quiz.type !== 'essay' && isCorrect() && <span className="quiz-points-chip">{isEnglishQuiz ? '+2 rank points' : '+2 نقطة ترتيب'}</span>}
             {onGoToExams && (
-              <button
-                type="button"
-                onClick={onGoToExams}
-                style={{
-                  marginTop: '10px',
-                  padding: '7px 14px',
-                  borderRadius: '8px',
-                  fontSize: '0.78rem',
-                  fontWeight: 800,
-                  background: 'var(--primary-light)',
-                  border: '1px solid var(--border-primary)',
-                  color: 'var(--primary-color)',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  cursor: 'pointer',
-                  transition: 'var(--transition)'
-                }}
-              >
-                <FileText size={13} />
-                <span>{isEnglishQuiz ? 'Take a full exam on this topic' : 'اختبر نفسك في امتحان كامل على هذا المفهوم'}</span>
-                <ArrowLeft size={13} />
+              <button type="button" onClick={onGoToExams} className="quiz-exam-link">
+                <FileText size={14} />
+                <span>{isEnglishQuiz ? 'Take a full exam on this topic' : 'امتحان كامل على المفهوم ده'}</span>
+                <ArrowLeft size={14} />
               </button>
             )}
           </div>
@@ -2099,12 +1952,12 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Sparkles size={18} style={{ color: 'var(--primary-color)' }} />
-          <span style={{ fontWeight: 800, fontSize: '0.98rem', color: 'var(--primary-color)' }}>امتحان مقترح من EGS AI:</span>
+          <span style={{ fontWeight: 800, fontSize: '0.98rem', color: 'var(--primary-color)' }}>امتحان مقترح من EGS&nbsp;AI:</span>
         </div>
 
         <h3 style={{ fontWeight: 800, fontSize: '1.05rem', margin: '0' }}>{exam.title}</h3>
         <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', margin: '0' }}>
-          المادة: {exam.subject_name} · الصف الدراسي: {GRADE_NAMES[exam.grade_level]}
+          المادة: {exam.subject_name} · الصف الدراسي: {gradeName(exam.grade_level)}
         </p>
         
         <button
@@ -2141,7 +1994,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       ? `${window.location.origin}/sponsor?student_id=${storedUser.id}&plan=pro_3m`
       : 'https://egsaiedu.com/sponsor';
 
-    const parentWhatsAppText = `السلام عليكم يا بابا / يا ماما 🌸
+    const parentWhatsAppText = `السلام عليكم يا بابا / يا ماما
 أنا بذاكر حالياً على منصة EGS AI لمناهج مرحلتي الدراسية، وحققت إنجاز ممتاز النهاردة في حل المسائل ونماذج الامتحانات.
 
 عشان أقدر أواصل المذاكرة ليلة الامتحان ونماذج البوكليت بنموذج التفكير المعمق، حابب أشترك في "باقة الترم الدراسي الكامل (3 أشهر)" بـ 140 جنيه فقط (شاملة الـ 3 شهور كلها، يعني 1.5 جنيه في اليوم فقط، وأوفر بكتير جداً من الدروس الخصوصية).
@@ -2149,7 +2002,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
 تقدر تفعّل لي الاشتراك فوراً وبكل أمان بضغطة واحدة عبر فودافون كاش أو انستاباي أو كروت ميزة من الرابط ده:
 ${studentSponsorUrl}
 
-شكراً لدعمك ليا في دراستي ❤️`;
+شكراً لدعمك ليا في دراستي.`;
 
     return (
       <div className="motivational-paywall-card animate-scale-in">
@@ -2709,52 +2562,35 @@ ${studentSponsorUrl}
           </div>
         )}
 
-        {/* Post-Answer Continuity Sparks ("The Rabbit Hole") */}
         {sender === 'ai' && !isPaywall && !isStreaming && !lessonNavData && displayContent.trim().length > 60 && (
-          <div className="animate-fade-in" style={{
-            background: 'var(--alpha-white-2)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '12px',
-            padding: '10px 14px',
-            marginTop: '2px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '8px'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.76rem', fontWeight: 800, color: 'var(--primary-color)' }}>
-              <Sparkles size={13} />
-              <span>خطوتك التالية للتفوق في هذا الدرس:</span>
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+          <div className="continuity-sparks animate-fade-in">
+            <button
+              type="button"
+              onClick={() => onSparkPrompt?.('ما الفكرة الخادعة أو السؤال الأكثر تكراراً في الامتحانات حول هذه النقطة؟')}
+              className="continuity-spark-btn"
+            >
+              <Sparkles size={15} />
+              <span>فكرة خادعة تتكرر في الامتحانات</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSparkPrompt?.('اعطني مسألة تدريبية مماثلة من كتاب خارجي مع الحل بالخطوات والقوانين.')}
+              className="continuity-spark-btn"
+            >
+              <FileText size={15} />
+              <span>مسألة مماثلة من الكتب الخارجية</span>
+            </button>
+            {onSaveToNotebook && (
               <button
                 type="button"
-                onClick={() => onSparkPrompt?.('ما الفكرة الخادعة أو السؤال الأكثر تكراراً في الامتحانات حول هذه النقطة؟')}
-                className="continuity-spark-btn"
+                onClick={() => onSaveToNotebook(displayContent)}
+                className={`continuity-spark-btn ${isBookmarked ? 'saved' : ''}`}
+                title={isBookmarked ? 'محفوظ في دفتري الذكي — اضغط للحذف' : 'حفظ أهم قانون في دفتري الذكي'}
               >
-                <Zap size={12} />
-                <span>فكرة خادعة تتكرر في الامتحانات</span>
+                {isBookmarked ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
+                <span>{isBookmarked ? 'محفوظ في دفتري الذكي' : 'حفظ أهم قانون في دفتري الذكي'}</span>
               </button>
-              <button
-                type="button"
-                onClick={() => onSparkPrompt?.('اعطني مسألة تدريبية مماثلة من كتاب خارجي مع الحل بالخطوات والقوانين.')}
-                className="continuity-spark-btn"
-              >
-                <BookOpen size={12} />
-                <span>مسألة مماثلة من الكتب الخارجية</span>
-              </button>
-              {onSaveToNotebook && (
-                <button
-                  type="button"
-                  onClick={() => onSaveToNotebook(displayContent)}
-                  className="continuity-spark-btn"
-                  style={isBookmarked ? { borderColor: 'rgba(255, 183, 3, 0.45)', background: 'rgba(255, 183, 3, 0.12)', color: '#FFB703' } : undefined}
-                  title={isBookmarked ? 'محفوظ في دفتري الذكي — اضغط للحذف من الدفتر' : 'حفظ أهم قانون في دفتري الذكي'}
-                >
-                  {isBookmarked ? <BookmarkCheck size={12} color="#FFB703" /> : <Bookmark size={12} />}
-                  <span>{isBookmarked ? 'محفوظ في دفتري الذكي' : 'حفظ أهم قانون في دفتري الذكي'}</span>
-                </button>
-              )}
-            </div>
+            )}
           </div>
         )}
       </div>
@@ -2782,80 +2618,31 @@ ${studentSponsorUrl}
 
     const allSteps = steps || [];
     if (allSteps.length === 0 && !isSearching) return null;
+    const withImage = allSteps.some(st => /image|scan|camera|📷|🖼/.test(st.icon || '') || st.step === 'image_analysis');
+    const n = allSteps.length;
+    const label = isSearching
+      ? (n ? allSteps[n - 1].message : 'جاري البحث في المنهج...')
+      : `${withImage ? 'تحليل الصورة والبحث في المنهج' : 'البحث في المنهج'} · ${n === 1 ? 'خطوة واحدة' : n === 2 ? 'خطوتين' : n <= 10 ? `${n} خطوات` : `${n} خطوة`}`;
 
     return (
-      <div
-        className="search-steps-panel"
-        style={{
-          background: 'var(--sidebar-bg)',
-          border: '1px solid var(--border-color)',
-          borderRadius: '14px',
-          padding: '10px 14px',
-          marginBottom: '10px',
-          fontSize: '0.82rem',
-          color: 'var(--text-secondary)',
-          direction: 'rtl',
-          overflow: 'hidden',
-          transition: 'all 0.3s ease'
-        }}
-      >
-        {/* Header row */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: allSteps.length > 0 ? 'pointer' : 'default',
-            marginBottom: collapsed ? 0 : (allSteps.length > 0 ? '8px' : 0)
-          }}
-          onClick={() => allSteps.length > 0 && setCollapsed(c => !c)}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--primary-color)' }}>
-              {isSearching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-            </span>
-            <span style={{ fontWeight: 700, color: 'var(--primary-color)', fontSize: '0.8rem' }}>
-              {isSearching && allSteps.length === 0 ? 'جاري البحث في المنهج...' : 'خطوات البحث الذكي'}
-            </span>
-          </div>
-          {allSteps.length > 0 && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.75rem', color: 'var(--text-muted)', userSelect: 'none' }}>
-              <span>{collapsed ? 'عرض' : 'إخفاء'}</span>
-              <ChevronRight size={15} style={{ transform: collapsed ? 'rotate(0deg)' : 'rotate(90deg)', transition: 'transform 0.2s ease' }} />
+      <div className={`meta-pill steps ${collapsed ? '' : 'open'}`}>
+        <button type="button" className="meta-pill-head" onClick={() => n > 0 && setCollapsed(c => !c)} aria-expanded={!collapsed}>
+          {isSearching ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+          <span className="meta-pill-label">{label}</span>
+          {n > 0 && (
+            <span className="meta-pill-toggle">
+              {collapsed ? 'عرض' : 'إخفاء'}
+              <ChevronDown size={14} style={{ transform: collapsed ? 'none' : 'rotate(180deg)', transition: 'transform 0.2s ease' }} />
             </span>
           )}
-        </div>
-
-        {/* Steps list */}
-        {!collapsed && allSteps.length > 0 && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            {allSteps.map((s, idx) => (
-              <div
-                key={idx}
-                className="search-step-item"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '4px 8px',
-                  borderRadius: '8px',
-                  background: idx === allSteps.length - 1 ? 'var(--primary-light)' : 'transparent',
-                  animation: 'stepFadeIn 0.3s ease forwards',
-                  animationDelay: `${idx * 0.05}s`,
-                  opacity: 0
-                }}
-              >
-                <span style={{ display: 'inline-flex', alignItems: 'center', minWidth: '20px', justifyContent: 'center' }}>{renderSearchStepIcon(s.icon)}</span>
-                <span style={{
-                  color: idx === allSteps.length - 1 ? 'var(--primary-color)' : 'var(--text-secondary)',
-                  fontWeight: idx === allSteps.length - 1 ? 700 : 500,
-                  fontSize: '0.8rem'
-                }}>
-                  {s.message}
-                </span>
-                {idx === allSteps.length - 1 && isSearching && (
-                  <span className="step-pulse" style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--primary-color)', display: 'inline-block', marginRight: 'auto', flexShrink: 0 }} />
-                )}
+        </button>
+        {!collapsed && n > 0 && (
+          <div className="meta-pill-body">
+            {allSteps.map((st, idx) => (
+              <div key={idx} className={`search-step-item ${idx === n - 1 ? 'current' : ''}`} style={{ animationDelay: `${idx * 0.05}s` }}>
+                <span className="search-step-icon">{renderSearchStepIcon(st.icon)}</span>
+                <span>{st.message}</span>
+                {idx === n - 1 && isSearching && <span className="step-pulse" />}
               </div>
             ))}
           </div>
@@ -4284,13 +4071,214 @@ const MATH_KEYPAD_TABS: Record<'calc' | 'arabic' | 'english' | 'advanced', { s: 
   ]
 };
 
-export default function App() {
+function usePointsPricing(): PricingSnapshot {
+  const [pricing, setPricing] = useState<PricingSnapshot>(() => buildPricingSnapshot());
+  useEffect(() => {
+    let active = true;
+    fetch('/api/pricing')
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => {
+        if (active && data?.pricing) setPricing(data.pricing);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+  return pricing;
+}
+
+const PLAN_SHORT_LABELS: Record<string, string> = { pro_1m: 'باقة شهر', pro_2m: 'باقة شهرين', pro_3m: 'باقة 3 أشهر' };
+
+const PLAN_CARD_COPY: Record<string, { title: string; badge: string; ribbon?: string; cta: string; features: string[] }> = {
+  pro_1m: {
+    title: 'شهر واحد',
+    badge: 'الباقة التمهيدية',
+    cta: 'اشترك شهراً',
+    features: ['التفكير العميق مفعّل', 'اختبارات وكروت مراجعة ذكية', 'تحليل صور المسائل والرسائل الصوتية']
+  },
+  pro_2m: {
+    title: 'شهران',
+    badge: 'الباقة المرنة',
+    cta: 'اشترك شهرين',
+    features: ['كل مميزات الباقة الشهرية', 'نقاط يومية أكثر', 'تغطي فترة امتحانات كاملة']
+  },
+  pro_3m: {
+    title: '3 شهور',
+    badge: 'أعلى قيمة',
+    ribbon: 'خيار 85% من المتفوقين',
+    cta: 'اشترك 3 شهور',
+    features: ['أكبر عدد نقاط يومية', 'ترم دراسي كامل بسعر واحد', 'التفكير العميق في كل المواد']
+  }
+};
+
+const POINT_ACTIONS: { key: keyof PricingSnapshot['actions']; label: string; Icon: React.ElementType }[] = [
+  { key: 'chat', label: 'سؤال عادي', Icon: MessageCircle },
+  { key: 'thinking', label: 'سؤال بالتفكير العميق', Icon: Brain },
+  { key: 'image', label: 'تحليل صورة (يضاف للسؤال)', Icon: Camera },
+  { key: 'voiceMinute', label: 'دقيقة رسالة صوتية', Icon: Mic },
+  { key: 'exam', label: 'توليد امتحان', Icon: FileText },
+  { key: 'grading', label: 'تصحيح امتحان', Icon: CheckCircle },
+  { key: 'flashcards', label: 'توليد كروت مراجعة', Icon: Layers }
+];
+
+const PointsUsageGuide = ({ pricing, isMobile }: { pricing: PricingSnapshot; isMobile: boolean }) => {
+  const headCell: React.CSSProperties = { fontSize: '0.72rem', fontWeight: 800, color: 'var(--text-muted)', padding: '8px 6px' };
+  const cell: React.CSSProperties = { fontSize: isMobile ? '0.78rem' : '0.84rem', color: 'var(--text-main)', padding: '9px 6px', borderTop: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 };
+  const num: React.CSSProperties = { ...cell, fontWeight: 800, justifyContent: 'center', fontVariantNumeric: 'tabular-nums' };
+  const notes: { Icon: React.ElementType; text: string }[] = [
+    { Icon: Clock, text: `وقت ذروة الخوادم: ${peakWindowsLabel().join(' و ')} من الإثنين إلى الجمعة، ويتضاعف فيه الخصم. باقي اليوم وعطلة نهاية الأسبوع بالسعر المعتاد.` },
+    { Icon: ShieldCheck, text: 'لا تُخصم أي نقطة إذا تعذر الاتصال بمزود الذكاء الاصطناعي، وتظهر النقاط المخصومة أسفل كل إجابة.' },
+    { Icon: Info, text: `الاستخدام العادل: إذا تجاوز استهلاكك المتواصل المعدل الطبيعي لباقتك، يتضاعف الخصم مؤقتاً (×${pricing.fairUseMultiplier}) حتى يعود للمعدل الطبيعي. الاستخدام المعتاد لا يتأثر.` },
+    { Icon: RefreshCw, text: 'النقاط اليومية تتجدد كل يوم 12 منتصف الليل بتوقيت القاهرة. إذا زادت آخر إجابة عن رصيدك، يُخصم الفرق من رصيد اليوم التالي.' }
+  ];
+
+  return (
+    <div className="glass" style={{ padding: isMobile ? '18px 14px' : '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', direction: 'rtl', color: 'var(--text-main)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
+        <Coins size={22} color="var(--primary-color)" />
+        <h4 style={{ fontSize: '1.1rem', fontWeight: 900, margin: 0 }}>كيف تُخصم النقاط؟</h4>
+      </div>
+      <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: 1.7, margin: '0 0 16px' }}>
+        كل الباقات تخصم بنفس السعر العادل لكل استخدام، والفرق بينها في عدد النقاط اليومية. الخصم يُحسب بدقة من حجم سؤالك والإجابة، فالسؤال القصير يخصم أقل من المتوسط والشرح الطويل أكثر.
+      </p>
+
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: isMobile ? '16px' : '24px' }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '0.86rem', fontWeight: 800, marginBottom: '6px' }}>ماذا تمنحك كل باقة يومياً</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.3fr 0.8fr 1fr 1fr' }}>
+            <div style={headCell}>الباقة</div>
+            <div style={{ ...headCell, textAlign: 'center' }}>النقاط</div>
+            <div style={{ ...headCell, textAlign: 'center' }}>أسئلة عادية</div>
+            <div style={{ ...headCell, textAlign: 'center' }}>تفكير عميق</div>
+            {Object.entries(pricing.plans).map(([id, plan]) => (
+              <React.Fragment key={id}>
+                <div style={{ ...cell, fontWeight: 800 }}>{PLAN_SHORT_LABELS[id] || id}</div>
+                <div style={num}>{plan.dailyPoints}</div>
+                <div style={{ ...num, color: 'var(--tech-cyan, #00B4D8)' }}>{`≈ ${plan.chatsPerDay.offPeak}`}</div>
+                <div style={num}>{`≈ ${plan.thinkingPerDay.offPeak}`}</div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: '0.86rem', fontWeight: 800, marginBottom: '6px' }}>متوسط الخصم لكل استخدام (نقطة)</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.6fr 0.8fr 0.8fr' }}>
+            <div style={headCell}>الاستخدام</div>
+            <div style={{ ...headCell, textAlign: 'center' }}>المعتاد</div>
+            <div style={{ ...headCell, textAlign: 'center' }}>الذروة</div>
+            {POINT_ACTIONS.map(({ key, label, Icon }) => (
+              <React.Fragment key={key}>
+                <div style={cell}>
+                  <Icon size={14} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                  <span style={{ minWidth: 0 }}>{label}</span>
+                </div>
+                <div style={num}>{pricing.actions[key].offPeak}</div>
+                <div style={{ ...num, color: '#FFB703' }}>{pricing.actions[key].peak}</div>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <ul style={{ listStyle: 'none', padding: 0, margin: '16px 0 0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+        {notes.map(({ Icon, text }) => (
+          <li key={text} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+            <Icon size={15} style={{ color: 'var(--primary-color)', flexShrink: 0, marginTop: '4px' }} />
+            <span>{text}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+export type AppTab = 'chat' | 'tasks' | 'admin' | 'beta' | 'subscriptions' | 'profile' | 'exams' | 'flashcards' | 'leaderboard';
+
+export interface AppProps {
+  initialTab?: AppTab;
+}
+
+export default function App({ initialTab }: AppProps = {}) {
+  const pointsPricing = usePointsPricing();
+  const [showPointsGuide, setShowPointsGuide] = useState(false);
   // Initial Page Loading & Auth Gate State (prevents FOUC & premature registration flash)
   const [isInitialLoading, setIsInitialLoading] = useState<boolean>(true);
 
-  // Navigation & Views
-  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'admin' | 'beta' | 'subscriptions' | 'profile' | 'exams' | 'flashcards' | 'leaderboard'>('chat');
+  const [toasts, setToasts] = useState<{ id: number; message: string; tone: 'success' | 'error' | 'info' }[]>([]);
+  const notify = (message: string, tone: 'success' | 'error' | 'info' = 'info') => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev.slice(-2), { id, message, tone }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), tone === 'error' ? 6000 : 4000);
+  };
+  const [confirmRequest, setConfirmRequest] = useState<{ message: string; resolve: (ok: boolean) => void } | null>(null);
+  const askConfirm = (message: string) => new Promise<boolean>(resolve => setConfirmRequest({ message, resolve }));
+  const closeConfirm = (ok: boolean) => {
+    confirmRequest?.resolve(ok);
+    setConfirmRequest(null);
+  };
+
+  // Navigation & Views with URL Path Synchronization
+  const [activeTab, setActiveTabRaw] = useState<AppTab>(initialTab || 'chat');
   const [tasksSubject, setTasksSubject] = useState<string>('');
+
+  const setActiveTab = React.useCallback((action: React.SetStateAction<AppTab>) => {
+    setActiveTabRaw(prev => {
+      const nextTab = typeof action === 'function' ? action(prev) : action;
+      if (typeof window !== 'undefined') {
+        const pathMap: Record<AppTab, string> = {
+          chat: '/chat',
+          exams: '/exams',
+          subscriptions: '/subscriptions',
+          beta: '/subscriptions',
+          flashcards: '/flashcards',
+          leaderboard: '/leaderboard',
+          tasks: '/tasks',
+          profile: '/profile',
+          admin: '/admin',
+        };
+        const targetPath = pathMap[nextTab] || '/chat';
+        const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
+        if (currentPath !== targetPath && !(nextTab === 'chat' && currentPath === '/')) {
+          try {
+            window.history.pushState({ tab: nextTab }, '', targetPath);
+          } catch {}
+        }
+      }
+      return nextTab;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const path = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+    const pathToTab: Record<string, AppTab> = {
+      '/chat': 'chat',
+      '/exams': 'exams',
+      '/subscriptions': 'subscriptions',
+      '/pricing': 'subscriptions',
+      '/beta': 'subscriptions',
+      '/flashcards': 'flashcards',
+      '/leaderboard': 'leaderboard',
+      '/tasks': 'tasks',
+      '/profile': 'profile',
+      '/admin': 'admin',
+    };
+    if (pathToTab[path] && pathToTab[path] !== activeTab) {
+      setActiveTabRaw(pathToTab[path]);
+    }
+
+    const onPopState = () => {
+      const currentPath = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
+      const matched = pathToTab[currentPath] || (currentPath === '/' ? 'chat' : undefined);
+      if (matched) {
+        setActiveTabRaw(matched);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
 
   // Points / Coins & Model States
   const [coins, setCoins] = useState<number>(20.0);
@@ -4337,6 +4325,16 @@ export default function App() {
 
   // Auth State
   const [user, setUser] = useState<any>(null); // { id, phone, name, grade_level, plan_type, role }
+  const syncRemainingCoins = (remaining: unknown) => {
+    if (typeof remaining !== 'number') return;
+    setCoins(remaining);
+    setUser((u: any) => {
+      if (!u) return u;
+      const updated = { ...u, coins: remaining };
+      try { localStorage.setItem('egs_user', JSON.stringify(updated)); } catch {}
+      return updated;
+    });
+  };
   const [token, setToken] = useState<string | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authTab, setAuthTab] = useState<'login' | 'register'>('login');
@@ -4404,14 +4402,12 @@ export default function App() {
     setShowOnboardingModal(false);
     setShowGoogleGradeModal(false);
     setShowSubjectSheet(false);
-    setShowModeSheet(false);
     setShowUpgradeSheet(false);
     setShowTeacherConfigSheet(false);
     setShowExamCreateModal(false);
     setShowFlashcardCreateModal(false);
     setShowIosInstallModal(false);
     setShowNotifCenter(false);
-    setShowModeMenu(false);
     setSidebarOpen(false);
 
     // Synchronize activeTab to match the requested tour screen
@@ -4900,7 +4896,7 @@ export default function App() {
             setCurrentCardIndex(prev => prev + 1);
           }, 300);
         } else {
-          alert('تهانينا! لقد أكملت مراجعة جميع الكروت المستحقة في هذه المجموعة.');
+          notify('تهانينا! لقد أكملت مراجعة جميع الكروت المستحقة في هذه المجموعة.', 'success');
           setSelectedDeck(null);
           fetchFlashcardDecks();
         }
@@ -4975,7 +4971,7 @@ export default function App() {
 
       if (!res.ok || !data) {
         if (data) checkAuthError(res.status, data);
-        alert((data && data.error) || 'حدث خطأ أثناء حفظ تقييم الاستدعاء');
+        notify((data && data.error) || 'حدث خطأ أثناء حفظ تقييم الاستدعاء', 'error');
         return;
       }
       if (data.success && data.card) {
@@ -5017,7 +5013,7 @@ export default function App() {
         setSubjectCards(prev => prev.map(c => c.id === cardId ? { ...c, question, answer } : c));
         setEditingCard(null);
       } else {
-        alert(data.error || 'فشل تعديل الكارت');
+        notify(data.error || 'فشل تعديل الكارت', 'error');
       }
     } catch (e) {
       console.error(e);
@@ -5025,7 +5021,7 @@ export default function App() {
   };
 
   const handleDeleteCard = async (cardId: string) => {
-    if (!token || !confirm('هل أنت تأكد من حذف هذا الكارت؟')) return;
+    if (!token || !(await askConfirm('هل أنت متأكد من حذف هذا الكارت؟'))) return;
     try {
       const res = await fetch(`/api/flashcards/card?id=${cardId}`, {
         method: 'DELETE',
@@ -5040,7 +5036,7 @@ export default function App() {
         setSubjectCards(prev => prev.filter(c => c.id !== cardId));
         setEditingCard(null);
       } else {
-        alert(data.error || 'فشل حذف الكارت');
+        notify(data.error || 'فشل حذف الكارت', 'error');
       }
     } catch (e) {
       console.error(e);
@@ -5070,7 +5066,7 @@ export default function App() {
           fetchSubjectCards(selectedFlashcardSubject);
         }
       } else {
-        alert(data.error || 'فشل إعادة التسمية');
+        notify(data.error || 'فشل إعادة التسمية', 'error');
       }
     } catch (e) {
       console.error(e);
@@ -5078,7 +5074,7 @@ export default function App() {
   };
 
   const handleDeleteDeck = async (deckId: string) => {
-    if (!token || !confirm('هل أنت تأكد من حذف هذه المجموعة بالكامل؟')) return;
+    if (!token || !(await askConfirm('هل أنت متأكد من حذف هذه المجموعة بالكامل؟'))) return;
     try {
       const res = await fetch(`/api/flashcards?id=${deckId}`, {
         method: 'DELETE',
@@ -5095,7 +5091,7 @@ export default function App() {
           fetchSubjectCards(selectedFlashcardSubject);
         }
       } else {
-        alert(data.error || 'فشل حذف المجموعة');
+        notify(data.error || 'فشل حذف المجموعة', 'error');
       }
     } catch (e) {
       console.error(e);
@@ -5106,7 +5102,7 @@ export default function App() {
     if (!token || !flashcardSubject || !manualDeckTitle) return;
     const validCards = manualCardsList.filter(c => c.question.trim() && c.answer.trim());
     if (validCards.length === 0) {
-      alert('يرجى إضافة كارت واحد على الأقل يحتوي على سؤال وإجابة');
+      notify('يرجى إضافة كارت واحد على الأقل يحتوي على سؤال وإجابة', 'info');
       return;
     }
 
@@ -5128,7 +5124,7 @@ export default function App() {
       const data = await res.json();
       if (!res.ok) {
         if (!checkAuthError(res.status, data)) return;
-        alert(data.error || 'فشل إنشاء الكروت');
+        notify(data.error || 'فشل إنشاء الكروت', 'error');
         return;
       }
       if (data.success) {
@@ -5140,7 +5136,7 @@ export default function App() {
           fetchSubjectCards(flashcardSubject);
         }
       } else {
-        alert(data.error || 'فشل إنشاء الكروت');
+        notify(data.error || 'فشل إنشاء الكروت', 'error');
       }
     } catch (e) {
       console.error(e);
@@ -5221,10 +5217,11 @@ export default function App() {
       }
       if (!res.ok) {
         if (!checkAuthError(res.status, data)) return;
-        alert(data?.error || 'فشل توليد الكروت');
+        notify(data?.error || 'فشل توليد الكروت', 'error');
         return;
       }
       if (data.success) {
+        syncRemainingCoins(data.remaining_coins);
         setFlashcardTopic('');
         setSelectedFlashcardLesson(null);
         setShowFlashcardCreateModal(false);
@@ -5233,7 +5230,7 @@ export default function App() {
           fetchSubjectCards(flashcardSubject);
         }
       } else {
-        alert(data.error || 'فشل توليد الكروت');
+        notify(data.error || 'فشل توليد الكروت', 'error');
       }
     } catch (e) {
       console.error(e);
@@ -5274,6 +5271,16 @@ export default function App() {
   const [selectedElective, setSelectedElective] = useState('');
   const [otpCode, setOtpCode] = useState('');
   const [otpStep, setOtpStep] = useState(false);
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [otpResendIn, setOtpResendIn] = useState(0);
+  useEffect(() => {
+    if (otpStep) setOtpResendIn(60);
+  }, [otpStep]);
+  useEffect(() => {
+    if (otpResendIn <= 0) return;
+    const t = setTimeout(() => setOtpResendIn(v => v - 1), 1000);
+    return () => clearTimeout(t);
+  }, [otpResendIn]);
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -5281,21 +5288,32 @@ export default function App() {
   // Google OAuth Extra States
   const [showGoogleGradeModal, setShowGoogleGradeModal] = useState(false);
   const [googleTempUser, setGoogleTempUser] = useState<any>(null);
-  const [googleSelectedTrack, setGoogleSelectedTrack] = useState('medicine_life_sciences');
-  const [googleSelectedElective, setGoogleSelectedElective] = useState('');
 
   // Post-Registration Sequential Onboarding States
   const [showOnboardingModal, setShowOnboardingModal] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState<'stage' | 'name'>('stage');
-  const [onboardingGrade, setOnboardingGrade] = useState('1_high');
-  const [onboardingTrack, setOnboardingTrack] = useState('engineering_cs');
+  const [onboardingGrade, setOnboardingGrade] = useState('');
+  const [onboardingTrack, setOnboardingTrack] = useState<string | null>(null);
   const [onboardingElective, setOnboardingElective] = useState('');
   const [onboardingName, setOnboardingName] = useState('');
   const [onboardingLoading, setOnboardingLoading] = useState(false);
+  const [profilePathDraft, setProfilePathDraft] = useState<StudentPath | null>(null);
+  const [profilePathSaving, setProfilePathSaving] = useState(false);
   const [onboardingError, setOnboardingError] = useState('');
 
   // Chat State
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatFontLevel, setChatFontLevel] = useState(0);
+  useEffect(() => {
+    try { setChatFontLevel(Math.min(2, Math.max(0, Number(localStorage.getItem('egs_chat_font')) || 0))); } catch {}
+  }, []);
+  const cycleChatFont = () => {
+    setChatFontLevel(prev => {
+      const next = (prev + 1) % 3;
+      try { localStorage.setItem('egs_chat_font', String(next)); } catch {}
+      return next;
+    });
+  };
   const [inputMessage, setInputMessage] = useState('');
   const [chatSubject, setChatSubject] = useState('الرياضيات');
   const [chatGrade, setChatGrade] = useState('1_high'); // for guests
@@ -5345,7 +5363,7 @@ export default function App() {
   const [sessions, setSessions] = useState<any[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [previousConversationsOpen, setPreviousConversationsOpen] = useState(false);
+  const [previousConversationsOpen, setPreviousConversationsOpen] = useState(true);
 
   // Report State
   const [reportTarget, setReportTarget] = useState<{ content: string; userQuery: string } | null>(null);
@@ -5495,9 +5513,17 @@ export default function App() {
 
   // Configuration Settings State
   const [activeGradeLevels, setActiveGradeLevels] = useState<string[]>(['1_middle', '2_middle', '3_middle', '1_high', '2_high']);
-  const [activeTracks, setActiveTracks] = useState<string[]>(['medicine_life_sciences', 'engineering_cs', 'business', 'arts_literature']);
+  const [educationCatalog, setEducationCatalog] = useState<EducationCatalog>(DEFAULT_EDUCATION_CATALOG);
+  const applyEducationCatalog = (catalog: EducationCatalog) => {
+    registerStageCatalog(catalog.stages);
+    setEducationCatalog(prev => (JSON.stringify(prev) === JSON.stringify(catalog) ? prev : catalog));
+    try { localStorage.setItem('egs_education_catalog', JSON.stringify(catalog)); } catch (e) {}
+  };
+  const stageEntries: [string, string][] = sortedSystems(educationCatalog)
+    .flatMap(sys => stagesOfSystem(educationCatalog, sys.id))
+    .map(st => [st.id, st.name]);
+  const stageEntriesWithUnselected: [string, string][] = [...stageEntries, [UNSELECTED_STAGE, gradeName(UNSELECTED_STAGE)]];
   const [activeCurriculumIds, setActiveCurriculumIds] = useState<string[]>([]);
-  const [savingTracks, setSavingTracks] = useState(false);
 
   // Profile Update State
   const [profileName, setProfileName] = useState('');
@@ -5511,6 +5537,7 @@ export default function App() {
 
   // Responsive Layout & PWA Detection
   const [isMobile, setIsMobile] = useState(false);
+  const [sidebarOverlay, setSidebarOverlay] = useState(false);
   const [isMobileDevice, setIsMobileDevice] = useState(false);
   const [isStandalone, setIsStandalone] = useState(false);
   const [isIosDevice, setIsIosDevice] = useState(false);
@@ -5626,9 +5653,9 @@ export default function App() {
       }
       setExamTimeRemaining(durationSeconds);
       if (storedToken) {
-        const deducted = Number(data?.coins_deducted || 12.5);
+        const deducted = Number(data?.coins_deducted) || 0;
         setCoins(prev => {
-          const next = Math.max(0, +(prev - deducted).toFixed(2));
+          const next = typeof data?.remaining_coins === 'number' ? data.remaining_coins : Math.max(0, +(prev - deducted).toFixed(2));
           setUser((u: any) => {
             if (!u) return u;
             const updated = { ...u, coins: next };
@@ -5704,7 +5731,7 @@ export default function App() {
       setExamTimeRemaining(0);
       loadExamsData();
     } catch (e: any) {
-      alert(e.message || 'فشل تصحيح الامتحان');
+      notify(e.message || 'فشل تصحيح الامتحان', 'error');
     } finally {
       setGradingLoading(false);
     }
@@ -5780,20 +5807,12 @@ export default function App() {
 
     if (tourScreens.includes(currentScreen)) {
       const hasSeenTour = localStorage.getItem(`egs_tour_completed_${currentScreen}`) === 'true';
-      if (!hasSeenTour) {
-        if (currentScreen === 'chat') {
-          // Trigger platform introductory walkthrough on first page access
-          if (typeof window !== 'undefined') localStorage.removeItem('egs_just_registered');
-          const timer = setTimeout(() => {
-            startTour('chat');
-          }, 600);
-          return () => clearTimeout(timer);
-        } else if (user) {
-          const timer = setTimeout(() => {
-            startTour(currentScreen);
-          }, 500);
-          return () => clearTimeout(timer);
-        }
+      if (!hasSeenTour && user) {
+        if (currentScreen === 'chat') localStorage.removeItem('egs_just_registered');
+        const timer = setTimeout(() => {
+          startTour(currentScreen);
+        }, currentScreen === 'chat' ? 600 : 500);
+        return () => clearTimeout(timer);
       }
     }
   }, [activeTab, user, isInitialLoading, showAuthModal, showOnboardingModal]);
@@ -5899,8 +5918,6 @@ export default function App() {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const [showCameraModal, setShowCameraModal] = useState(false);
-  const [showModeMenu, setShowModeMenu] = useState(false);
-  const [showModeSheet, setShowModeSheet] = useState(false);
   const [showUpgradeSheet, setShowUpgradeSheet] = useState(false);
   const [showTeacherConfigSheet, setShowTeacherConfigSheet] = useState(false);
 
@@ -5935,89 +5952,18 @@ export default function App() {
 
   // Helper to render non-intrusive mobile PWA install banner
   const renderMobileInstallBanner = () => {
-    if (!isMobileDevice || isStandalone || !showMobileInstallBanner || isTourOpen) return null;
+    if (!user || !isMobileDevice || isStandalone || !showMobileInstallBanner || isTourOpen) return null;
     return (
-      <div 
-        className="glass animate-fade-in"
-        style={{
-          width: '100%',
-          maxWidth: '560px',
-          padding: '10px 14px',
-          borderRadius: 'var(--radius-lg)',
-          background: 'rgba(125, 161, 70, 0.09)',
-          border: '1px solid var(--border-primary)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '10px',
-          boxShadow: 'var(--shadow-sm)',
-          margin: '0 auto 10px'
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
-          <div style={{
-            width: '34px',
-            height: '34px',
-            borderRadius: '10px',
-            background: 'var(--primary-light)',
-            color: 'var(--primary-color)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0
-          }}>
-            <Download size={17} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0, textAlign: 'right' }}>
-            <div style={{ fontWeight: 800, fontSize: '0.82rem', color: 'var(--text-main)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              تثبيت تطبيق EGS AI على الهاتف
-            </div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              إضافة المنصة إلى الشاشة الرئيسية لفتح فوري وسلس
-            </div>
-          </div>
+      <div className="install-banner animate-fade-in">
+        <span className="install-banner-icon"><Download size={18} /></span>
+        <div className="install-banner-text">
+          <strong>ثبّت التطبيق على شاشتك الرئيسية</strong>
+          <span>يفتح أسرع ويعمل بدون متصفح</span>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
-          <button
-            type="button"
-            onClick={handleMobileInstallClick}
-            className="btn-primary"
-            style={{
-              padding: '5px 12px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: '0.76rem',
-              fontWeight: 700,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              cursor: 'pointer',
-              border: 'none'
-            }}
-          >
-            <Download size={12} />
-            <span>تثبيت</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleDismissMobileInstallBanner}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              color: 'var(--text-muted)',
-              padding: '4px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              borderRadius: 'var(--radius-sm)'
-            }}
-            title="إخفاء"
-          >
-            <X size={14} />
-          </button>
-        </div>
+        <button type="button" onClick={handleMobileInstallClick} className="install-banner-btn">تثبيت</button>
+        <button type="button" onClick={handleDismissMobileInstallBanner} className="install-banner-close" aria-label="إخفاء" title="إخفاء">
+          <X size={18} />
+        </button>
       </div>
     );
   };
@@ -6219,7 +6165,7 @@ export default function App() {
 
   const handleOpenNotebook = () => {
     setShowNotebookModal(true);
-    if (isMobile) setSidebarOpen(false);
+    if (sidebarOverlay) setSidebarOpen(false);
     loadStudyNotebook();
   };
 
@@ -6366,7 +6312,7 @@ export default function App() {
   // Navigate directly to the note's originating conversation and scroll to the AI message
   const handleViewConversationInChat = async (note: any) => {
     setShowNotebookModal(false);
-    if (isMobile) setSidebarOpen(false);
+    if (sidebarOverlay) setSidebarOpen(false);
     setActiveTab('chat');
 
     if (note.subject_name && note.subject_name !== 'ملاحظات عامة') {
@@ -6407,7 +6353,7 @@ export default function App() {
         scrollToMessage(inCurrent.id, note.content);
         return;
       }
-      alert('لم نتمكن من العثور على المحادثة الأصلية لهذه الملاحظة.');
+      notify('لم نتمكن من العثور على المحادثة الأصلية لهذه الملاحظة.', 'info');
       return;
     }
 
@@ -6574,7 +6520,7 @@ export default function App() {
                   خريطة منهج {chatSubject}
                 </h3>
                 <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                  {user ? GRADE_NAMES[user.grade_level] : GRADE_NAMES[chatGrade]} • إجمالي {totalLessonCount} درساً
+                  {user ? gradeName(user.grade_level) : gradeName(chatGrade)} • إجمالي {totalLessonCount} درساً
                 </span>
               </div>
             </div>
@@ -6843,9 +6789,9 @@ export default function App() {
                 type="button"
                 onClick={() => setNotebookCategoryFilter(cat.id as any)}
                 style={{
-                  background: notebookCategoryFilter === cat.id ? 'rgba(255, 183, 3, 0.18)' : 'var(--alpha-white-3)',
-                  border: notebookCategoryFilter === cat.id ? '1.5px solid #FFB703' : '1px solid var(--border-color)',
-                  color: notebookCategoryFilter === cat.id ? '#FFB703' : 'var(--text-secondary)',
+                  background: notebookCategoryFilter === cat.id ? 'rgba(0, 180, 216, 0.12)' : 'var(--alpha-white-3)',
+                  border: notebookCategoryFilter === cat.id ? '1.5px solid var(--tech-cyan)' : '1px solid var(--border-color)',
+                  color: notebookCategoryFilter === cat.id ? 'var(--tech-cyan)' : 'var(--text-secondary)',
                   padding: '3px 10px',
                   borderRadius: '6px',
                   fontSize: '0.74rem',
@@ -6997,7 +6943,7 @@ export default function App() {
     if (activeSubjects.length === 0) return null;
 
     return (
-      <div style={{ width: '100%', maxWidth: '820px' }}>
+      <div style={{ width: '100%', maxWidth: '1040px' }}>
         <div id="tour-subject-selector" className="subject-pills-bar custom-scrollbar" style={{ justifyContent: isMobile ? 'flex-start' : 'center' }}>
           {activeSubjects.map((s) => {
             const isSelected = chatSubject === s.subject_name;
@@ -7019,15 +6965,11 @@ export default function App() {
                     if (textareaRef.current) textareaRef.current.focus();
                   }
                 }}
-                className={`subject-pill-btn ${isSelected ? 'active' : ''}`}
+                className={`subject-pill-btn ${isSelected ? 'active' : ''} ${isPlaceholder ? 'placeholder' : ''}`}
               >
-                {getSubjectIcon(s.subject_name)}
+                <span className="subject-pill-icon">{getSubjectIcon(s.subject_name, 16)}</span>
                 <span>{s.subject_name}</span>
-                {isPlaceholder && (
-                  <span style={{ fontSize: '0.62rem', fontWeight: 800, background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '1px 5px', borderRadius: '4px' }}>
-                    قريباً
-                  </span>
-                )}
+                {isPlaceholder && <span className="soon-badge">قيد الإعداد</span>}
               </button>
             );
           })}
@@ -7043,551 +6985,254 @@ export default function App() {
     const effectiveSubj = tasksSubject || chatSubject || (activeSubjs[0]?.subject_name || '');
     const currentSubjObj = activeSubjs.find(s => s.subject_name === effectiveSubj);
 
-    // Curriculum lessons count & progress for effectiveSubj
-    const subjUnits = curriculums.filter(c => c.grade_level === targetGrade && c.subject_name === effectiveSubj);
-    const currentSubjUnits = effectiveSubj === chatSubject && activeSubjectUnits.length > 0 
-      ? activeSubjectUnits 
+    const targetCurriculumForTasks = resolveCurriculum(educationCatalog, curriculums, targetGrade, effectiveSubj);
+    const subjUnits = targetCurriculumForTasks ? [targetCurriculumForTasks] : curriculums.filter(c => c.grade_level === targetGrade && c.subject_name === effectiveSubj);
+    const currentSubjUnits = effectiveSubj === chatSubject && activeSubjectUnits.length > 0
+      ? activeSubjectUnits
       : (subjUnits.flatMap(u => (u as any).units || []));
-    const allLessons = currentSubjUnits.flatMap((u: any) => u.lessons || []);
+    const allLessons = currentSubjUnits.flatMap((u: any) => (u.lessons || []).map((l: any) => ({ ...l, unitTitle: l.unitTitle || u.title })));
+    const isLessonDone = (l: any) => curriculumProgress.some(p => p.lesson_id === l.id && p.status === 'completed');
     const totalLessonCount = allLessons.length;
-    const completedLessonCount = allLessons.filter((l: any) => curriculumProgress.some(p => p.lesson_id === l.id && p.status === 'completed')).length;
+    const completedLessonCount = allLessons.filter(isLessonDone).length;
     const percent = totalLessonCount > 0 ? Math.round((completedLessonCount / totalLessonCount) * 100) : 0;
+    const upcoming = allLessons.map((l: any, i: number) => ({ ...l, order: i + 1 })).filter((l: any) => !isLessonDone(l)).slice(0, 3);
+    const currentUnitTitle = upcoming[0]?.unitTitle || '';
 
-    // Daily Quests Stats
     const quests = dailyQuestsData?.quests || DEFAULT_DAILY_QUESTS;
     const completedQuestsCount = quests.filter((q: any) => q.completed).length;
     const totalQuestsCount = quests.length;
-    const totalRewardPoints = quests.reduce((acc: number, q: any) => acc + (q.rewardPoints || 0), 0);
     const earnedRewardPoints = quests.filter((q: any) => q.claimed).reduce((acc: number, q: any) => acc + (q.rewardPoints || 0), 0);
+    const streak = dailyQuestsData?.streakDays || user?.study_streak || 1;
+    const shields = user?.streak_shields ?? 1;
+
+    const startQuest = (quest: any) => {
+      if (quest.id?.includes('exam') || quest.title?.includes('اختبار') || quest.title?.includes('امتحان')) setActiveTab('exams');
+      else if (quest.id?.includes('review') || quest.id?.includes('flashcard') || quest.title?.includes('كروت')) {
+        setActiveTab('flashcards');
+        if (effectiveSubj) fetchSubjectCards(effectiveSubj);
+      } else setActiveTab('chat');
+    };
+    const questTone = (q: any) => q.icon === 'FileText' ? 'violet' : q.icon === 'Brain' ? 'cyan' : 'green';
+    const studyLesson = (lesson: any) => {
+      setChatSubject(effectiveSubj);
+      setInputMessage(`اشرح لي بالتفصيل درس "${lesson.title}" مع أمثلة وتطبيقات من منهج ${effectiveSubj}.`);
+      setActiveTab('chat');
+    };
+    const shareMsg = user
+      ? `السلام عليكم ورحمة الله،\n\nتقرير مذاكرة الطالب: ${user.name || 'الطالب'}\nالصف: ${gradeName(user.grade_level)}\nمهام اليوم: ${completedQuestsCount} من ${totalQuestsCount}\nنقاط الترتيب: ${user.points || points || 0}\nسلسلة المذاكرة: ${daysAr(streak)}\nدروس مكتملة في ${effectiveSubj || 'المادة'}: ${completedLessonCount} من ${totalLessonCount} (${percent}%)\n\nمن منصة EGS AI`
+      : '';
+    const ringR = 44;
+    const ringC = 2 * Math.PI * ringR;
 
     return (
-      <div className="mobile-main-with-nav" style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px 12px 90px' : '32px 24px', background: 'var(--bg-color)' }}>
-        <div className="tasks-page-container animate-fade-in">
-          
-          {/* Top Bar: Back to Chat & Midnight Reset Pill */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
-            <button 
-              type="button"
-              onClick={() => setActiveTab('chat')}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '8px',
-                background: 'var(--card-bg)',
-                border: '1px solid var(--border-color)',
-                color: 'var(--text-main)',
-                padding: '8px 16px',
-                borderRadius: 'var(--radius-md)',
-                cursor: 'pointer',
-                fontWeight: 700,
-                fontSize: '0.86rem',
-                fontFamily: 'var(--font-arabic)',
-                boxShadow: 'var(--shadow-xs)',
-                transition: 'var(--transition)'
-              }}
-            >
-              <ArrowRight size={16} />
-              <span>العودة للدردشة</span>
-            </button>
-            <div className="tasks-reset-badge">
-              <Clock size={13} color="var(--primary-color)" />
-              <span>تتجدد المهام منتصف ليل القاهرة</span>
+      <div className="mobile-main-with-nav page-scroll custom-scrollbar">
+        <div className="page-container animate-fade-in">
+          <div className="page-head">
+            <div className="page-head-text">
+              <button type="button" className="page-back-link" onClick={() => setActiveTab('chat')}>
+                <ArrowRight size={16} />
+                <span>العودة للمحادثة</span>
+              </button>
+              <h1>مهام المذاكرة والمتابعة الأكاديمية</h1>
+              <p>خطوات صغيرة كل يوم تبني سلسلة تفوقك. أكمل المهام واستلم نقاط الترتيب.</p>
             </div>
-          </div>
-
-
-          {/* Hero & Quick Summary Card */}
-          <div className="tasks-hero-card">
-            <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '10px' : '16px' }}>
-              <div style={{
-                width: isMobile ? '44px' : '52px',
-                height: isMobile ? '44px' : '52px',
-                borderRadius: '16px',
-                background: 'var(--primary-light)',
-                color: 'var(--primary-color)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                boxShadow: 'var(--shadow-glow)',
-                border: '1px solid var(--border-primary)',
-                flexShrink: 0
-              }}>
-                <CheckCircle2 size={isMobile ? 22 : 26} />
-              </div>
-              <div>
-                <h2 style={{ fontSize: isMobile ? '1.25rem' : '1.6rem', fontWeight: 900, color: 'var(--text-main)', margin: 0, lineHeight: 1.3 }}>
-                  مهام المذاكرة والمتابعة الأكاديمية
-                </h2>
-                <p style={{ fontSize: isMobile ? '0.78rem' : '0.88rem', color: 'var(--text-muted)', margin: '4px 0 0', lineHeight: 1.5 }}>
-                  {user ? `أهلاً يا ${user.name} — أنجز مهامك اليومية واكسب نقاط التميز وتتبع إتقانك للمنهج` : 'سجل حسابك مجاناً لمتابعة مهامك اليومية وحصد نقاط الترتيب'}
-                </p>
-              </div>
-            </div>
-
-            {/* Quick 3-Card Metric Summary */}
-            <div className="tasks-stats-grid">
-              <div className="tasks-stat-card">
-                <div className="tasks-stat-icon quests">
-                  <Target size={20} />
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700 }}>إنجاز مهام اليوم</div>
-                  <div style={{ fontSize: '1.15rem', fontWeight: 900, color: 'var(--text-main)', marginTop: '2px' }}>
-                    {totalQuestsCount > 0 ? `${completedQuestsCount} من ${totalQuestsCount}` : '—'}
-                  </div>
-                  <div style={{ fontSize: '0.68rem', color: 'var(--primary-color)', marginTop: '2px', fontWeight: 700 }}>
-                    {totalQuestsCount > 0 && completedQuestsCount === totalQuestsCount ? 'مكتملة بالكامل' : 'قيد الإنجاز'}
-                  </div>
-                </div>
-              </div>
-
-              <div className="tasks-stat-card">
-                <div className="tasks-stat-icon points">
-                  <Trophy size={20} />
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700 }}>نقاط المهام اليومية</div>
-                  <div style={{ fontSize: '1.15rem', fontWeight: 900, color: '#FFB703', marginTop: '2px' }}>
-                    +{earnedRewardPoints} / {totalRewardPoints}
-                  </div>
-                  <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    تضاف فوراً لرصيدك
-                  </div>
-                </div>
-              </div>
-
-              <div className="tasks-stat-card">
-                <div className="tasks-stat-icon mastery">
-                  <BarChart3 size={20} />
-                </div>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700 }}>إتقان منهج {effectiveSubj || 'المقرر'}</div>
-                  <div style={{ fontSize: '1.15rem', fontWeight: 900, color: '#9D4EDD', marginTop: '2px' }}>
-                    {totalLessonCount > 0 ? `${percent}%` : '—'}
-                  </div>
-                  <div style={{ fontSize: '0.68rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                    {totalLessonCount > 0 ? `${completedLessonCount} من ${totalLessonCount} درساً` : 'اختر مادة للمتابعة'}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Parent WhatsApp Progress Share Action */}
-            {user && (
-              <div style={{ marginTop: '16px', paddingTop: '14px', borderTop: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-                <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                  شارك ولي أمرك إنجازاتك الدراسية وسلسلة التزامك بضغطة واحدة:
-                </span>
-                {(() => {
-                  const studentName = user.name || 'الطالب';
-                  const gradeName = GRADE_NAMES[user.grade_level] || '';
-                  const shareMsg = `السلام عليكم ورحمة الله،\n\nتقرير مذاكرة وإنجاز الطالب: ${studentName}\nالصف: ${gradeName}\nإنجاز المهام اليومية: ${completedQuestsCount} من ${totalQuestsCount}\nمجموع نقاط الترتيب: ${user.points || points || 0} نقطة\nسلسلة الالتزام: ${user.study_streak || 1} يوم متواصل\nدروس مكتملة في ${effectiveSubj || 'المادة'}: ${completedLessonCount} من ${totalLessonCount} (${percent}%)\n\nتم استخراج التقرير عبر EGS AI للتعليم الذكي.`;
-                  const waUrl = `https://wa.me/?text=${encodeURIComponent(shareMsg)}`;
-                  return (
-                    <a
-                      href={waUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        background: 'rgba(34, 197, 94, 0.12)',
-                        color: '#22c55e',
-                        border: '1.5px solid #22c55e',
-                        borderRadius: '10px',
-                        padding: '8px 16px',
-                        fontSize: '0.82rem',
-                        fontWeight: 800,
-                        textDecoration: 'none',
-                        cursor: 'pointer',
-                        transition: 'var(--transition)'
-                      }}
-                      title="مشاركة التقرير عبر واتساب مع ولي الأمر"
-                    >
-                      <Share size={15} />
-                      <span>مشاركة التقرير مع ولي الأمر عبر WhatsApp</span>
-                    </a>
-                  );
-                })()}
-              </div>
-            )}
-          </div>
-
-          {/* Section 1: Daily Quests Card */}
-          <div className="study-dashboard-card">
-            <div className="study-card-title-row">
-              <div className="study-card-title-group">
-                <div style={{ width: '34px', height: '34px', borderRadius: '10px', background: 'rgba(0, 180, 216, 0.15)', color: '#00B4D8', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Target size={18} />
-                </div>
-                <div>
-                  <div className="study-card-title-text">مهام المذاكرة اليومية</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>أكمل المهام لكسب نقاط إضافية في لوحة المتصدرين</div>
-                </div>
-              </div>
-            </div>
-
-            {user ? (
-              loadingDailyQuests ? (
-                <div style={{ display: 'flex', justifyContent: 'center', padding: '30px' }}>
-                  <Loader2 size={24} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
-                </div>
-              ) : quests.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: '0.86rem' }}>
-                  لا توجد مهام مسجلة لهذا اليوم.
-                </div>
-              ) : (
-                <div className="daily-quests-grid">
-                  {quests.map((quest: any) => {
-                    const isDone = quest.completed;
-                    const isClaimed = quest.claimed;
-                    return (
-                      <div key={quest.id} className={`daily-quest-item ${isDone ? 'completed' : ''} ${isClaimed ? 'claimed' : ''}`}>
-                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '8px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                            <div style={{ width: '32px', height: '32px', borderRadius: '10px', background: isDone ? 'rgba(34, 197, 94, 0.15)' : 'var(--alpha-white-4)', color: isDone ? '#22c55e' : 'var(--text-secondary)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                              {quest.icon === 'Brain' ? <Brain size={16} /> : quest.icon === 'FileText' ? <FileText size={16} /> : <Sparkles size={16} />}
-                            </div>
-                            <div>
-                              <div style={{ fontSize: '0.84rem', fontWeight: 800, color: 'var(--text-main)', lineHeight: 1.3 }}>
-                                {quest.title}
-                              </div>
-                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                                {quest.current} / {quest.target} مكتمل
-                              </div>
-                            </div>
-                          </div>
-                          <span style={{ fontSize: '0.74rem', fontWeight: 800, color: '#FFB703', background: 'rgba(255, 183, 3, 0.1)', padding: '3px 8px', borderRadius: '6px', border: '1px solid rgba(255, 183, 3, 0.25)', whiteSpace: 'nowrap' }}>
-                            +{quest.rewardPoints} نقاط
-                          </span>
-                        </div>
-
-                        {/* Progress Bar */}
-                        <div style={{ width: '100%', height: '5px', background: 'var(--alpha-white-3)', borderRadius: '4px', overflow: 'hidden', margin: '4px 0' }}>
-                          <div style={{ width: `${Math.min(100, Math.round((quest.current / quest.target) * 100))}%`, height: '100%', background: isDone ? '#22c55e' : 'var(--primary-color)', borderRadius: '4px', transition: 'width 0.3s ease' }} />
-                        </div>
-
-                        {/* Actions */}
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px', marginTop: '4px' }}>
-                          {isDone && !isClaimed && (
-                            <button
-                              type="button"
-                              onClick={() => handleClaimQuest(quest.id)}
-                              disabled={claimingQuestId === quest.id}
-                              className="quest-claim-btn"
-                              style={{ width: '100%' }}
-                            >
-                              {claimingQuestId === quest.id ? <Loader2 size={13} className="animate-spin" /> : <Award size={14} />}
-                              <span>استلام +{quest.rewardPoints} نقاط</span>
-                            </button>
-                          )}
-                          {isClaimed && (
-                            <div className="quest-claimed-pill" style={{ width: '100%', justifyContent: 'center' }}>
-                              <Check size={13} />
-                              <span>تم استلام المكافأة بنجاح</span>
-                            </div>
-                          )}
-                          {!isDone && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (quest.id?.includes('chat') || quest.title?.includes('سؤال')) {
-                                  setActiveTab('chat');
-                                } else if (quest.id?.includes('exam') || quest.title?.includes('امتحان')) {
-                                  setActiveTab('exams');
-                                } else if (quest.id?.includes('flashcard') || quest.title?.includes('كروت')) {
-                                  setActiveTab('flashcards');
-                                  if (effectiveSubj) fetchSubjectCards(effectiveSubj);
-                                } else {
-                                  setActiveTab('chat');
-                                }
-                              }}
-                              className="quest-action-btn"
-                              style={{ width: '100%' }}
-                            >
-                              <ArrowLeft size={13} />
-                              <span>ابدأ هذه المهمة الآن</span>
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )
-            ) : (
-              <div style={{ padding: '24px 16px', background: 'var(--alpha-white-2)', borderRadius: '14px', border: '1px dashed var(--border-color)', textAlign: 'center' }}>
-                <Sparkles size={24} color="var(--primary-color)" style={{ margin: '0 auto 8px' }} />
-                <div style={{ fontSize: '0.94rem', fontWeight: 800, color: 'var(--text-main)' }}>سجل حسابك لتفعيل مهام المذاكرة اليومية</div>
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px', maxWidth: '440px', margin: '4px auto 14px' }}>
-                  اكسب نقاط ترتيب إضافية يومياً وتنافس مع زملائك على لوحة الشرف في المناهج المصرية.
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                  }}
-                  className="btn-primary"
-                  style={{ padding: '8px 20px', borderRadius: '10px', fontSize: '0.84rem', fontWeight: 800, margin: '0 auto', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
-                >
-                  <Sparkles size={14} />
-                  <span>إنشاء حساب مجاني</span>
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Section 2: Curriculum Syllabus Mastery & Roadmap */}
-          <div className="study-dashboard-card">
-            <div className="study-card-title-row">
-              <div className="study-card-title-group">
-                <div style={{ width: '34px', height: '34px', borderRadius: '10px', background: 'rgba(114, 9, 183, 0.15)', color: '#9D4EDD', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <BookOpen size={18} />
-                </div>
-                <div>
-                  <div className="study-card-title-text">مستوى إتقان المنهج والدروس</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>تتبع الدروس المنجزة في كل مادة دراسية</div>
-                </div>
-              </div>
-              {effectiveSubj && totalLessonCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (effectiveSubj !== chatSubject) {
-                      setChatSubject(effectiveSubj);
-                      fetchCurriculumStructure(targetGrade, effectiveSubj);
-                    }
-                    setShowRoadmapModal(true);
-                  }}
-                  style={{
-                    background: 'var(--primary-light)',
-                    border: '1px solid var(--border-primary)',
-                    borderRadius: '8px',
-                    padding: '6px 12px',
-                    fontSize: '0.78rem',
-                    fontWeight: 700,
-                    color: 'var(--primary-color)',
-                    cursor: 'pointer',
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    transition: 'var(--transition-fast)'
-                  }}
-                >
-                  <BookOpen size={13} />
-                  <span>خريطة منهج {effectiveSubj}</span>
-                </button>
+            <div className="page-head-actions">
+              <span className="soft-pill"><Clock size={15} /> تتجدد 12:00 منتصف الليل بتوقيت القاهرة</span>
+              {user && (
+                <a className="soft-pill link" href={`https://wa.me/?text=${encodeURIComponent(shareMsg)}`} target="_blank" rel="noopener noreferrer">
+                  <MessageCircle size={15} /> شارك تقدمك مع ولي أمرك
+                </a>
               )}
             </div>
+          </div>
 
-            {/* Subject Picker Pills inside Tasks */}
-            {activeSubjs.length > 0 && (
-              <div style={{ marginTop: '4px' }}>
-                <div style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>
-                  اختر المادة لعرض التقدم:
-                </div>
-                <div className="subject-pills-bar custom-scrollbar" style={{ paddingBottom: '4px' }}>
-                  {activeSubjs.map((s) => {
-                    const isSelected = effectiveSubj === s.subject_name;
-                    return (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => {
-                          setTasksSubject(s.subject_name);
-                          loadCurriculumProgress(s.subject_name, targetGrade);
-                          if (chatSubject !== s.subject_name) {
-                            fetchCurriculumStructure(targetGrade, s.subject_name);
-                          }
-                        }}
-                        className={`subject-pill-btn ${isSelected ? 'active' : ''}`}
-                      >
-                        {getSubjectIcon(s.subject_name)}
-                        <span>{s.subject_name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* Progress Track Card for Active Subject */}
-            <div style={{ background: 'var(--alpha-white-2)', borderRadius: '14px', border: '1px solid var(--border-color)', padding: '16px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <BarChart3 size={18} color="var(--primary-color)" />
-                  <span style={{ fontSize: '0.88rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                    إنجاز مقرر {effectiveSubj}
-                  </span>
-                </div>
-                <span style={{ fontSize: '0.82rem', fontWeight: 900, color: 'var(--primary-color)', background: 'var(--primary-light)', padding: '3px 10px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-primary)' }}>
-                  {percent}% مكتمل ({completedLessonCount} من {totalLessonCount} درساً)
-                </span>
-              </div>
-              <div className="curriculum-progress-track" style={{ height: '8px' }}>
-                <div className="curriculum-progress-fill" style={{ width: `${percent}%` }} />
-              </div>
+          <div className="stat-grid four">
+            <div className="stat-card">
+              <span className="stat-icon cyan"><ListChecks size={20} /></span>
+              <div><strong>{completedQuestsCount} من {totalQuestsCount}</strong><span>مهام اليوم المكتملة</span></div>
             </div>
+            <div className="stat-card">
+              <span className="stat-icon amber"><Star size={20} /></span>
+              <div><strong className="num"><bdi dir="ltr">+{earnedRewardPoints}</bdi></strong><span>نقاط ترتيب اليوم</span></div>
+            </div>
+            <div className="stat-card">
+              <span className="stat-icon violet"><MapIcon size={20} /></span>
+              <div><strong className="num">{totalLessonCount > 0 ? `${percent}%` : '—'}</strong><span>إتقان منهج {effectiveSubj || 'المادة'}</span></div>
+            </div>
+            <div className="stat-card">
+              <span className="stat-icon orange"><Flame size={20} /></span>
+              <div><strong>{daysAr(streak)}</strong><span>سلسلة المذاكرة{shields > 0 ? ` · ${shields === 1 ? 'درع واحد' : `${shields} دروع`}` : ''}</span></div>
+            </div>
+          </div>
 
-            {/* Upcoming / Next Lessons in Syllabus */}
-            {allLessons.length > 0 && (
-              <div style={{ marginTop: '6px' }}>
-                <div style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-main)', marginBottom: '8px' }}>
-                  الدروس المقررة في المنهج ({allLessons.length} درساً):
+          <div className="tasks-layout">
+            <div className="tasks-main-col">
+              <h2 className="section-title">مهام اليوم</h2>
+              {!user ? (
+                <div className="empty-card">
+                  <Sparkles size={24} />
+                  <strong>سجّل حسابك لتفعيل مهام المذاكرة اليومية</strong>
+                  <span>اكسب نقاط ترتيب كل يوم ونافس زمايلك على لوحة المتصدرين.</span>
+                  <button type="button" onClick={() => { setAuthTab('register'); setShowAuthModal(true); }} className="btn-primary" style={{ padding: '10px 22px' }}>
+                    إنشاء حساب مجاني
+                  </button>
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '240px', overflowY: 'auto', paddingRight: '4px' }} className="custom-scrollbar">
-                  {allLessons.slice(0, 8).map((lesson: any, lIdx: number) => {
-                    const isLessonDone = curriculumProgress.some(p => p.lesson_id === lesson.id && p.status === 'completed');
+              ) : loadingDailyQuests ? (
+                <div className="empty-card"><Loader2 size={24} className="animate-spin" /></div>
+              ) : (
+                <div className="quest-list">
+                  {quests.map((quest: any) => {
+                    const pct = Math.min(100, Math.round((quest.current / Math.max(1, quest.target)) * 100));
                     return (
-                      <div 
-                        key={lesson.id || lIdx}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          padding: '8px 12px',
-                          borderRadius: '10px',
-                          background: isLessonDone ? 'rgba(34, 197, 94, 0.08)' : 'var(--alpha-white-3)',
-                          border: isLessonDone ? '1px solid rgba(34, 197, 94, 0.25)' : '1px solid var(--border-color)',
-                          gap: '10px'
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
-                          <div style={{ color: isLessonDone ? '#22c55e' : 'var(--text-muted)', flexShrink: 0 }}>
-                            {isLessonDone ? <CheckCircle2 size={16} /> : <div style={{ width: '14px', height: '14px', borderRadius: '50%', border: '1.5px solid var(--text-muted)' }} />}
+                      <div key={quest.id} className={`quest-card ${quest.completed ? 'done' : ''}`}>
+                        <span className={`quest-icon ${questTone(quest)}`}>
+                          {quest.icon === 'Brain' ? <Layers size={20} /> : quest.icon === 'FileText' ? <FileText size={20} /> : <MessageSquare size={20} />}
+                        </span>
+                        <div className="quest-body">
+                          <div className="quest-title-row">
+                            <strong>{quest.title}</strong>
+                            {quest.completed
+                              ? <span className="tag green">{quest.claimed ? 'تم الاستلام' : 'مكتملة'}</span>
+                              : <span className="tag cyan">+{quest.rewardPoints} {quest.rewardPoints > 2 && quest.rewardPoints <= 10 ? 'نقاط' : 'نقطة'}</span>}
                           </div>
-                          <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {lesson.title || `الدرس ${lIdx + 1}`}
-                          </span>
+                          <div className="quest-progress-row">
+                            <div className={`meter ${quest.completed ? 'green' : 'cyan'}`}><span style={{ width: `${pct}%` }} /></div>
+                            <span className="num">{quest.current} / {quest.target}</span>
+                          </div>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setChatSubject(effectiveSubj);
-                            setInputMessage(`اشرح لي بالتفصيل درس "${lesson.title}" مع أمثلة وتطبيقات من منهج ${effectiveSubj}.`);
-                            setActiveTab('chat');
-                          }}
-                          style={{
-                            background: 'transparent',
-                            border: 'none',
-                            color: 'var(--primary-color)',
-                            fontSize: '0.74rem',
-                            fontWeight: 800,
-                            cursor: 'pointer',
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '4px',
-                            flexShrink: 0
-                          }}
-                        >
-                          <span>مذاكرة</span>
-                          <ArrowLeft size={12} />
-                        </button>
+                        <div className="quest-cta">
+                          {quest.completed && !quest.claimed ? (
+                            <button type="button" className="btn-primary" onClick={() => handleClaimQuest(quest.id)} disabled={claimingQuestId === quest.id}>
+                              {claimingQuestId === quest.id ? <Loader2 size={16} className="animate-spin" /> : <Gift size={17} />}
+                              <span>استلام المكافأة +{quest.rewardPoints}</span>
+                            </button>
+                          ) : quest.completed ? (
+                            <span className="quest-claimed"><Check size={16} /> تم استلام المكافأة</span>
+                          ) : (
+                            <button type="button" className="btn-secondary" onClick={() => startQuest(quest)}>
+                              <span>{quest.current > 0 ? 'أكمل المهمة' : 'ابدأ هذه المهمة الآن'}</span>
+                              <ArrowLeft size={16} />
+                            </button>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
                 </div>
-              </div>
-            )}
-          </div>
+              )}
 
-          {/* Section 3: Academic Accelerators */}
-          <div className="study-dashboard-card">
-            <div className="study-card-title-row">
-              <div className="study-card-title-group">
-                <div style={{ width: '34px', height: '34px', borderRadius: '10px', background: 'rgba(255, 183, 3, 0.15)', color: '#FFB703', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <Sparkles size={18} />
-                </div>
-                <div>
-                  <div className="study-card-title-text">أدوات التفوق الأكاديمي السريعة</div>
-                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>امتحانات وكروت ذكية للمساعدة في إنجاز المهام</div>
-                </div>
+              <h2 className="section-title">مسرّعات التفوق</h2>
+              <div className="accelerator-grid">
+                <button
+                  type="button"
+                  className="accelerator-card"
+                  onClick={() => {
+                    if (!user) { setAuthTab('register'); setShowAuthModal(true); return; }
+                    if (currentSubjObj?.is_placeholder) { setPlaceholderModalCurriculum(currentSubjObj); return; }
+                    const subj = effectiveSubj || chatSubject || (activeSubjs[0]?.subject_name || '');
+                    setExamSubject(subj);
+                    setExamTopic('');
+                    setSelectedExamLesson(null);
+                    setLessonSearchQuery('');
+                    setExamLessonTab('curriculum');
+                    setShowExamCreateModal(true);
+                    if (subj) fetchCurriculumStructure(targetGrade, subj);
+                  }}
+                >
+                  <span className="stat-icon violet"><FileText size={19} /></span>
+                  <strong>محاكي الامتحانات</strong>
+                  <span>اختبار من دروسك بتصحيح فوري</span>
+                </button>
+                <button
+                  type="button"
+                  className="accelerator-card"
+                  onClick={() => {
+                    if (!user) { setAuthTab('register'); setShowAuthModal(true); return; }
+                    if (currentSubjObj?.is_placeholder) { setPlaceholderModalCurriculum(currentSubjObj); return; }
+                    setActiveTab('flashcards');
+                    if (effectiveSubj) fetchSubjectCards(effectiveSubj);
+                  }}
+                >
+                  <span className="stat-icon cyan"><Layers size={19} /></span>
+                  <strong>المدرب الذكي</strong>
+                  <span>كروت مراجعة بنظام لايتنر</span>
+                </button>
+                <button type="button" className="accelerator-card" onClick={handleOpenNotebook}>
+                  <span className="stat-icon amber"><Bookmark size={19} /></span>
+                  <strong>دفتري الذكي</strong>
+                  <span>{notebookItems.length > 0 ? `${notebookItems.length} ${notebookItems.length > 2 && notebookItems.length <= 10 ? 'قوانين وملاحظات محفوظة' : 'قانون وملاحظة محفوظة'}` : 'احفظ أهم القوانين من المحادثة'}</span>
+                </button>
               </div>
             </div>
 
-            <div className="tool-accelerator-list">
-              <div
-                onClick={() => {
-                  if (!user) {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                    return;
-                  }
-                  if (currentSubjObj?.is_placeholder) {
-                    setPlaceholderModalCurriculum(currentSubjObj);
-                    return;
-                  }
-                  const subj = effectiveSubj || chatSubject || (activeSubjs[0]?.subject_name || '');
-                  setExamSubject(subj);
-                  setExamTopic('');
-                  setSelectedExamLesson(null);
-                  setLessonSearchQuery('');
-                  setExamLessonTab('curriculum');
-                  setShowExamCreateModal(true);
-                  if (subj) fetchCurriculumStructure(targetGrade, subj);
-                }}
-                className="tool-accelerator-item"
-                role="button"
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div className="tool-accelerator-icon-box exam">
-                    <FileText size={18} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>امتحان تقييمي ذكي</div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>توليد اختبار منهجي مخصص مع التصحيح الفوري وإنجاز مهمة الامتحان</div>
-                  </div>
+            <div className="panel-card mastery-card">
+              <h2 className="section-title">إتقان المنهج</h2>
+              {activeSubjs.length > 0 && (
+                <div className="chip-tabs custom-scrollbar">
+                  {activeSubjs.map((s) => (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className={`chip-tab ${effectiveSubj === s.subject_name ? 'active' : ''}`}
+                      onClick={() => {
+                        setTasksSubject(s.subject_name);
+                        loadCurriculumProgress(s.subject_name, targetGrade);
+                        if (chatSubject !== s.subject_name) fetchCurriculumStructure(targetGrade, s.subject_name);
+                      }}
+                    >
+                      {s.subject_name}
+                    </button>
+                  ))}
                 </div>
-                <ArrowLeft size={14} style={{ color: 'var(--text-muted)' }} />
+              )}
+
+              <div className="mastery-summary">
+                <div className="mastery-ring" aria-label={`نسبة الإتقان ${percent}%`}>
+                  <svg viewBox="0 0 100 100" width="104" height="104">
+                    <circle cx="50" cy="50" r={ringR} className="ring-track" />
+                    <circle cx="50" cy="50" r={ringR} className="ring-fill" strokeDasharray={ringC} strokeDashoffset={ringC * (1 - percent / 100)} />
+                  </svg>
+                  <span className="num">{percent}%</span>
+                </div>
+                <div className="mastery-text">
+                  <strong>{totalLessonCount > 0 ? `${completedLessonCount} من ${totalLessonCount} درساً مكتملة` : 'لسه مفيش دروس متاحة للمادة دي'}</strong>
+                  {currentUnitTitle && <span>أنت الآن في {currentUnitTitle}</span>}
+                  {effectiveSubj && totalLessonCount > 0 && (
+                    <button
+                      type="button"
+                      className="btn-secondary compact"
+                      onClick={() => {
+                        if (effectiveSubj !== chatSubject) {
+                          setChatSubject(effectiveSubj);
+                          fetchCurriculumStructure(targetGrade, effectiveSubj);
+                        }
+                        setShowRoadmapModal(true);
+                      }}
+                    >
+                      <MapIcon size={16} />
+                      <span>خريطة المنهج</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
-              <div
-                onClick={() => {
-                  if (!user) {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                    return;
-                  }
-                  if (currentSubjObj?.is_placeholder) {
-                    setPlaceholderModalCurriculum(currentSubjObj);
-                    return;
-                  }
-                  setActiveTab('flashcards');
-                  if (effectiveSubj) fetchSubjectCards(effectiveSubj);
-                }}
-                className="tool-accelerator-item"
-                role="button"
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div className="tool-accelerator-icon-box coach">
-                    <Brain size={18} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>المدرب الذكي (الكروت)</div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>مراجعة وتثبيت المفاهيم بالتكرار المتباعد وإنجاز مهمة الكروت</div>
-                  </div>
+              {upcoming.length > 0 && (
+                <div className="upcoming-lessons">
+                  <span className="upcoming-label">الدروس القادمة</span>
+                  {upcoming.map((lesson: any, i: number) => (
+                    <div key={lesson.id || i} className="lesson-row">
+                      <span className="lesson-num num">{lesson.lessonNumber || lesson.order}</span>
+                      <div className="lesson-row-text">
+                        <strong>{lesson.title}</strong>
+                        {lesson.subtopics?.[0] && <span>{lesson.subtopics[0]}</span>}
+                      </div>
+                      <button type="button" className={`lesson-study-btn ${i === 0 ? 'primary' : ''}`} onClick={() => studyLesson(lesson)}>
+                        مذاكرة
+                      </button>
+                    </div>
+                  ))}
                 </div>
-                <ArrowLeft size={14} style={{ color: 'var(--text-muted)' }} />
-              </div>
-
-              <div
-                onClick={handleOpenNotebook}
-                className="tool-accelerator-item"
-                role="button"
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <div className="tool-accelerator-icon-box notebook">
-                    <Bookmark size={18} />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>دفتري الذكي (القوانين)</div>
-                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>استعراض كافة القوانين والملاحظات المحفوظة من الدروس</div>
-                  </div>
-                </div>
-                <ArrowLeft size={14} style={{ color: 'var(--text-muted)' }} />
-              </div>
+              )}
             </div>
           </div>
         </div>
@@ -7607,47 +7252,26 @@ export default function App() {
     );
   };
 
-  const getElectiveSubjectsForTrack = (trackId: string): string[] => {
-    if (!trackId) return [];
-    const trackCurrs = curriculums.filter(c => c.grade_level === '2_high' && c.track_id === trackId);
-    const electivesOnly = trackCurrs.filter(c => c.is_elective).map(c => c.subject_name.trim());
-    if (electivesOnly.length > 0) return Array.from(new Set(electivesOnly));
-    return Array.from(new Set(trackCurrs.map(c => c.subject_name.trim())));
-  };
+  const publishedCurriculums = activeCurriculumIds.length > 0
+    ? curriculums.filter(c => activeCurriculumIds.includes(c.id) || c.is_placeholder)
+    : curriculums;
 
   const getActiveSubjectsForGrade = (grade: string) => {
-    let filtered = curriculums.filter(c => c.grade_level === grade);
-    if (activeCurriculumIds.length > 0) {
-      filtered = filtered.filter(c => activeCurriculumIds.includes(c.id) || c.is_placeholder);
-    }
-
-    // For 2_high (Baccalaureate): dynamically filter to common subjects + student's track & elective
-    if (grade === '2_high') {
-      const currentTrack = (user && user.grade_level === '2_high' && user.track_id) ? user.track_id : selectedTrack;
-      const currentElective = (user && user.grade_level === '2_high' && user.elective_subject) ? user.elective_subject : selectedElective;
-
-      if (currentTrack) {
-        filtered = filtered.filter(c => {
-          // If curriculum is specifically assigned to a different track, exclude it
-          if (c.track_id && c.track_id !== currentTrack) {
-            return false;
-          }
-          // If curriculum is an elective for this track
-          if (c.track_id === currentTrack && c.is_elective) {
-            if (currentElective) {
-              return c.subject_name.trim() === currentElective.trim();
-            }
-            return true;
-          }
-          // Common subjects for 2_high (no track_id) or non-elective track subjects
-          return true;
-        });
-      }
-    }
-
+    const ownPath = !!user && user.grade_level === grade;
+    const effectiveTrack = ownPath ? user.track_id : selectedTrack;
+    const electives = electiveOptions(educationCatalog, publishedCurriculums, grade, effectiveTrack);
+    const effectiveElective = (ownPath ? user.elective_subject : selectedElective) || electives[0] || null;
+    const path: StudentPath = {
+      stageId: grade,
+      trackId: effectiveTrack,
+      electiveSubject: effectiveElective
+    };
+    const filtered = curriculaForPath(educationCatalog, publishedCurriculums, path);
     if (filtered.length > 0) return filtered;
-    const fallback = curriculums.filter(c => c.grade_level === grade);
+    const fallback = publishedCurriculums.filter(c => curriculumStageIds(educationCatalog, c).includes(grade));
     if (fallback.length > 0) return fallback;
+    const secondaryFallback = curriculums.filter(c => c.grade_level === grade);
+    if (secondaryFallback.length > 0) return secondaryFallback;
     return (DEFAULT_STATIC_CURRICULUMS as Curriculum[]).filter(c => c.grade_level === grade);
   };
 
@@ -7656,14 +7280,18 @@ export default function App() {
     const availableSubjects = getActiveSubjectsForGrade(targetGrade);
     if (availableSubjects.length > 0) {
       const nonPlaceholder = availableSubjects.filter(s => !s.is_placeholder);
-      const exists = availableSubjects.some(s => s.subject_name === chatSubject);
-      if (!exists) {
+      const match = availableSubjects.find(s => s.subject_name === chatSubject || isElectiveMatch(s.subject_name, chatSubject));
+      if (match) {
+        if (match.subject_name !== chatSubject) {
+          setChatSubject(match.subject_name);
+        }
+      } else {
         setChatSubject((nonPlaceholder[0] || availableSubjects[0]).subject_name);
       }
     } else {
       setChatSubject('');
     }
-  }, [user?.grade_level, chatGrade, curriculums, activeCurriculumIds, selectedTrack, selectedElective]);
+  }, [user?.grade_level, user?.track_id, user?.elective_subject, chatGrade, curriculums, activeCurriculumIds, selectedTrack, selectedElective, educationCatalog]);
 
   useEffect(() => {
     const targetGrade = user ? user.grade_level : chatGrade;
@@ -7749,24 +7377,18 @@ export default function App() {
     const hasMessage = inputMessage.trim().length > 0;
 
     const activeSession = sessions.find(s => s.id === activeSessionId);
-    const isSessionCourseValid = !activeSessionId || !activeSession || curriculums.some(c => 
-      c.subject_name === activeSession.subject_name && 
-      c.grade_level === activeSession.grade_level &&
-      (activeCurriculumIds.includes(c.id) || c.is_placeholder)
-    );
+    const sessionCurr = activeSession ? resolveCurriculum(educationCatalog, curriculums, activeSession.grade_level, activeSession.subject_name) : null;
+    const isSessionCourseValid = !activeSessionId || !activeSession || (!!sessionCurr && (activeCurriculumIds.length === 0 || activeCurriculumIds.includes(sessionCurr.id) || !!sessionCurr.is_placeholder));
 
     const currentGrade = user ? user.grade_level : chatGrade;
-    const currentSubjectObj = curriculums.find(c => 
-      c.subject_name === chatSubject && 
-      c.grade_level === currentGrade
-    );
+    const currentSubjectObj = resolveCurriculum(educationCatalog, curriculums, currentGrade, chatSubject);
     const hasCurriculum = !!currentSubjectObj;
     const isPlaceholderSubject = !!currentSubjectObj?.is_placeholder;
 
     let isDisabled = chatLoading || isDescribingImage;
     let placeholderText = chatSubject 
-      ? (!user ? `سجل حسابك مجاناً لتجربة EGS AI في منهج ${chatSubject}...` : `اسألني عن أي شيء في منهج ${chatSubject}...`)
-      : (!user ? 'سجل حسابك مجاناً لتجربة EGS AI وبدء المذاكرة...' : 'اسألني عن أي شيء في المنهج...');
+      ? `اسألني عن أي شيء في منهج ${chatSubject}...`
+      : 'اسألني عن أي شيء في المنهج...';
 
     if (!isSessionCourseValid) {
       isDisabled = true;
@@ -7778,23 +7400,11 @@ export default function App() {
       isDisabled = true;
       placeholderText = "المنهج الدراسي غير متوفر حالياً.";
     }
-    const CHAT_MODES: { key: 'socratic' | 'detailed' | 'summary' | 'step_by_step'; label: string; icon: React.ReactNode }[] = [
-      { key: 'detailed', label: 'شرح مفصل', icon: <GraduationCap size={15} /> },
-      { key: 'step_by_step', label: 'خطوة بخطوة', icon: <Sliders size={15} /> },
-      { key: 'socratic', label: 'سقراطي', icon: <MessageCircleQuestion size={15} /> },
-      { key: 'summary', label: 'ملخص', icon: <ListChecks size={15} /> },
-    ];
-    const activeModeInfo = CHAT_MODES.find(m => m.key === chatMode) || CHAT_MODES[0];
-
-    const handleModeSelect = (mode: 'socratic' | 'detailed' | 'summary' | 'step_by_step') => {
-      setChatMode(mode);
-      localStorage.setItem('egs_chat_mode', mode);
-      setShowModeMenu(false);
-      setShowModeSheet(false);
-    };
+    const MODE_LABELS: Record<string, string> = { detailed: 'شرح مفصل', step_by_step: 'خطوة بخطوة', socratic: 'سقراطي', summary: 'ملخص سريع' };
+    const activeModeInfo = { label: MODE_LABELS[chatMode] || MODE_LABELS.detailed };
 
     return (
-      <form onSubmit={handleSendMessage} style={{ width: '100%', maxWidth: '820px', margin: '0 auto', display: 'flex', flexDirection: 'column' }}>
+      <form onSubmit={handleSendMessage} style={{ width: '100%', maxWidth: '940px', margin: '0 auto', display: 'flex', flexDirection: 'column' }}>
         
         {/* Zero-Coins Motivational Banner for Free Accounts */}
         {user && (user.role !== 'admin' && !user.unlimited_credit) && coins <= 0 && !isUserSubscribed && (
@@ -7872,7 +7482,7 @@ export default function App() {
                 onClick={() => {
                   setShowUpgradeSheet(true);
                   setActiveTab('subscriptions');
-                  if (isMobile) setSidebarOpen(false);
+                  if (sidebarOverlay) setSidebarOpen(false);
                 }}
                 className="btn-primary"
                 style={{
@@ -7947,42 +7557,6 @@ export default function App() {
             >
               <X size={14} />
             </button>
-          </div>
-        )}
-
-        {/* Quick Fill Prompt Tags Directly Above Text Box (Desktop only — on mobile the Diagnostic Cockpit provides focused triggers) */}
-        {isCentered && !isMobile && (
-          <div className="composer-prompt-tags-wrapper">
-            <span className="composer-prompt-tags-hint">
-              اقتراحات ذكية للبدء:
-            </span>
-            {getSubjectPromptSuggestions(chatSubject).map((sug, idx) => (
-              <button
-                key={idx}
-                type="button"
-                onClick={() => {
-                  if (!user) {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                    return;
-                  }
-                  const targetGrade = user ? user.grade_level : chatGrade;
-                  const activeSubjs = getActiveSubjectsForGrade(targetGrade);
-                  const currentSubj = activeSubjs.find(s => s.subject_name === chatSubject);
-                  if (currentSubj?.is_placeholder) {
-                    setPlaceholderModalCurriculum(currentSubj);
-                    return;
-                  }
-                  handleSuggestionClick(sug.prompt);
-                }}
-                className="composer-prompt-tag"
-                title={`إدراج "${sug.label}" في مربع الكتابة`}
-              >
-                <Sparkles size={13} className="prompt-tag-prefix-icon" style={{ color: 'var(--primary-color)' }} />
-                <span className="prompt-tag-text">{sug.label}</span>
-                <ArrowDown size={12} className="prompt-tag-arrow-icon" />
-              </button>
-            ))}
           </div>
         )}
 
@@ -8092,7 +7666,7 @@ export default function App() {
           </div>
         )}
 
-        <div id="tour-composer-dock" className="composer-dock-container">
+        <div id="tour-composer-dock" className={`composer-dock-container composer-v2 ${isCentered ? 'centered' : 'docked'}`}>
           {/* Hidden File Inputs */}
           <input
             type="file"
@@ -8200,128 +7774,36 @@ export default function App() {
                 </div>
               )}
 
-              {/* Main Input + Controls Row */}
-              <div style={{ display: 'flex', alignItems: 'flex-end', gap: '8px', direction: 'rtl' }}>
-              {isMobile ? (
-                /* Mobile: Expandable Action Button (+) to declutter dock */
-                <button
-                  type="button"
-                  disabled={isDisabled}
-                  onClick={() => setShowComposerTools(prev => !prev)}
-                  style={{
-                    width: '38px',
-                    height: '38px',
-                    borderRadius: '12px',
-                    background: showComposerTools || pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                    border: showComposerTools || pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                    color: showComposerTools || pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    cursor: isDisabled ? 'not-allowed' : 'pointer',
-                    flexShrink: 0,
-                    transition: 'var(--transition-fast)'
-                  }}
-                  title="المرفقات والأدوات (كاميرا، صور، رموز رياضية)"
-                  aria-label="المرفقات والأدوات"
-                >
-                  <Plus size={18} style={{ transform: showComposerTools ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s ease' }} />
-                </button>
-              ) : (
-                /* Desktop: Dedicated Action Buttons with clean spacing */
-                <>
-                  <button
-                    type="button"
-                    disabled={isDisabled}
-                    onClick={() => {
-                      if (!user) {
-                        setAuthTab('register');
-                        setShowAuthModal(true);
-                        return;
-                      }
-                      setShowCameraModal(true);
-                    }}
-                    style={{
-                      width: '38px',
-                      height: '38px',
-                      borderRadius: '12px',
-                      background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                      border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                      color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: isDisabled ? 'not-allowed' : 'pointer',
-                      opacity: isDisabled ? 0.5 : 1,
-                      flexShrink: 0,
-                      transition: 'var(--transition-fast)'
-                    }}
-                    title="التقاط صورة مباشرة بالكاميرا"
-                    aria-label="التقاط صورة مباشرة بالكاميرا"
-                  >
-                    <Camera size={17} />
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isDisabled}
-                    onClick={() => {
-                      if (!user) {
-                        setAuthTab('register');
-                        setShowAuthModal(true);
-                        return;
-                      }
-                      imageInputRef.current?.click();
-                    }}
-                    style={{
-                      width: '38px',
-                      height: '38px',
-                      borderRadius: '12px',
-                      background: pendingImage ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                      border: pendingImage ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                      color: pendingImage ? 'var(--primary-color)' : 'var(--text-secondary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: isDisabled ? 'not-allowed' : 'pointer',
-                      opacity: isDisabled ? 0.5 : 1,
-                      flexShrink: 0,
-                      transition: 'var(--transition-fast)'
-                    }}
-                    title="إرفاق صورة مسألة أو سؤال"
-                    aria-label="إرفاق صورة مسألة أو سؤال"
-                  >
-                    <ImageIcon size={17} />
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isDisabled}
-                    onClick={() => setShowMathToolbar(prev => !prev)}
-                    style={{
-                      width: '38px',
-                      height: '38px',
-                      borderRadius: '12px',
-                      background: showMathToolbar ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                      border: showMathToolbar ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                      color: showMathToolbar ? 'var(--primary-color)' : 'var(--text-secondary)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      cursor: isDisabled ? 'not-allowed' : 'pointer',
-                      opacity: isDisabled ? 0.5 : 1,
-                      flexShrink: 0,
-                      transition: 'var(--transition-fast)'
-                    }}
-                    title="لوحة الرموز والعمليات الرياضية"
-                    aria-label="لوحة الرموز والعمليات الرياضية"
-                  >
-                    <Calculator size={17} />
-                  </button>
-                </>
+              {isCentered && (
+                <div className="composer-sparks custom-scrollbar">
+                  {getSubjectPromptSuggestions(chatSubject).map((sug, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => {
+                        if (!user) {
+                          setAuthTab('register');
+                          setShowAuthModal(true);
+                          return;
+                        }
+                        const currentSubj = getActiveSubjectsForGrade(user.grade_level).find(s => s.subject_name === chatSubject || isElectiveMatch(s.subject_name, chatSubject));
+                        if (currentSubj?.is_placeholder) {
+                          setPlaceholderModalCurriculum(currentSubj);
+                          return;
+                        }
+                        handleSuggestionClick(sug.prompt);
+                      }}
+                      className="composer-spark"
+                      title={`إدراج "${sug.label}" في مربع الكتابة`}
+                    >
+                      <Sparkles size={13} />
+                      <span>{sug.label}</span>
+                      <ArrowDown size={13} className="spark-arrow" />
+                    </button>
+                  ))}
+                </div>
               )}
 
-              {/* Auto-growing Textarea - spacious, comfortable width */}
               <textarea
                 ref={textareaRef}
                 value={inputMessage}
@@ -8344,492 +7826,236 @@ export default function App() {
                     handleSendMessage(e as any);
                   }
                 }}
-                placeholder={placeholderText}
+                placeholder={isCentered ? placeholderText : (isMobile ? 'اكتب سؤالك...' : 'اكتب سؤال المتابعة...')}
                 disabled={isDisabled}
                 rows={1}
-                style={{
-                  flex: 1,
-                  background: 'transparent',
-                  border: 'none',
-                  outline: 'none',
-                  resize: 'none',
-                  fontSize: '16px',
-                  lineHeight: '1.5',
-                  minHeight: isMobile ? '36px' : '38px',
-                  maxHeight: '160px',
-                  padding: isMobile ? '6px 8px' : '8px 6px',
-                  color: 'var(--text-main)',
-                  direction: 'rtl',
-                  textAlign: 'right',
-                  fontFamily: 'var(--font-arabic)',
-                }}
+                className="composer-textarea"
               />
 
-              {/* Native Voice Recording Trigger Button */}
-              <button
-                type="button"
-                disabled={isDisabled || isTranscribingAudio}
-                onClick={() => {
-                  if (!user) {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                    return;
-                  }
-                  handleStartAudioRecording();
-                }}
-                style={{
-                  width: '38px',
-                  height: '38px',
-                  borderRadius: '12px',
-                  background: isTranscribingAudio ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                  border: isTranscribingAudio ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                  color: isTranscribingAudio ? 'var(--primary-color)' : 'var(--text-secondary)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  cursor: isDisabled ? 'not-allowed' : 'pointer',
-                  opacity: isDisabled ? 0.5 : 1,
-                  flexShrink: 0,
-                  transition: 'var(--transition-fast)'
-                }}
-                title={isTranscribingAudio ? "جاري معالجة التسجيل..." : "تسجيل رسالة صوتية للمعلم الذكي"}
-                aria-label="تسجيل رسالة صوتية"
-              >
-                {isTranscribingAudio ? (
-                  <Loader2 size={17} className="animate-spin" />
-                ) : (
-                  <Mic size={17} />
-                )}
-              </button>
+              <div className="composer-bottom-row">
+                <div className="composer-controls">
+                  {isMobile && (
+                    <button
+                      type="button"
+                      disabled={isDisabled}
+                      onClick={() => setShowComposerTools(prev => !prev)}
+                      className={`composer-icon-btn boxed ${showComposerTools || pendingImage ? 'active' : ''}`}
+                      title="المرفقات والأدوات"
+                      aria-label="المرفقات والأدوات"
+                      aria-expanded={showComposerTools}
+                    >
+                      <Plus size={20} style={{ transform: showComposerTools ? 'rotate(45deg)' : 'none', transition: 'transform 0.2s ease' }} />
+                    </button>
+                  )}
 
-              {/* Send Button */}
-              <button
-                id="tour-send-button"
-                type="submit"
-                disabled={isDisabled || (!hasMessage && !pendingImage)}
-                className={`send-button ${(hasMessage || pendingImage) && !isDisabled ? 'active' : ''}`}
-                style={{
-                  width: '38px',
-                  height: '38px',
-                  borderRadius: '12px',
-                  flexShrink: 0,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center'
-                }}
-                title="إرسال"
-              >
-                <Send size={16} />
-              </button>
-            </div>
-          </>
-          )}
+                  <button
+                    type="button"
+                    onClick={() => { if (!isTourOpen) setShowTeacherConfigSheet(true); }}
+                    className="composer-pill"
+                    title="طريقة الشرح"
+                  >
+                    {!isMobile && <AlignRight size={16} className="pill-lead-icon" />}
+                    <span>{activeModeInfo.label}</span>
+                    <ChevronDown size={14} className="pill-chevron" />
+                  </button>
 
-          {/* Quick Controls: Distraction-Free Mobile Strip or Desktop Toolbar */}
-          {isMobile ? (
-            <div className="composer-compact-control-bar">
-              {/* Unified Teacher Config Pill (Mode) */}
-              <button
-                type="button"
-                onClick={() => { if (!isTourOpen) setShowTeacherConfigSheet(true); }}
-                className="composer-compact-config-pill"
-                title="تخصيص طريقة ونمط الشرح"
-              >
-                <Sliders size={13} style={{ color: 'var(--primary-color)' }} />
-                <span>{activeModeInfo.label}</span>
-                <span style={{ fontSize: '0.62rem', opacity: 0.6 }}>▾</span>
-              </button>
+                  <button
+                    id="tour-thinking-controls"
+                    type="button"
+                    onClick={() => {
+                      if (isTourOpen) {
+                        setThinkingEnabled(!thinkingEnabled);
+                        return;
+                      }
+                      if (!user) {
+                        setAuthTab('register');
+                        setShowAuthModal(true);
+                      } else if (!isUserSubscribed && user.role !== 'admin' && !user.unlimited_credit) {
+                        if (isMobile) setShowTeacherConfigSheet(true); else setShowUpgradeSheet(true);
+                      } else {
+                        setThinkingEnabled(!thinkingEnabled);
+                      }
+                    }}
+                    className={`composer-pill thinking ${thinkingEnabled ? 'on' : ''}`}
+                    title="التفكير العميق — المعلم يفكر خطوة بخطوة قبل ما يجاوب"
+                    aria-pressed={thinkingEnabled}
+                  >
+                    <Brain size={16} />
+                    <span>{isMobile ? 'عميق' : 'تفكير عميق'}</span>
+                    {!isMobile && <span className={`mini-switch ${thinkingEnabled ? 'on' : ''}`} aria-hidden="true" />}
+                    {user && !isUserSubscribed && user.role !== 'admin' && !user.unlimited_credit && <Lock size={12} className="pill-lock" />}
+                  </button>
 
-              {/* Quick 1-Tap Thinking Toggle (Subscribers Only) */}
-              <button
-                id="tour-thinking-controls"
-                type="button"
-                onClick={() => {
-                  if (isTourOpen) {
-                    setThinkingEnabled(!thinkingEnabled);
-                    return;
-                  }
-                  if (!user) {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                  } else if (user.plan_type === 'free' || !user.subscription_status || user.subscription_status !== 'active') {
-                    if (user.role !== 'admin' && !user.unlimited_credit) {
-                      setShowUpgradeSheet(true);
-                      return;
-                    }
-                    setThinkingEnabled(!thinkingEnabled);
-                  } else {
-                    setThinkingEnabled(!thinkingEnabled);
-                  }
-                }}
-                className={`composer-mini-toggle-pill ${thinkingEnabled ? 'active-glow' : ''}`}
-                title="تفعيل ميزة التفكير العميق (متاحة للمشتركين)"
-              >
-                <Brain size={13} />
-                <span>{thinkingEnabled ? 'التفكير مفعل' : 'تفكير عميق'}</span>
-                {(!user || (user.plan_type === 'free' && user.role !== 'admin' && !user.unlimited_credit)) && (
-                  <Lock size={10} style={{ opacity: 0.6 }} />
-                )}
-              </button>
-            </div>
-          ) : (
-            <div className="composer-features-toolbar">
-              {/* Feature 1: Mode / Template Selector */}
-              <button
-                type="button"
-                onClick={() => { if (!isTourOpen) setShowModeSheet(true); }}
-                className={`composer-feature-pill ${chatMode !== 'detailed' ? 'active' : ''}`}
-                title="تغيير نمط الشرح والتدريس"
-              >
-                {activeModeInfo.icon}
-                <span>{activeModeInfo.label}</span>
-                <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
-              </button>
+                  {!isMobile && (
+                    <button
+                      type="button"
+                      disabled={isDisabled}
+                      onClick={() => setShowMathToolbar(prev => !prev)}
+                      className={`composer-pill ${showMathToolbar ? 'active' : ''}`}
+                      title="لوحة الرموز الرياضية"
+                    >
+                      <Sigma size={16} className="pill-lead-icon" />
+                      <span>رموز رياضية</span>
+                    </button>
+                  )}
+                </div>
 
-              {/* Feature 2: Deep Thinking (CoT) Toggle (Subscribers Only) */}
-              <button
-                id="tour-thinking-controls"
-                type="button"
-                onClick={() => {
-                  if (isTourOpen) {
-                    setThinkingEnabled(!thinkingEnabled);
-                    return;
-                  }
-                  if (!user) {
-                    setAuthTab('register');
-                    setShowAuthModal(true);
-                  } else if (user.plan_type === 'free' || !user.subscription_status || user.subscription_status !== 'active') {
-                    if (user.role !== 'admin' && !user.unlimited_credit) {
-                      setShowUpgradeSheet(true);
-                      return;
-                    }
-                    setThinkingEnabled(!thinkingEnabled);
-                  } else {
-                    setThinkingEnabled(!thinkingEnabled);
-                  }
-                }}
-                className={`composer-feature-pill ${thinkingEnabled ? 'active-glow' : ''}`}
-                title="تفعيل ميزة التفكير العميق لتحليل أدق المسائل (متاحة للمشتركين)"
-              >
-                <Brain size={15} />
-                <span>{thinkingEnabled ? 'التفكير مفعل' : 'تفكير عميق'}</span>
-                {(!user || (user.plan_type === 'free' && user.role !== 'admin' && !user.unlimited_credit)) && (
-                  <Lock size={12} style={{ opacity: 0.6 }} />
-                )}
-              </button>
-
-              {/* Feature 3: Subject Selection on Desktop (Landing state only) */}
-              {messages.length === 0 && (
-                <button
-                  type="button"
-                  onClick={() => { if (!isTourOpen) setShowSubjectSheet(true); }}
-                  className="composer-feature-pill"
-                  title="تحديد المادة الدراسية"
-                >
-                  {getSubjectIcon(chatSubject, 15)}
-                  <span>{chatSubject || 'المادة الدراسية'}</span>
-                  <span style={{ fontSize: '0.62rem', opacity: 0.7 }}>▾</span>
-                </button>
-              )}
-            </div>
+                <div className="composer-actions">
+                  {!isMobile && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={isDisabled}
+                        onClick={() => {
+                          if (!user) { setAuthTab('register'); setShowAuthModal(true); return; }
+                          setShowCameraModal(true);
+                        }}
+                        className="composer-icon-btn"
+                        title="تصوير المسألة بالكاميرا"
+                        aria-label="تصوير المسألة بالكاميرا"
+                      >
+                        <Camera size={20} />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isDisabled}
+                        onClick={() => {
+                          if (!user) { setAuthTab('register'); setShowAuthModal(true); return; }
+                          imageInputRef.current?.click();
+                        }}
+                        className={`composer-icon-btn ${pendingImage ? 'active' : ''}`}
+                        title="إرفاق صورة"
+                        aria-label="إرفاق صورة"
+                      >
+                        <ImageIcon size={20} />
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    disabled={isDisabled || isTranscribingAudio}
+                    onClick={() => {
+                      if (!user) { setAuthTab('register'); setShowAuthModal(true); return; }
+                      handleStartAudioRecording();
+                    }}
+                    className="composer-icon-btn"
+                    title={isTranscribingAudio ? 'جاري معالجة التسجيل...' : 'تسجيل رسالة صوتية'}
+                    aria-label="تسجيل رسالة صوتية"
+                  >
+                    {isTranscribingAudio ? <Loader2 size={20} className="animate-spin" /> : <Mic size={20} />}
+                  </button>
+                  <button
+                    id="tour-send-button"
+                    type="submit"
+                    disabled={isDisabled || (!hasMessage && !pendingImage)}
+                    className={`send-button composer-send ${(hasMessage || pendingImage) && !isDisabled ? 'active' : ''}`}
+                    title="إرسال"
+                    aria-label="إرسال"
+                  >
+                    <ArrowUp size={20} strokeWidth={2.5} />
+                  </button>
+                </div>
+              </div>
+            </>
           )}
         </div>
       </form>
     );
   };
 
-  // Teaching template / mode picker modal & sheet
-  const renderModeSheet = () => {
-    if (!showModeSheet || isTourOpen) return null;
-
-    return (
-      <div className="bottom-sheet-overlay" onClick={() => setShowModeSheet(false)}>
-        <div className="bottom-sheet-body" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px', width: '100%' }}>
-          <div className="sheet-handle" />
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', paddingBottom: '10px', borderBottom: '1px solid var(--border-color)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <GraduationCap size={20} style={{ color: 'var(--primary-color)' }} />
-              <span style={{ fontSize: '1.05rem', fontWeight: 800 }}>اختر نمط الشرح والتدريس</span>
-            </div>
-            <button type="button" onClick={() => setShowModeSheet(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}>
-              <X size={18} />
-            </button>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {[
-              {
-                key: 'detailed',
-                label: 'شرح وتفصيل شامل (الافتراضي)',
-                desc: 'شرح أكاديمي منهجي متكامل مع تبسيط القوانين والأمثلة التوضيحية لضمان أعلى استيعاب وفهم.',
-                icon: <GraduationCap size={22} />,
-                badge: 'موصى به'
-              },
-              {
-                key: 'step_by_step',
-                label: 'حل المسائل خطوة بخطوة',
-                desc: 'تقسيم حل المسائل المعقدة إلى: معطيات ومطلوب، قوانين مستخدمة، تعويض حسابي، وناتج نهائي.',
-                icon: <Sliders size={22} />,
-                badge: 'مسائل وتمارين'
-              },
-              {
-                key: 'socratic',
-                label: 'الحوار السقراطي التفاعلي',
-                desc: 'توجيه ذكي بالأسئلة والملاحظات المتدرجة لتصل إلى الحل بنفسك وتنمي مهارات التفكير العلمي.',
-                icon: <MessageCircleQuestion size={22} />,
-                badge: 'تفكير نقدي'
-              },
-              {
-                key: 'summary',
-                label: 'ملخص وتركيز سريع',
-                desc: 'كبسولات مركزة لأهم القوانين والنقاط والمفاهيم للمراجعة السريعة قبل الامتحانات.',
-                icon: <ListChecks size={22} />,
-                badge: 'مراجعة نهائية'
-              }
-            ].map((m) => {
-              const isSelected = chatMode === m.key;
-              return (
-                <div
-                  key={m.key}
-                  onClick={() => {
-                    setChatMode(m.key as any);
-                    localStorage.setItem('egs_chat_mode', m.key);
-                    setShowModeSheet(false);
-                  }}
-                  style={{
-                    padding: '14px',
-                    borderRadius: '14px',
-                    border: isSelected ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
-                    background: isSelected ? 'var(--primary-light)' : 'var(--sidebar-bg)',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: '12px',
-                    transition: 'var(--transition-fast)'
-                  }}
-                >
-                  <div style={{
-                    width: '40px',
-                    height: '40px',
-                    borderRadius: '10px',
-                    background: isSelected ? 'var(--primary-color)' : 'var(--alpha-white-4)',
-                    color: isSelected ? 'var(--text-on-primary)' : 'var(--primary-color)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0
-                  }}>
-                    {m.icon}
-                  </div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <span style={{ fontWeight: 800, fontSize: '0.92rem', color: isSelected ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                        {m.label}
-                      </span>
-                      <span style={{ fontSize: '0.68rem', fontWeight: 800, background: 'var(--alpha-white-5)', padding: '2px 8px', borderRadius: 'var(--radius-full)', color: 'var(--text-muted)' }}>
-                        {m.badge}
-                      </span>
-                    </div>
-                    <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: 0, lineHeight: '1.5' }}>
-                      {m.desc}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  // Unified Teacher Settings Modal & Bottom Sheet (Clean, distraction-free mobile hub)
   const renderTeacherConfigSheet = () => {
     if (!showTeacherConfigSheet || isTourOpen) return null;
 
-    const CHAT_MODES: { key: 'detailed' | 'step_by_step' | 'socratic' | 'summary'; label: string; desc: string; icon: React.ReactNode; badge: string }[] = [
-      {
-        key: 'detailed',
-        label: 'شرح وتفصيل شامل (الافتراضي)',
-        desc: 'شرح أكاديمي منهجي متكامل مع تبسيط القوانين والأمثلة التوضيحية لضمان أعلى استيعاب.',
-        icon: <GraduationCap size={20} />,
-        badge: 'موصى به'
-      },
-      {
-        key: 'step_by_step',
-        label: 'حل المسائل خطوة بخطوة',
-        desc: 'تقسيم حل المسائل المعقدة إلى: معطيات، قوانين مستخدمة، تعويض، وناتج نهائي.',
-        icon: <Sliders size={20} />,
-        badge: 'مسائل وتمارين'
-      },
-      {
-        key: 'socratic',
-        label: 'الحوار السقراطي التفاعلي',
-        desc: 'توجيه ذكي بالأسئلة المتدرجة لتصل إلى الحل بنفسك وتنمي التفكير العلمي.',
-        icon: <MessageCircleQuestion size={20} />,
-        badge: 'تفكير نقدي'
-      },
-      {
-        key: 'summary',
-        label: 'ملخص وتركيز سريع',
-        desc: 'كبسولات مركزة لأهم القوانين والمفاهيم للمراجعة السريعة قبل الامتحانات.',
-        icon: <ListChecks size={20} />,
-        badge: 'مراجعة نهائية'
-      }
+    const canThink = Boolean(user && (isUserSubscribed || user.role === 'admin' || user.unlimited_credit));
+    const TEACHING_STYLES: { key: 'detailed' | 'step_by_step' | 'socratic' | 'summary'; label: string; desc: string }[] = [
+      { key: 'detailed', label: 'شرح مفصل', desc: 'شرح كامل بالأمثلة والخطوات — الأسلوب الافتراضي' },
+      { key: 'step_by_step', label: 'خطوة بخطوة', desc: 'المسألة متقسمة: معطيات، قانون، تعويض، ثم الناتج' },
+      { key: 'socratic', label: 'الأسلوب السقراطي', desc: 'المعلم يسألك أسئلة توصّلك للإجابة بنفسك' },
+      { key: 'summary', label: 'ملخص سريع', desc: 'أهم النقاط في سطور قليلة قبل الامتحان' }
     ];
+    const toggleThinking = () => {
+      if (!user) {
+        setAuthTab('register');
+        setShowAuthModal(true);
+        setShowTeacherConfigSheet(false);
+      } else if (canThink) {
+        setThinkingEnabled(!thinkingEnabled);
+      }
+    };
 
     return (
       <div className="bottom-sheet-overlay" onClick={() => setShowTeacherConfigSheet(false)}>
-        <div className="bottom-sheet-body" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '520px', width: '100%', maxHeight: '88vh' }}>
+        <div className="bottom-sheet-body teacher-sheet" role="dialog" aria-modal="true" aria-labelledby="teacher-sheet-title" onClick={(e) => e.stopPropagation()}>
           <div className="sheet-handle" />
-          
-          {/* Header */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', paddingBottom: '10px', borderBottom: '1px solid var(--border-color)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div style={{ width: '32px', height: '32px', borderRadius: '10px', background: 'var(--primary-light)', color: 'var(--primary-color)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <Sliders size={18} />
-              </div>
-              <div>
-                <div style={{ fontSize: '1rem', fontWeight: 900, color: 'var(--text-main)' }}>إعدادات وطريقة الشرح</div>
-                <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>تخصيص طريقة الشرح وميزة التفكير الذكي</div>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowTeacherConfigSheet(false)}
-              style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '6px' }}
-            >
-              <X size={18} />
+          <div className="sheet-head">
+            <h3 id="teacher-sheet-title">إعدادات المعلم</h3>
+            <button type="button" className="sheet-close" onClick={() => setShowTeacherConfigSheet(false)} aria-label="إغلاق">
+              <X size={20} />
             </button>
           </div>
 
-          {/* Deep Thinking Toggle (Subscribers Only) */}
-          <div style={{
-            background: 'var(--alpha-white-3)',
-            border: '1px solid var(--border-color)',
-            borderRadius: '12px',
-            padding: '12px 14px',
-            marginBottom: '16px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '12px'
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <div style={{
-                width: '32px',
-                height: '32px',
-                borderRadius: '8px',
-                background: thinkingEnabled ? 'var(--primary-light)' : 'var(--alpha-white-4)',
-                color: thinkingEnabled ? 'var(--primary-color)' : 'var(--text-muted)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}>
-                <Brain size={18} />
+          <div className="thinking-card">
+            <div className="thinking-card-row">
+              <span className="thinking-icon"><Brain size={22} /></span>
+              <div className="thinking-text">
+                <div className="thinking-title">
+                  <strong>التفكير العميق</strong>
+                  {!canThink && <span className="lock-chip"><Lock size={12} /> للمشتركين</span>}
+                </div>
+                <p>المعلم يفكر خطوة بخطوة قبل ما يجاوب — الأفضل للمسائل الصعبة وأسئلة الامتحانات.</p>
               </div>
-              <div>
-                <div style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span>ميزة التفكير العميق (Deep Thinking)</span>
-                  <span style={{ fontSize: '0.62rem', fontWeight: 800, background: 'rgba(255, 183, 3, 0.15)', color: '#FFB703', padding: '1px 5px', borderRadius: '4px' }}>
-                    للمشتركين
+              <button
+                type="button"
+                role="switch"
+                aria-checked={canThink && thinkingEnabled}
+                aria-label="التفكير العميق"
+                disabled={Boolean(user) && !canThink}
+                onClick={toggleThinking}
+                className={`switch ${canThink && thinkingEnabled ? 'on' : ''}`}
+              />
+            </div>
+            {user && !canThink && (
+              <button
+                type="button"
+                className="btn-primary thinking-unlock"
+                onClick={() => {
+                  setShowTeacherConfigSheet(false);
+                  if (isMobile) setShowUpgradeSheet(true); else setActiveTab('subscriptions');
+                }}
+              >
+                افتح التفكير العميق — من {KASHIER_PLANS.pro_1m.amount} ج.م للشهر
+              </button>
+            )}
+          </div>
+
+          <div className="sheet-section-label">أسلوب الشرح</div>
+          <div className="radio-list" role="radiogroup" aria-label="أسلوب الشرح">
+            {TEACHING_STYLES.map((m) => {
+              const selected = chatMode === m.key;
+              return (
+                <button
+                  key={m.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  className={`radio-option ${selected ? 'active' : ''}`}
+                  onClick={() => {
+                    setChatMode(m.key);
+                    localStorage.setItem('egs_chat_mode', m.key);
+                  }}
+                >
+                  <span className="radio-option-text">
+                    <strong>{m.label}</strong>
+                    <span>{m.desc}</span>
                   </span>
-                </div>
-                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                  تحليل مسار الحل وصياغة القوانين خطوة بخطوة قبل كتابة الإجابة.
-                </div>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                if (!user && !isTourOpen) {
-                  setAuthTab('register');
-                  setShowAuthModal(true);
-                  setShowTeacherConfigSheet(false);
-                } else if (user && (user.plan_type === 'free' || !user.subscription_status || user.subscription_status !== 'active') && user.role !== 'admin' && !user.unlimited_credit) {
-                  setShowTeacherConfigSheet(false);
-                  setShowUpgradeSheet(true);
-                } else {
-                  setThinkingEnabled(!thinkingEnabled);
-                }
-              }}
-              style={{
-                padding: '6px 14px',
-                borderRadius: 'var(--radius-full)',
-                border: thinkingEnabled ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                background: thinkingEnabled ? 'var(--primary-color)' : 'transparent',
-                color: thinkingEnabled ? 'var(--text-on-primary)' : 'var(--text-muted)',
-                fontSize: '0.78rem',
-                fontWeight: 800,
-                cursor: 'pointer',
-                transition: 'var(--transition-fast)'
-              }}
-            >
-              {thinkingEnabled ? 'مفعل' : 'معطل'}
-            </button>
+                  <span className="radio-dot" aria-hidden="true" />
+                </button>
+              );
+            })}
           </div>
 
-          {/* Section 3: Teaching Style / Mode */}
-          <div>
-            <div style={{ fontSize: '0.78rem', fontWeight: 800, color: 'var(--text-muted)', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <GraduationCap size={14} style={{ color: 'var(--primary-color)' }} />
-              <span>أسلوب وطريقة الشرح:</span>
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {CHAT_MODES.map((m) => {
-                const isSelected = chatMode === m.key;
-                return (
-                  <div
-                    key={m.key}
-                    onClick={() => {
-                      setChatMode(m.key);
-                      localStorage.setItem('egs_chat_mode', m.key);
-                      setShowTeacherConfigSheet(false);
-                    }}
-                    style={{
-                      padding: '10px 12px',
-                      borderRadius: '12px',
-                      border: isSelected ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                      background: isSelected ? 'var(--primary-light)' : 'var(--sidebar-bg)',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: '10px',
-                      transition: 'var(--transition-fast)'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <div style={{
-                        color: isSelected ? 'var(--primary-color)' : 'var(--text-muted)'
-                      }}>
-                        {m.icon}
-                      </div>
-                      <div>
-                        <div style={{ fontSize: '0.84rem', fontWeight: 800, color: isSelected ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                          {m.label}
-                        </div>
-                        <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                          {m.desc}
-                        </div>
-                      </div>
-                    </div>
-                    {isSelected && <CheckCircle size={16} color="var(--primary-color)" />}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Close & Confirm Button */}
-          <button
-            type="button"
-            onClick={() => setShowTeacherConfigSheet(false)}
-            className="btn-primary"
-            style={{ width: '100%', padding: '10px', borderRadius: '10px', marginTop: '16px', fontWeight: 800, fontSize: '0.88rem' }}
-          >
-            <span>حفظ والعودة للمذاكرة</span>
+          <button type="button" onClick={() => setShowTeacherConfigSheet(false)} className="btn-secondary sheet-done">
+            تم
           </button>
         </div>
       </div>
@@ -8839,165 +8065,67 @@ export default function App() {
   // Motivational Upgrade Bottom Sheet for Depleted Funds / Subscriptions
   const renderUpgradeSheet = () => {
     if (!showUpgradeSheet || isUserSubscribed || isTourOpen) return null;
+    const orderedPlans = [KASHIER_PLANS.pro_3m, KASHIER_PLANS.pro_1m, KASHIER_PLANS.pro_2m];
+    const parentText = `السلام عليكم، أنا بذاكر على منصة EGS AI لمنهج صفّي، ومحتاج أشترك في باقة 3 شهور بـ ${KASHIER_PLANS.pro_3m.amount} ج.م (يعني حوالي ${(KASHIER_PLANS.pro_3m.amount / KASHIER_PLANS.pro_3m.durationDays).toFixed(1)} ج.م في اليوم). تقدر تشترك لي بأمان من الرابط ده بفودافون كاش أو إنستاباي أو الكارت:\n${typeof window !== 'undefined' ? `${window.location.origin}/sponsor?student_id=${user?.id || ''}&plan=pro_3m` : ''}`;
 
     return (
       <div className="bottom-sheet-overlay" onClick={() => setShowUpgradeSheet(false)}>
-        <div className="bottom-sheet-body" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px', margin: '0 auto', width: '100%' }}>
+        <div className="bottom-sheet-body teacher-sheet upgrade-sheet" role="dialog" aria-modal="true" aria-labelledby="upgrade-sheet-title" onClick={(e) => e.stopPropagation()}>
           <div className="sheet-handle" />
-          
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', paddingBottom: '10px', borderBottom: '1px solid var(--border-color)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <Sparkles size={20} style={{ color: 'var(--secondary-color)' }} />
-              <span style={{ fontSize: '1.1rem', fontWeight: 900, color: 'var(--text-main)' }}>ترقية الحساب إلى باقة Pro</span>
-            </div>
-            <button type="button" onClick={() => setShowUpgradeSheet(false)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}>
-              <X size={18} />
+          <div className="sheet-head">
+            <h3 id="upgrade-sheet-title">اشترك وكمّل مذاكرتك</h3>
+            <button type="button" className="sheet-close" onClick={() => setShowUpgradeSheet(false)} aria-label="إغلاق">
+              <X size={20} />
             </button>
           </div>
-
-          <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.6', margin: '0 0 16px' }}>
-            اختر الباقة المناسبة لك لتجديد رصيدك يومياً والاستمتاع بكامل ميزات المساعد الذكي والتفكير المستفيض:
+          <p className="upgrade-sub">
+            رصيدك الحالي <strong className="num">{Number(coins.toFixed(1))}</strong> من 5 نقاط مجانية اليوم. كل الباقات بتفتح التفكير العميق وبتجدد نقاطك كل يوم.
           </p>
 
-          {/* 3 Quick Plans */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px' }}>
-            {[
-              { id: 'pro_1m', title: 'باقة شهر (1 Month)', price: '60', period: 'شهرياً', points: '80 نقطة يومياً', micro: '2 ج.م / اليوم', featured: false, badge: 'الباقة التمهيدية' },
-              { id: 'pro_2m', title: 'باقة شهرين (2 Months)', price: '110', period: 'شهرين', points: '90 نقطة يومياً', micro: '1.83 ج.م / اليوم (وفر 10 ج.م)', featured: false, badge: 'الباقة المرنة' },
-              { id: 'pro_3m', title: 'باقة 3 أشهر (3 Months)', price: '140', period: '3 أشهر', points: '120 نقطة يومياً', micro: 'فقط 1.5 ج.م / اليوم (أعلى توفير للترم)', featured: true, badge: 'خيار 85% من المتفوقين' },
-            ].map((p) => (
-              <div
-                key={p.id}
-                style={{
-                  padding: '14px 16px',
-                  borderRadius: '14px',
-                  background: 'var(--sidebar-bg)',
-                  border: p.featured ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: '12px',
-                  boxShadow: p.featured ? '0 4px 16px rgba(255, 183, 3, 0.15)' : 'none'
-                }}
-              >
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <span style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--text-main)' }}>{p.title}</span>
-                    {p.badge && (
-                      <span style={{ background: p.featured ? 'var(--primary-color)' : 'var(--alpha-white-5)', color: p.featured ? '#fff' : 'var(--text-muted)', fontSize: '0.65rem', fontWeight: 800, padding: '1px 6px', borderRadius: 'var(--radius-full)' }}>
-                        {p.badge}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '3px' }}>
-                    <span style={{ fontSize: '0.74rem', color: 'var(--primary-color)', fontWeight: 700 }}>
-                      {p.points}
-                    </span>
-                    <span style={{ fontSize: '0.68rem', color: '#FFB703', background: 'rgba(255, 183, 3, 0.12)', padding: '1px 5px', borderRadius: '4px', fontWeight: 800 }}>
-                      {p.micro}
-                    </span>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <div style={{ textAlign: 'left' }}>
-                    <span style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--text-main)' }}>{p.price}</span>
-                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}> ج.م</span>
+          <div className="upgrade-plans">
+            {orderedPlans.map((plan) => {
+              const copy = PLAN_CARD_COPY[plan.id];
+              const isHero = plan.id === 'pro_3m';
+              const usage = pointsPricing.plans[plan.id];
+              return (
+                <div key={plan.id} className={`upgrade-plan ${isHero ? 'hero' : ''}`}>
+                  {isHero && <span className="plan-ribbon small"><Crown size={13} /> {copy.ribbon}</span>}
+                  <div className="upgrade-plan-text">
+                    <span className="upgrade-plan-badge">{copy.badge}</span>
+                    <strong>{copy.title} · <span className="num">{plan.amount}</span> ج.م</strong>
+                    <span><span className="num">{plan.dailyCoins}</span> نقطة يومياً{usage ? ` · حوالي ${usage.chatsPerDay.offPeak} سؤال` : ''}</span>
                   </div>
                   <button
                     type="button"
                     disabled={subscribingPlan !== null}
-                    onClick={() => {
-                      setShowUpgradeSheet(false);
-                      handleSubscribe(p.id);
-                    }}
-                    className="btn-primary"
-                    style={{ padding: '8px 14px', borderRadius: '10px', fontSize: '0.82rem', fontWeight: 800 }}
+                    onClick={() => { setShowUpgradeSheet(false); handleSubscribe(plan.id); }}
+                    className={isHero ? 'btn-primary compact' : 'btn-secondary compact'}
                   >
-                    {subscribingPlan === p.id ? <Loader2 size={14} className="animate-spin" /> : <span>اشتراك</span>}
+                    {subscribingPlan === plan.id ? <Loader2 size={16} className="animate-spin" /> : 'اشترك'}
                   </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
-          <div className="payment-methods-strip" style={{ justifyContent: 'center', marginBottom: '14px' }}>
-            <span className="payment-brand-pill featured">InstaPay</span>
-            <span className="payment-brand-pill featured">فودافون كاش</span>
-            <span className="payment-brand-pill">ميزة Meeza</span>
-            <span className="payment-brand-pill">فيزا / ماستركارد</span>
-          </div>
-
-          {/* Ask Parent on WhatsApp */}
           {user && (
-            <a
-              href={`https://wa.me/?text=${encodeURIComponent(
-                `السلام عليكم يا بابا / يا ماما 🌸\nأنا بذاكر حالياً على منصة EGS AI لمناهج مرحلتي الدراسية، وحققت إنجاز ممتاز النهاردة في حل المسائل ونماذج الامتحانات.\n\nعشان أقدر أواصل المذاكرة ليلة الامتحان ونماذج البوكليت بنموذج التفكير المعمق، حابب أشترك في "باقة الترم الدراسي الكامل (3 أشهر)" بـ 140 جنيه فقط (شاملة الـ 3 شهور كلها، يعني 1.5 جنيه في اليوم فقط، وأوفر بكتير جداً من الدروس الخصوصية).\n\nتقدر تفعّل لي الاشتراك فوراً وبكل أمان بضغطة واحدة عبر فودافون كاش أو انستاباي أو كروت ميزة من الرابط ده:\n${typeof window !== 'undefined' ? `${window.location.origin}/sponsor?student_id=${user?.id || ''}&plan=pro_3m` : ''}\n\nشكراً لدعمك ليا في دراستي ❤️`
-              )}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                width: '100%',
-                padding: '11px 16px',
-                borderRadius: '12px',
-                fontSize: '0.88rem',
-                fontWeight: 800,
-                background: '#25D366',
-                color: '#ffffff',
-                textDecoration: 'none',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: '8px',
-                marginBottom: '14px',
-                boxShadow: '0 3px 12px rgba(37, 211, 102, 0.3)',
-                boxSizing: 'border-box'
-              }}
-            >
+            <a className="plan-parent-btn" href={`https://wa.me/?text=${encodeURIComponent(parentText)}`} target="_blank" rel="noopener noreferrer">
               <MessageCircle size={17} />
-              <span>أرسل لولي أمرك للاشتراك في باقة الترم عبر واتساب (140 ج.م)</span>
+              أرسل الباقة لولي أمرك على واتساب
             </a>
           )}
 
-          {/* Payment Badges */}
-          <div style={{ marginBottom: '14px' }}>
-            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, marginBottom: '6px' }}>
-              طرق دفع فورية وآمنة عبر كاشير (Kashier):
-            </div>
-            <div className="payment-badges-row">
-              <span className="payment-badge-chip"><Phone size={12} /> فودافون كاش</span>
-              <span className="payment-badge-chip"><Zap size={12} /> انستاباي InstaPay</span>
-              <span className="payment-badge-chip"><CreditCard size={12} /> كروت ميزة</span>
-              <span className="payment-badge-chip"><CreditCard size={12} /> فيزا وماستركارد</span>
-            </div>
+          <div className="upgrade-pay-row">
+            <Lock size={15} />
+            <span>دفع آمن عبر كاشير: فيزا، ماستركارد، ميزة، المحافظ الإلكترونية، وإنستاباي</span>
           </div>
+          <p className="upgrade-refund">
+            <ShieldCheck size={15} />
+            استرداد كامل خلال 3 أيام من الشراء بشرط عدم استهلاك أي نقطة.
+          </p>
 
-          {/* Refund policy note */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.74rem', color: 'var(--text-muted)', background: 'rgba(16, 185, 129, 0.08)', padding: '8px 12px', borderRadius: '8px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-            <CheckCircle size={14} color="var(--success-color)" />
-            <span>ضمان استرجاع كامل المبلغ خلال 3 أيام بدون أي مخاطرة.</span>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setShowUpgradeSheet(false);
-              setActiveTab('subscriptions');
-            }}
-            style={{
-              width: '100%',
-              marginTop: '12px',
-              padding: '10px',
-              background: 'transparent',
-              border: '1px solid var(--border-color)',
-              borderRadius: '10px',
-              color: 'var(--text-muted)',
-              fontSize: '0.82rem',
-              fontWeight: 700,
-              cursor: 'pointer'
-            }}
-          >
-            عرض كافة تفاصيل الباقات والأسعار
+          <button type="button" className="btn-secondary sheet-done" onClick={() => { setShowUpgradeSheet(false); setActiveTab('subscriptions'); }}>
+            تفاصيل الباقات
           </button>
         </div>
       </div>
@@ -9011,7 +8139,7 @@ export default function App() {
     const targetGrade = user ? user.grade_level : chatGrade;
     const sheetSubjects = getActiveSubjectsForGrade(targetGrade);
     const canPickGrade = !user; // guests choose their grade; logged-in users are fixed
-    const gradeEntries = Object.entries(GRADE_NAMES).filter(
+    const gradeEntries = stageEntries.filter(
       ([key]) =>
         (activeGradeLevels.length === 0 || activeGradeLevels.includes(key)) &&
         curriculums.some((c) => c.grade_level === key)
@@ -9155,6 +8283,7 @@ export default function App() {
           }
         }
         if (data.website_link) setWebsiteLink(data.website_link);
+        if (data.education_catalog?.stages) applyEducationCatalog(data.education_catalog);
         if (data.active_grade_levels && data.active_grade_levels.length > 0) {
           setActiveGradeLevels(data.active_grade_levels);
           try { localStorage.setItem('egs_active_grade_levels', JSON.stringify(data.active_grade_levels)); } catch (e) {}
@@ -9220,9 +8349,12 @@ export default function App() {
     mediaQuery.addEventListener('change', handleSystemThemeChange);
 
     // 2. Immediate responsive & PWA device detection
-    const mobile = window.innerWidth < 768;
+    const mobile = window.innerWidth <= 768;
+    const overlay = window.innerWidth < 1024;
+    let lastOverlay = overlay;
     setIsMobile(mobile);
-    setSidebarOpen(!mobile);
+    setSidebarOverlay(overlay);
+    setSidebarOpen(!overlay);
 
     const ua = navigator.userAgent || '';
     const isIos = /iPhone|iPad|iPod/i.test(ua);
@@ -9300,8 +8432,13 @@ export default function App() {
     window.addEventListener('appinstalled', handleAppInstalled);
 
     const handleResize = () => {
-      const isMobResized = window.innerWidth < 768;
-      setIsMobile(isMobResized);
+      setIsMobile(window.innerWidth <= 768);
+      const overlayResized = window.innerWidth < 1024;
+      if (overlayResized !== lastOverlay) {
+        lastOverlay = overlayResized;
+        setSidebarOverlay(overlayResized);
+        setSidebarOpen(!overlayResized);
+      }
     };
     window.addEventListener('resize', handleResize);
 
@@ -9365,6 +8502,11 @@ export default function App() {
         if (Array.isArray(parsedCurrs) && parsedCurrs.length > 0) {
           setCurriculums(parsedCurrs);
         }
+      }
+      const cachedCatalog = localStorage.getItem('egs_education_catalog');
+      if (cachedCatalog) {
+        const parsedCatalog = JSON.parse(cachedCatalog);
+        if (parsedCatalog?.stages) applyEducationCatalog(parsedCatalog);
       }
       const cachedGrades = localStorage.getItem('egs_active_grade_levels');
       if (cachedGrades) {
@@ -9605,7 +8747,8 @@ export default function App() {
                   thought: thought,
                   duration: duration,
                   isThinking: false,
-                  created_at: h.created_at
+                  created_at: h.created_at,
+                  coinsUsed: Number(h.coins_cost) || undefined
                 };
               }
             }
@@ -9615,7 +8758,8 @@ export default function App() {
             session_id: h.session_id,
             sender: h.sender,
             message: h.message,
-            created_at: h.created_at
+            created_at: h.created_at,
+            coinsUsed: h.sender === 'ai' ? Number(h.coins_cost) || undefined : undefined
           };
         });
         setMessages(parsedHistory);
@@ -9634,7 +8778,7 @@ export default function App() {
   // Delete chat session
   const handleDeleteSession = async (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!confirm('هل أنت متأكد من رغبتك في حذف هذه المحادثة بالكامل؟')) return;
+    if (!(await askConfirm('هل أنت متأكد من رغبتك في حذف هذه المحادثة بالكامل؟'))) return;
     const storedToken = localStorage.getItem('egs_token') || token;
     try {
       const res = await fetch(`/api/chat/sessions?id=${sessionId}`, {
@@ -9685,7 +8829,7 @@ export default function App() {
         setReportDone(false);
       }, 1800);
     } catch (e: any) {
-      alert(e.message || 'فشل إرسال البلاغ');
+      notify(e.message || 'فشل إرسال البلاغ', 'error');
     } finally {
       setReportLoading(false);
     }
@@ -9862,8 +9006,8 @@ export default function App() {
           setShowOnboardingModal(true);
           setOnboardingStep('stage');
           setOnboardingName('');
-          setOnboardingGrade('1_high');
-          setOnboardingTrack('engineering_cs');
+          setOnboardingGrade('');
+          setOnboardingTrack(null);
           setOnboardingElective('');
         }
       }
@@ -9872,6 +9016,26 @@ export default function App() {
         ? 'تعذر الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت أو تشغيل الخادم والمحاولة مرة أخرى.'
         : (err.message || 'حدث خطأ أثناء المصادقة');
       setAuthError(msg);
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    setAuthError('');
+    setAuthLoading(true);
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, terms_accepted: true })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'تعذر إعادة إرسال الكود');
+      setOtpCode('');
+      setOtpResendIn(60);
+    } catch (err: any) {
+      setAuthError(err.message === 'Failed to fetch' ? 'تعذر الاتصال بالخادم. تأكد من الإنترنت وحاول تاني.' : err.message);
     } finally {
       setAuthLoading(false);
     }
@@ -9890,8 +9054,8 @@ export default function App() {
         body: JSON.stringify({
           credential,
           grade_level: selectedGrade,
-          track_id: selectedGrade === '2_high' ? (trackId || googleSelectedTrack) : undefined,
-          elective_subject: selectedGrade === '2_high' ? (electiveSubj || googleSelectedElective) : undefined,
+          track_id: trackId,
+          elective_subject: electiveSubj,
           has_registered_before: hasRegisteredBefore,
           browser_fingerprint: browserFingerprint,
           device_id: currentDeviceId
@@ -9930,8 +9094,8 @@ export default function App() {
         if (data.is_new_user || data.user.grade_level === 'unselected' || !data.user.grade_level) {
           setShowOnboardingModal(true);
           setOnboardingStep('stage');
-          setOnboardingGrade('1_high');
-          setOnboardingTrack('engineering_cs');
+          setOnboardingGrade('');
+          setOnboardingTrack(null);
           setOnboardingElective('');
           if (data.user.name && data.user.name !== 'طالب جديد' && data.user.name !== 'Google User') {
             setOnboardingName(data.user.name);
@@ -9961,8 +9125,9 @@ export default function App() {
       setOnboardingError('اكتب اسمك الكريم عشان نقدر نجهّز لك حسابك.');
       return;
     }
-    if (onboardingGrade === '2_high' && !onboardingTrack) {
-      setOnboardingError('اختر شعبتك ومسارك الدراسي لطلاب البكالوريا.');
+    if (!isPathComplete(educationCatalog, { stageId: onboardingGrade, trackId: onboardingTrack })) {
+      setOnboardingStep('stage');
+      setOnboardingError('اختر صفك الدراسي ومسارك أولاً.');
       return;
     }
 
@@ -9980,8 +9145,8 @@ export default function App() {
           action: 'complete-onboarding',
           name: onboardingName.trim(),
           grade_level: onboardingGrade,
-          track_id: onboardingGrade === '2_high' ? onboardingTrack : null,
-          elective_subject: onboardingGrade === '2_high' ? onboardingElective : null
+          track_id: onboardingTrack,
+          elective_subject: onboardingElective || null
         })
       });
 
@@ -10023,6 +9188,7 @@ export default function App() {
     setOtpStep(false);
     setAuthError('');
     setTermsAccepted(false);
+    setShowAuthPassword(false);
   };
 
   // Google One-Tap & Sign-In Button integration
@@ -10044,7 +9210,7 @@ export default function App() {
               (window as any).google.accounts.id.renderButton(btnContainer, {
                 theme: "outline",
                 size: "large",
-                width: 320,
+                width: Math.max(200, Math.min(320, btnContainer.clientWidth || 320)),
                 text: "signin_with"
               });
             }
@@ -10056,6 +9222,15 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [showAuthModal, authTab, otpStep]);
+
+  useEffect(() => {
+    if (!showAuthModal) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !authLoading) { setShowAuthModal(false); resetAuthForm(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showAuthModal, authLoading]);
 
   const handleLogout = () => {
     const currentDevId = localStorage.getItem('egs_device_id');
@@ -10086,14 +9261,14 @@ export default function App() {
     loadSystemConfig(deviceId, null, true);
     loadNotifications(null, true);
   };
-  const handleUpdateUserGrade = async (newGrade: string, newTrack?: string | null, newElective?: string | null) => {
-    if (!user) return;
+  const handleUpdateUserGrade = async (newGrade: string, newTrack?: string | null, newElective?: string | null): Promise<boolean> => {
+    if (!user) return false;
     try {
-      const payload: any = { grade_level: newGrade };
-      if (newGrade === '2_high') {
-        payload.track_id = newTrack !== undefined ? newTrack : (user.track_id || selectedTrack);
-        payload.elective_subject = newElective !== undefined ? newElective : (user.elective_subject || selectedElective);
-      }
+      const payload = {
+        grade_level: newGrade,
+        track_id: newTrack !== undefined ? newTrack : user.track_id,
+        elective_subject: newElective !== undefined ? newElective : user.elective_subject
+      };
       const res = await fetch('/api/auth/update-grade', {
         method: 'POST',
         headers: {
@@ -10104,29 +9279,30 @@ export default function App() {
       });
       const data = await res.json();
       if (!res.ok) {
-        if (!checkAuthError(res.status, data)) return;
+        if (!checkAuthError(res.status, data)) return false;
         throw new Error(data.error || 'فشل تحديث السنة الدراسية.');
       }
 
-      // Update state and storage
       const updatedUser = {
         ...user,
-        grade_level: newGrade,
-        track_id: payload.track_id || null,
-        elective_subject: payload.elective_subject || null
+        grade_level: data.user?.grade_level || newGrade,
+        track_id: data.user ? data.user.track_id : payload.track_id || null,
+        elective_subject: data.user ? data.user.elective_subject : payload.elective_subject || null
       };
       setUser(updatedUser);
       localStorage.setItem('egs_user', JSON.stringify(updatedUser));
-      if (payload.track_id) setSelectedTrack(payload.track_id);
-      if (payload.elective_subject) setSelectedElective(payload.elective_subject);
+      if (updatedUser.track_id) setSelectedTrack(updatedUser.track_id);
+      if (updatedUser.elective_subject) setSelectedElective(updatedUser.elective_subject);
       
       // Clear current active session & chat history to select lessons for new grade
       setActiveSessionId(null);
       setMessages([]);
       
-      setProfileMessage({ text: 'تم تحديث السنة الدراسية والمسار بنجاح.', type: 'success' });
+      setProfileMessage({ text: 'تم تحديث مسارك الدراسي بنجاح. موادك الجديدة جاهزة للمذاكرة.', type: 'success' });
+      return true;
     } catch (err: any) {
       setProfileMessage({ text: err.message || 'فشل تحديث السنة الدراسية.', type: 'danger' });
+      return false;
     }
   };
 
@@ -10135,7 +9311,7 @@ export default function App() {
     if (!file) return;
 
     if (file.size > 5 * 1024 * 1024) {
-      alert('حجم الصورة كبير جداً. الحد الأقصى هو 5 ميجابايت.');
+      notify('حجم الصورة كبير جداً. الحد الأقصى هو 5 ميجابايت.', 'info');
       return;
     }
 
@@ -10189,12 +9365,12 @@ export default function App() {
     if (isRecordingAudio) return;
     try {
       if (typeof window !== 'undefined' && !window.isSecureContext) {
-        alert('يتطلب تشغيل الميكروفون اتصالاً آمناً (HTTPS). يرجى فتح الموقع عبر رابط https://');
+        notify('يتطلب تشغيل الميكروفون اتصالاً آمناً (HTTPS). يرجى فتح الموقع عبر رابط https://', 'info');
         return;
       }
 
       if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        alert('المتصفح لا يدعم الوصول إلى الميكروفون في هذه البيئة.');
+        notify('المتصفح لا يدعم الوصول إلى الميكروفون في هذه البيئة.', 'info');
         return;
       }
 
@@ -10236,13 +9412,13 @@ export default function App() {
     } catch (err: any) {
       console.error('Microphone access failed:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        alert('تم حظر إذن الميكروفون من إعدادات المتصفح أو تم رفضه. يرجى تفعيل إذن الميكروفون من إعدادات الموقع وإعادة المحاولة.');
+        notify('تم حظر إذن الميكروفون من إعدادات المتصفح أو تم رفضه. يرجى تفعيل إذن الميكروفون من إعدادات الموقع وإعادة المحاولة.', 'info');
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        alert('لم يتم العثور على ميكروفون في هذا الجهاز.');
+        notify('لم يتم العثور على ميكروفون في هذا الجهاز.', 'info');
       } else if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
-        alert('الميكروفون قيد الاستخدام من قبل تطبيق آخر في الجهاز.');
+        notify('الميكروفون قيد الاستخدام من قبل تطبيق آخر في الجهاز.', 'info');
       } else {
-        alert('تعذر تشغيل الميكروفون. يرجى التأكد من توصيل الميكروفون ومنح الإذن في المتصفح.');
+        notify('تعذر تشغيل الميكروفون. يرجى التأكد من توصيل الميكروفون ومنح الإذن في المتصفح.', 'info');
       }
     }
   };
@@ -10384,6 +9560,7 @@ export default function App() {
 
             const data = await res.json();
             if (res.ok && data.transcript) {
+              syncRemainingCoins(data.remaining_coins);
               const transcriptText = data.transcript.trim();
               let voiceMsg = '';
               if (currentPendingImage) {
@@ -10395,11 +9572,11 @@ export default function App() {
               setInputMessage('');
               handleSendMessage(undefined, voiceMsg);
             } else if (!res.ok) {
-              alert(data.error || 'تعذر معالجة التسجيل الصوتي.');
+              notify(data.error || 'تعذر معالجة التسجيل الصوتي.', 'error');
             }
           } catch (e: any) {
             console.error('Transcription request failed:', e);
-            alert('حدث خطأ أثناء معالجة التسجيل الصوتي.');
+            notify('حدث خطأ أثناء معالجة التسجيل الصوتي.', 'error');
           } finally {
             setIsTranscribingAudio(false);
             setRecordingDuration(0);
@@ -10573,10 +9750,8 @@ export default function App() {
     }
 
     // Client-side syllabus presence verification
-    const hasCurriculum = curriculums.some(c => 
-      c.subject_name === effectiveSubject && 
-      c.grade_level === targetGrade
-    );
+    const targetCurriculumObj = resolveCurriculum(educationCatalog, curriculums, targetGrade, effectiveSubject);
+    const hasCurriculum = !!targetCurriculumObj;
     if (!hasCurriculum) {
       setMessages(prev => [...prev, {
         sender: 'ai',
@@ -10587,11 +9762,8 @@ export default function App() {
 
     // Client-side deleted/changed course verification
     if (activeSession) {
-      const sessionCurrValid = curriculums.some(c => 
-        c.subject_name === activeSession.subject_name && 
-        c.grade_level === activeSession.grade_level &&
-        activeCurriculumIds.includes(c.id)
-      );
+      const sessionCurr = resolveCurriculum(educationCatalog, curriculums, activeSession.grade_level, activeSession.subject_name);
+      const sessionCurrValid = !!sessionCurr && (activeCurriculumIds.length === 0 || activeCurriculumIds.includes(sessionCurr.id) || !!sessionCurr.is_placeholder);
       if (!sessionCurrValid) {
         setMessages(prev => [...prev, {
           sender: 'ai',
@@ -10795,7 +9967,7 @@ export default function App() {
                       if (next.length > 0 && next[next.length - 1].sender === 'ai') {
                         next[next.length - 1] = {
                           ...next[next.length - 1],
-                          message: `⚠️ **حدث خطأ!**\n\n${errMessage}`,
+                          message: `**حدث خطأ!**\n\n${errMessage}`,
                           isThinking: false,
                           isStreaming: false,
                           hasError: true
@@ -10821,6 +9993,9 @@ export default function App() {
                           message: currentContent,
                           thought: currentThought,
                           duration: currentDuration,
+                          coinsUsed: Number(dataObj.coins_used) || undefined,
+                          peakRate: !!dataObj.peak_rate,
+                          fairUseRate: !!dataObj.fair_use_rate,
                           isThinking: false,
                           isStreaming: false
                         };
@@ -11001,8 +10176,8 @@ export default function App() {
             is_placeholder: true,
             grade_level: uploadGrade,
             subject_name: uploadSubject,
-            track_id: uploadGrade === '2_high' ? (uploadTrackId || null) : null,
-            is_elective: uploadGrade === '2_high' ? uploadIsElective : false
+            track_id: uploadTrackId || null,
+            is_elective: uploadIsElective
           })
         });
 
@@ -11025,10 +10200,8 @@ export default function App() {
         if (uploadFile) formData.append('file', uploadFile);
         formData.append('grade_level', uploadGrade);
         formData.append('subject_name', uploadSubject);
-        if (uploadGrade === '2_high') {
-          if (uploadTrackId) formData.append('track_id', uploadTrackId);
-          formData.append('is_elective', uploadIsElective ? 'true' : 'false');
-        }
+        if (uploadTrackId) formData.append('track_id', uploadTrackId);
+        formData.append('is_elective', uploadIsElective ? 'true' : 'false');
 
         const res = await fetch('/api/admin/curriculum', {
           method: 'POST',
@@ -11085,7 +10258,7 @@ export default function App() {
   const handleAttachFileToPlaceholder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!attachCurriculumModal || !attachFile) {
-      alert('يرجى اختيار ملف المنهج بصيغة Markdown (.md)');
+      notify('يرجى اختيار ملف المنهج بصيغة Markdown (.md)', 'info');
       return;
     }
 
@@ -11103,7 +10276,7 @@ export default function App() {
 
       const data = await res.json();
       if (res.ok) {
-        alert(data.message || 'تم رفع ومعالجة ملف المنهج بنجاح وتفعيل المادة.');
+        notify(data.message || 'تم رفع ومعالجة ملف المنهج بنجاح وتفعيل المادة.', 'success');
         const currId = attachCurriculumModal.id;
         const subject = attachCurriculumModal.subject_name;
         const pendingCount = data.stats?.pendingEmbeddingCount || 0;
@@ -11119,17 +10292,17 @@ export default function App() {
           runProgressiveEmbedding(currId, subject, pendingCount);
         }
       } else {
-        alert(data.error || 'فشل رفع الملف للمنهج.');
+        notify(data.error || 'فشل رفع الملف للمنهج.', 'error');
       }
     } catch (err: any) {
-      alert(err.message || 'حدث خطأ أثناء رفع الملف.');
+      notify(err.message || 'حدث خطأ أثناء رفع الملف.', 'error');
     } finally {
       setAttachLoading(false);
     }
   };
 
   const handleDeleteCurriculum = async (id: string) => {
-    if (!confirm('هل أنت متأكد من رغبتك في حذف هذا المنهج بشكل نهائي؟ سيمسح ذلك جميع البيانات المرتبطة به.')) return;
+    if (!(await askConfirm('هل أنت متأكد من رغبتك في حذف هذا المنهج بشكل نهائي؟ سيمسح ذلك جميع البيانات المرتبطة به.'))) return;
     try {
       const res = await fetch('/api/admin/curriculum', {
         method: 'DELETE',
@@ -11162,7 +10335,7 @@ export default function App() {
         body: JSON.stringify({ website_link: websiteLink })
       });
       if (res.ok) {
-        alert('تم حفظ رابط الموقع بنجاح. سيتم توجيه مستخدمي تطبيق أندرويد إلى هذا الرابط للدفع.');
+        notify('تم حفظ رابط الموقع بنجاح. سيتم توجيه مستخدمي تطبيق أندرويد إلى هذا الرابط للدفع.', 'success');
       }
     } catch (e) {
       console.error(e);
@@ -11170,7 +10343,7 @@ export default function App() {
   };
 
   // Save specific system setting arrays (active grades or curricula)
-  const saveConfigSettings = async (updatedGrades: string[], updatedCurrs: string[]) => {
+  const saveActiveCurriculumIds = async (updatedCurrs: string[]) => {
     try {
       const res = await fetch('/api/config', {
         method: 'POST',
@@ -11179,7 +10352,6 @@ export default function App() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          active_grade_levels: updatedGrades,
           active_curriculum_ids: updatedCurrs
         })
       });
@@ -11188,47 +10360,6 @@ export default function App() {
       }
     } catch (e) {
       console.error('Error saving config settings:', e);
-    }
-  };
-
-  // Toggle active grade level status
-  const handleToggleGradeActive = async (grade: string) => {
-    let updatedGrades = [...activeGradeLevels];
-    if (updatedGrades.includes(grade)) {
-      updatedGrades = updatedGrades.filter(g => g !== grade);
-    } else {
-      updatedGrades.push(grade);
-    }
-    setActiveGradeLevels(updatedGrades);
-    await saveConfigSettings(updatedGrades, activeCurriculumIds);
-  };
-
-  // Toggle active track status (Baccalaureate tracks)
-  const handleToggleTrackActive = async (trackId: string) => {
-    let updatedTracks = [...activeTracks];
-    if (updatedTracks.includes(trackId)) {
-      updatedTracks = updatedTracks.filter(t => t !== trackId);
-    } else {
-      updatedTracks.push(trackId);
-    }
-    setActiveTracks(updatedTracks);
-    try {
-      setSavingTracks(true);
-      await fetch('/api/config', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          active_tracks: updatedTracks
-        })
-      });
-      loadSystemConfig(undefined, undefined, true);
-    } catch (e) {
-      console.error('Error updating active tracks:', e);
-    } finally {
-      setSavingTracks(false);
     }
   };
 
@@ -11241,7 +10372,7 @@ export default function App() {
       updatedCurrs.push(currId);
     }
     setActiveCurriculumIds(updatedCurrs);
-    await saveConfigSettings(activeGradeLevels, updatedCurrs);
+    await saveActiveCurriculumIds(updatedCurrs);
   };
 
   // Fetch dashboard stats
@@ -11287,7 +10418,7 @@ export default function App() {
       setCurriculumStructures({});
       broadcastCurriculumSync();
     } catch (e: any) {
-      alert(e.message || 'فشلت إعادة تسمية المنهج');
+      notify(e.message || 'فشلت إعادة تسمية المنهج', 'error');
     }
   };
 
@@ -11329,14 +10460,14 @@ export default function App() {
       setCsAiActionModal(null);
       loadCsAiComplaints();
     } catch (e: any) {
-      alert(e.message || 'فشل تسجيل الإجراء المتخذ');
+      notify(e.message || 'فشل تسجيل الإجراء المتخذ', 'error');
     } finally {
       setCsAiActionSaving(false);
     }
   };
 
   const handleDeleteAiComplaint = async (reportId: string) => {
-    if (!confirm('هل أنت متأكد من حذف هذه الشكوى نهائياً؟')) return;
+    if (!(await askConfirm('هل أنت متأكد من حذف هذه الشكوى نهائياً؟'))) return;
     try {
       const res = await fetch('/api/admin/reports', {
         method: 'DELETE',
@@ -11346,7 +10477,7 @@ export default function App() {
       if (!res.ok) throw new Error('فشل حذف الشكوى');
       loadCsAiComplaints();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
@@ -11460,7 +10591,7 @@ export default function App() {
     if (!selectedCsStudent) return;
     const amount = amountToAdd !== undefined ? amountToAdd : parseFloat(csCoinsToAdd);
     if (isNaN(amount) || amount <= 0) {
-      alert('يرجى إدخال عدد نقاط صحيح أكبر من الصفر.');
+      notify('يرجى إدخال عدد نقاط صحيح أكبر من الصفر.', 'info');
       return;
     }
 
@@ -11506,9 +10637,9 @@ export default function App() {
       setCsDeleteConfirmModal(false);
       setSelectedCsStudent(null);
       loadCsStudents();
-      alert('تم حذف حساب الطالب وجميع بياناته بنجاح.');
+      notify('تم حذف حساب الطالب وجميع بياناته بنجاح.', 'success');
     } catch (e: any) {
-      alert(e.message || 'فشل حذف حساب الطالب.');
+      notify(e.message || 'فشل حذف حساب الطالب.', 'error');
     } finally {
       setCsActionLoading(false);
     }
@@ -11578,7 +10709,7 @@ export default function App() {
     if (!selectedCsStudent) return;
     const isCurrentlyBanned = selectedCsStudent.subscription_status === 'suspended';
     const actionText = isCurrentlyBanned ? 'رفع التجميد عن' : 'تجميد';
-    if (!confirm(`هل أنت متأكد من رغبتك في ${actionText} حساب الطالب ${selectedCsStudent.name}؟`)) return;
+    if (!(await askConfirm(`هل أنت متأكد من رغبتك في ${actionText} حساب الطالب ${selectedCsStudent.name}؟`))) return;
 
     setCsActionLoading(true);
     setCsActionFeedback(null);
@@ -11607,7 +10738,7 @@ export default function App() {
   const handleCsSendDirectNotification = async () => {
     if (!selectedCsStudent) return;
     if (!csDirectNotifTitle.trim() || !csDirectNotifBody.trim()) {
-      alert('يرجى كتابة عنوان الإشعار ومحتواه.');
+      notify('يرجى كتابة عنوان الإشعار ومحتواه.', 'info');
       return;
     }
     setCsActionLoading(true);
@@ -11641,7 +10772,7 @@ export default function App() {
     if (!selectedCsStudent) return;
     const amount = amountToDeduct !== undefined ? amountToDeduct : parseFloat(csCoinsToDeduct);
     if (isNaN(amount) || amount <= 0) {
-      alert('يرجى إدخال عدد نقاط موجب صحيح.');
+      notify('يرجى إدخال عدد نقاط موجب صحيح.', 'info');
       return;
     }
     setCsActionLoading(true);
@@ -11670,7 +10801,7 @@ export default function App() {
 
   const handleExportStudentsCsv = () => {
     if (!csStudents || csStudents.length === 0) {
-      alert('لا توجد بيانات طلاب للتصدير حالياً.');
+      notify('لا توجد بيانات طلاب للتصدير حالياً.', 'info');
       return;
     }
     const headers = ['الاسم', 'رقم الهاتف', 'البريد الإلكتروني', 'الصف الدراسي', 'الباقة', 'حالة الاشتراك', 'النقاط', 'نقاط الترتيب', 'الأجهزة النشطة', 'تطبيق PWA مثبت', 'منصة PWA', 'تاريخ تثبيت PWA', 'الرسائل المرسلة', 'أيام التفاعل (AI)', 'مجموعات البطاقات', 'إجمالي البطاقات', 'الاختبارات المنشأة', 'الاختبارات المنجزة', 'تاريخ التسجيل'];
@@ -11678,7 +10809,7 @@ export default function App() {
       `"${(u.name || '').replace(/"/g, '""')}"`,
       `"${(u.phone || '').replace(/"/g, '""')}"`,
       `"${(u.email || '').replace(/"/g, '""')}"`,
-      `"${(GRADE_NAMES[u.grade_level] || u.grade_level || '').replace(/"/g, '""')}"`,
+      `"${(gradeName(u.grade_level) || '').replace(/"/g, '""')}"`,
       `"${(u.plan_type === 'pro_1m' ? 'شهر برو' : u.plan_type === 'pro_2m' ? 'شهرين' : u.plan_type === 'pro_3m' ? '3 أشهر' : u.plan_type === 'max' ? 'ماكس' : 'مجاني')}"`,
       `"${(u.subscription_status === 'active' ? 'مشترك نشط' : u.subscription_status === 'expired' ? 'منتهي' : u.subscription_status === 'suspended' ? 'مجمد' : 'مجاني')}"`,
       `"${(u.coins ?? 0).toFixed(1)}"`,
@@ -11739,14 +10870,14 @@ export default function App() {
       setCsSupportNotesModal(null);
       loadCsSupportMessages();
     } catch (e: any) {
-      alert(e.message || 'فشل تحديث حالة رسالة الدعم');
+      notify(e.message || 'فشل تحديث حالة رسالة الدعم', 'error');
     } finally {
       setCsSupportSaving(false);
     }
   };
 
   const handleDeleteSupportMessage = async (id: string) => {
-    if (!confirm('هل أنت متأكد من حذف هذه الرسالة نهائياً؟')) return;
+    if (!(await askConfirm('هل أنت متأكد من حذف هذه الرسالة نهائياً؟'))) return;
     try {
       const res = await fetch('/api/admin/support-messages', {
         method: 'DELETE',
@@ -11756,7 +10887,7 @@ export default function App() {
       if (!res.ok) throw new Error('فشل حذف الرسالة');
       loadCsSupportMessages();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
@@ -11803,12 +10934,12 @@ export default function App() {
       if (!res.ok) throw new Error(data.error);
       loadAdminUsers();
     } catch (e: any) {
-      alert(e.message || 'فشل تحديث المستخدم');
+      notify(e.message || 'فشل تحديث المستخدم', 'error');
     }
   };
 
   const handleDeleteUser = async (id: string) => {
-    if (!confirm('هل أنت متأكد من رغبتك في حذف هذا المستخدم نهائياً؟')) return;
+    if (!(await askConfirm('هل أنت متأكد من رغبتك في حذف هذا المستخدم نهائياً؟'))) return;
     try {
       const res = await fetch('/api/admin/users', {
         method: 'DELETE',
@@ -11819,7 +10950,7 @@ export default function App() {
       if (!res.ok) throw new Error(data.error);
       loadAdminUsers();
     } catch (e: any) {
-      alert(e.message || 'فشل حذف المستخدم');
+      notify(e.message || 'فشل حذف المستخدم', 'error');
     }
   };
 
@@ -11863,7 +10994,7 @@ export default function App() {
       setNewNotifTarget('both');
       loadAdminNotifications();
     } catch (e: any) {
-      alert(e.message || 'فشل إنشاء الإشعار');
+      notify(e.message || 'فشل إنشاء الإشعار', 'error');
     } finally {
       setNotifCreateLoading(false);
     }
@@ -11879,12 +11010,12 @@ export default function App() {
       if (!res.ok) throw new Error('فشل تحديث الإشعار');
       loadAdminNotifications();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
   const handleDeleteNotification = async (id: string) => {
-    if (!confirm('هل تريد حذف هذا الإشعار نهائياً؟')) return;
+    if (!(await askConfirm('هل تريد حذف هذا الإشعار نهائياً؟'))) return;
     try {
       const res = await fetch('/api/admin/notifications', {
         method: 'DELETE',
@@ -11894,7 +11025,7 @@ export default function App() {
       if (!res.ok) throw new Error('فشل حذف الإشعار');
       loadAdminNotifications();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
@@ -11930,12 +11061,12 @@ export default function App() {
       if (!res.ok) throw new Error('فشل تحديث حالة البلاغ');
       loadAdminReports();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
   const handleDeleteReport = async (id: string) => {
-    if (!confirm('هل تريد حذف هذا البلاغ نهائياً؟')) return;
+    if (!(await askConfirm('هل تريد حذف هذا البلاغ نهائياً؟'))) return;
     try {
       const res = await fetch('/api/admin/reports', {
         method: 'DELETE',
@@ -11945,7 +11076,7 @@ export default function App() {
       if (!res.ok) throw new Error('فشل حذف البلاغ');
       loadAdminReports();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
@@ -11997,14 +11128,14 @@ export default function App() {
       setNewVersionMandatory(true);
       loadAdminVersions();
     } catch (e: any) {
-      alert(e.message || 'فشل إضافة الإصدار');
+      notify(e.message || 'فشل إضافة الإصدار', 'error');
     } finally {
       setVersionCreateLoading(false);
     }
   };
 
   const handleDeleteVersion = async (id: string) => {
-    if (!confirm('هل تريد حذف هذا الإصدار نهائياً؟')) return;
+    if (!(await askConfirm('هل تريد حذف هذا الإصدار نهائياً؟'))) return;
     try {
       const res = await fetch('/api/admin/versions', {
         method: 'DELETE',
@@ -12014,7 +11145,7 @@ export default function App() {
       if (!res.ok) throw new Error('فشل حذف الإصدار');
       loadAdminVersions();
     } catch (e: any) {
-      alert(e.message);
+      notify(e.message, 'error');
     }
   };
 
@@ -12088,7 +11219,7 @@ export default function App() {
         runProgressiveEmbedding(currId, subject, pendingCount);
       } else {
         fetchCurriculumStructure(editGrade, subject, true);
-        alert('تم تحديث محتوى المنهج الدراسي بنجاح.');
+        notify('تم تحديث محتوى المنهج الدراسي بنجاح.', 'success');
       }
     } catch (err: any) {
       setEditModalError(err.message || 'فشل الحفظ.');
@@ -12552,839 +11683,484 @@ export default function App() {
     );
   }
 
+  const dailyAllowance = isUserSubscribed ? (KASHIER_PLANS[user?.plan_type as string]?.dailyCoins ?? 80) : 5;
+  const planShortLabel = user?.plan_type === 'pro_3m' || user?.plan_type === 'max'
+    ? 'باقة 3 شهور'
+    : user?.plan_type === 'pro_2m' ? 'باقة شهرين' : user?.plan_type === 'pro_1m' || user?.plan_type === 'pro' ? 'باقة شهر' : 'الباقة المجانية';
+  const pendingQuestCount = dailyQuestsData?.quests?.filter((q: any) => !q.completed).length || 0;
+  const hasUnclaimedQuest = Boolean(dailyQuestsData?.quests?.some((q: any) => q.completed && !q.claimed));
+  const closeSidebarIfOverlay = () => { if (sidebarOverlay) setSidebarOpen(false); };
+  const goTab = (tab: typeof activeTab) => { setActiveTab(tab); closeSidebarIfOverlay(); };
+  const filteredSessions = sessions.filter(s => !searchQuery || formatSessionTitle(s.title).toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase()));
+  const pathSubtitle = user
+    ? [gradeName(user.grade_level), user.track_id ? trackName(educationCatalog, user.track_id) : ''].filter(Boolean).join(' · ')
+    : 'معلمك الذكي للمنهج المصري';
+
+  const sidebarSections: { title: string; items: { icon: React.ReactNode; label: string; action: () => void; isActive: boolean; badge?: string | null; badgeTone?: 'gold' }[] }[] = [
+    {
+      title: 'المذاكرة والذكاء الاصطناعي',
+      items: [
+        { icon: <MessageSquare size={17} />, label: 'الدردشة والمساعد', action: () => goTab('chat'), isActive: activeTab === 'chat' },
+        {
+          icon: <ListChecks size={17} />,
+          label: 'المهام والإنجاز اليومي',
+          action: () => goTab('tasks'),
+          isActive: activeTab === 'tasks',
+          badge: hasUnclaimedQuest ? 'مكافأة' : pendingQuestCount ? `${pendingQuestCount} متبقية` : null,
+          badgeTone: 'gold'
+        },
+        { icon: <FileText size={17} />, label: 'بنك الامتحانات', action: () => goTab('exams'), isActive: activeTab === 'exams' },
+        ...(user ? [{ icon: <Layers size={17} />, label: 'المدرب الذكي', action: () => goTab('flashcards'), isActive: activeTab === 'flashcards' }] : []),
+        { icon: <Bookmark size={17} />, label: 'دفتري الذكي', action: handleOpenNotebook, isActive: showNotebookModal },
+      ]
+    },
+    {
+      title: 'المسار والتفوق',
+      items: [
+        ...(user ? [{ icon: <Trophy size={17} />, label: 'المسابقة ولوحة المتصدرين', action: () => goTab('leaderboard'), isActive: activeTab === 'leaderboard' }] : []),
+        { icon: <MapIcon size={17} />, label: 'خريطة المنهج', action: () => { setShowRoadmapModal(true); closeSidebarIfOverlay(); }, isActive: showRoadmapModal },
+      ]
+    },
+    {
+      title: 'الحساب والخدمات',
+      items: [
+        { icon: <CreditCard size={17} />, label: isUserSubscribed ? 'اشتراكي الحالي' : 'باقات الاشتراك', action: () => goTab('subscriptions'), isActive: activeTab === 'subscriptions' || activeTab === 'beta' },
+        ...(user ? [{ icon: <User size={17} />, label: 'الملف الشخصي', action: () => goTab('profile'), isActive: activeTab === 'profile' }] : []),
+        ...(user?.role === 'admin' ? [{ icon: <Settings size={17} />, label: 'لوحة التحكم', action: () => goTab('admin'), isActive: activeTab === 'admin' }] : []),
+        { icon: <Download size={17} />, label: 'تحميل التطبيق', action: () => { window.location.href = '/download'; }, isActive: false },
+        { icon: <Compass size={17} />, label: 'جولة في المنصة', action: () => { startTour(getTourScreenForTab(activeTab)); closeSidebarIfOverlay(); }, isActive: false },
+      ]
+    }
+  ];
+
   return (
-    <div 
-      suppressHydrationWarning={true} 
-      className="flex h-screen w-screen overflow-hidden bg-gradient-light animate-fade-in" 
-      style={{ 
-        display: 'flex', 
-        flexDirection: 'row-reverse',
-        padding: isMobile ? '0' : '16px',
-        gap: isMobile ? '0' : '16px'
-      }}
+    <div
+      suppressHydrationWarning={true}
+      className="app-shell animate-fade-in"
     >
-      
-      {/* Mobile Sidebar Overlay Backdrop */}
-      {isMobile && sidebarOpen && (
-        <div 
-          className="mobile-overlay" 
-          onClick={() => setSidebarOpen(false)} 
-        />
+
+      {sidebarOverlay && sidebarOpen && (
+        <div className="mobile-overlay" onClick={() => setSidebarOpen(false)} />
       )}
 
-      {/* Sidebar Panel */}
-      <aside 
-        className="glass flex flex-col justify-between border-r sidebar-transition" 
-        style={{ 
-          width: sidebarOpen ? (isMobile ? '280px' : '320px') : '0px', 
-          minWidth: sidebarOpen ? (isMobile ? '280px' : '320px') : '0px',
-          display: 'flex', 
-          flexDirection: 'column', 
-          borderTop: sidebarOpen && !isMobile ? '1px solid var(--border-color)' : 'none',
-          borderBottom: sidebarOpen && !isMobile ? '1px solid var(--border-color)' : 'none',
-          borderLeft: sidebarOpen && !isMobile ? '1px solid var(--border-color)' : 'none',
-          borderRight: sidebarOpen ? '1px solid var(--border-color)' : 'none', 
-          borderRadius: isMobile ? '0' : 'var(--radius-lg)',
-          height: '100%', 
-          background: 'var(--sidebar-bg)', 
-          zIndex: 999,
-          position: isMobile ? 'fixed' : 'relative',
-          right: 0,
-          top: 0,
-          bottom: 0,
-          overflow: 'hidden',
-          transition: 'var(--transition)',
-          boxShadow: isMobile ? 'none' : 'var(--shadow-md)'
-        }}
+      <aside
+        className={`app-sidebar ${sidebarOpen ? 'open' : 'closed'} ${sidebarOverlay ? 'overlay' : 'docked'}`}
+        style={{ width: sidebarOpen ? (isMobile ? '290px' : '312px') : '0px', minWidth: sidebarOpen ? (isMobile ? '290px' : '312px') : '0px' }}
+        aria-hidden={!sidebarOpen}
       >
-        
-        {/* Top Logo & Options */}
-        <div style={{ padding: '20px 18px', flex: 1, display: 'flex', flexDirection: 'column', gap: '12px', overflowY: 'auto', position: 'relative' }} className="custom-scrollbar">
-          
-          {/* Close button on Mobile */}
-          {isMobile && (
-            <button 
-              onClick={() => setSidebarOpen(false)} 
-              style={{ 
-                background: 'var(--alpha-white-4)', 
-                border: '1px solid var(--border-color)', 
-                color: 'var(--text-muted)', 
-                position: 'absolute', 
-                top: '16px', 
-                left: '16px', 
-                cursor: 'pointer',
-                width: '32px',
-                height: '32px',
-                borderRadius: '8px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <X size={16} />
-            </button>
-          )}
-
-          {/* Brand Header */}
-          <div style={{ textAlign: 'center', paddingTop: isMobile ? '8px' : '4px', marginBottom: '4px' }}>
-            <div className="brand-logo-frame" style={{ width: '52px', height: '52px', borderRadius: '16px', marginBottom: '8px' }}>
-              <img src="/logo.png" alt="EGS AI Logo" style={{ width: '88%', height: '88%', objectFit: 'contain' }} />
+        <div className="app-sidebar-scroll custom-scrollbar">
+          <div className="sidebar-brand-row">
+            <BrandMark size={42} />
+            <div className="sidebar-brand-text">
+              <BrandWordmark size="1.25rem" />
+              <span>{pathSubtitle}</span>
             </div>
-            <h1 style={{ fontSize: '1.45rem', fontWeight: 900, letterSpacing: '-0.5px', margin: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-              <span className="text-gradient">EGS AI</span>
-            </h1>
-            <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, marginTop: '2px' }}>
-              {user ? GRADE_NAMES[user.grade_level] : 'منصة المنهج المصري الذكية'}
-            </p>
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(false)}
+              className="header-icon-btn sidebar-collapse-btn"
+              title="إغلاق القائمة الجانبية"
+              aria-label="إغلاق القائمة الجانبية"
+            >
+              {sidebarOverlay ? <X size={18} /> : <PanelRightClose size={18} />}
+            </button>
           </div>
 
-          {/* Primary CTA: New Chat */}
           <button
             onClick={() => {
               setActiveSessionId(null);
               setMessages([]);
-              setActiveTab('chat');
-              if (isMobile) setSidebarOpen(false);
+              goTab('chat');
             }}
-            className="btn-primary"
-            style={{
-              width: '100%',
-              padding: '10px 14px',
-              borderRadius: '12px',
-              fontSize: '0.86rem',
-              fontWeight: 800,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-              border: 'none',
-              cursor: 'pointer',
-              boxShadow: 'var(--shadow-glow)'
-            }}
+            className="btn-primary sidebar-new-chat-btn"
           >
-            <Plus size={16} />
+            <Plus size={18} strokeWidth={2.5} />
             <span>محادثة دراسية جديدة</span>
           </button>
 
-          {/* Section: Previous Conversations (Top of Sidebar, Click to Open) */}
-          <div className="sidebar-section-container" style={{ marginTop: '0px' }}>
+          <div className="sidebar-history">
             <button
               type="button"
               onClick={() => setPreviousConversationsOpen(prev => !prev)}
-              className={`sidebar-nav-btn ${previousConversationsOpen ? 'active' : ''}`}
-              style={{
-                width: '100%',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '9px 12px',
-                borderRadius: '12px',
-                border: previousConversationsOpen ? '1.5px solid var(--border-primary)' : '1px solid var(--border-color)',
-                background: previousConversationsOpen ? 'var(--primary-light)' : 'var(--card-bg)',
-                color: previousConversationsOpen ? 'var(--primary-color)' : 'var(--text-main)',
-                cursor: 'pointer',
-                transition: 'var(--transition-fast)',
-                fontWeight: 700,
-                fontSize: '0.84rem'
-              }}
-              title={previousConversationsOpen ? "إغلاق قائمة المحادثات السابقة" : "فتح قائمة المحادثات السابقة"}
+              className="sidebar-history-toggle"
+              aria-expanded={previousConversationsOpen}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <History size={16} style={{ color: 'var(--primary-color)', flexShrink: 0 }} />
+              <span className="sidebar-history-title">
+                <MessageSquare size={17} />
                 <span>المحادثات السابقة</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                {user && sessions.length > 0 && (
-                  <span
-                    className="sidebar-badge"
-                    style={{
-                      fontSize: '0.72rem',
-                      padding: '2px 7px',
-                      borderRadius: '10px',
-                      background: previousConversationsOpen ? 'var(--primary-color)' : 'var(--alpha-white-8)',
-                      color: previousConversationsOpen ? '#ffffff' : 'var(--text-muted)',
-                      fontWeight: 700
-                    }}
-                  >
-                    {sessions.length}
-                  </span>
-                )}
-                {previousConversationsOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-              </div>
+              </span>
+              <span className="sidebar-history-meta">
+                {user && sessions.length > 0 && <span className="sidebar-count-badge">{sessions.length}</span>}
+                {previousConversationsOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </span>
             </button>
 
             {previousConversationsOpen && (
-              <div
-                className="animate-fade-in-fast"
-                style={{
-                  background: 'var(--alpha-white-3)',
-                  border: '1px solid var(--border-color)',
-                  borderRadius: '12px',
-                  padding: '8px',
-                  marginTop: '4px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '6px'
-                }}
-              >
-                {/* Search input (visible when user is logged in and sessions exist) */}
+              <div className="sidebar-history-body animate-fade-in-fast">
                 {user && sessions.length > 0 && (
-                  <div style={{ position: 'relative', width: '100%' }}>
+                  <div className="sidebar-search">
+                    <Search size={15} aria-hidden="true" />
                     <input
                       type="text"
-                      placeholder="البحث في المحادثات..."
+                      placeholder="ابحث في محادثاتك"
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      style={{
-                        width: '100%',
-                        padding: '6px 10px 6px 28px',
-                        fontSize: '0.78rem',
-                        borderRadius: '8px',
-                        border: '1px solid var(--border-color)',
-                        background: 'var(--input-bg)',
-                        color: 'var(--text-main)',
-                        outline: 'none',
-                        direction: 'rtl'
-                      }}
+                      aria-label="ابحث في محادثاتك"
                     />
-                    {searchQuery ? (
-                      <button
-                        type="button"
-                        onClick={() => setSearchQuery('')}
-                        style={{
-                          position: 'absolute',
-                          left: '6px',
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          background: 'transparent',
-                          border: 'none',
-                          color: 'var(--text-muted)',
-                          cursor: 'pointer',
-                          padding: '2px',
-                          display: 'flex',
-                          alignItems: 'center'
-                        }}
-                        title="مسح البحث"
-                      >
-                        <X size={12} />
+                    {searchQuery && (
+                      <button type="button" onClick={() => setSearchQuery('')} title="مسح البحث" aria-label="مسح البحث">
+                        <X size={13} />
                       </button>
-                    ) : (
-                      <Search
-                        size={13}
-                        style={{
-                          position: 'absolute',
-                          left: '8px',
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          color: 'var(--text-muted)',
-                          pointerEvents: 'none'
-                        }}
-                      />
                     )}
                   </div>
                 )}
 
-                {/* Sessions list */}
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '3px',
-                    maxHeight: '260px',
-                    overflowY: 'auto'
-                  }}
-                  className="custom-scrollbar"
-                >
+                <div className="sidebar-session-list custom-scrollbar">
                   {sessionsLoading ? (
-                    <div style={{ display: 'flex', justifyContent: 'center', padding: '14px' }}>
+                    <div className="sidebar-session-empty">
                       <Loader2 size={16} className="animate-spin" style={{ color: 'var(--primary-color)' }} />
                     </div>
                   ) : !user ? (
-                    <div style={{ padding: '12px 8px', textAlign: 'center' }}>
-                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
-                        سجل الدخول لحفظ واستعراض محادثاتك السابقة
-                      </p>
+                    <div className="sidebar-session-empty">
+                      <p>سجل الدخول لحفظ محادثاتك والرجوع لها في أي وقت</p>
                       <button
                         type="button"
-                        onClick={() => {
-                          setAuthTab('login');
-                          setShowAuthModal(true);
-                          if (isMobile) setSidebarOpen(false);
-                        }}
-                        className="btn-primary"
-                        style={{ padding: '6px 12px', fontSize: '0.78rem', borderRadius: '8px', border: 'none', cursor: 'pointer' }}
+                        onClick={() => { setAuthTab('login'); setShowAuthModal(true); closeSidebarIfOverlay(); }}
+                        className="btn-secondary"
+                        style={{ padding: '7px 14px', fontSize: '0.8rem' }}
                       >
                         تسجيل الدخول
                       </button>
                     </div>
-                  ) : sessions.filter(s => !searchQuery || formatSessionTitle(s.title).toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
-                    <div style={{ padding: '12px 8px', textAlign: 'center' }}>
-                      <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, opacity: 0.7 }}>
-                        {searchQuery ? 'لا توجد نتائج مطابقة' : 'لا توجد محادثات سابقة'}
-                      </p>
+                  ) : filteredSessions.length === 0 ? (
+                    <div className="sidebar-session-empty">
+                      <p>{searchQuery ? 'لا توجد نتائج مطابقة' : 'لا توجد محادثات سابقة بعد'}</p>
                     </div>
                   ) : (
-                    sessions
-                      .filter(s => !searchQuery || formatSessionTitle(s.title).toLowerCase().includes(searchQuery.toLowerCase()) || s.subject_name?.toLowerCase().includes(searchQuery.toLowerCase()))
-                      .map((s) => (
-                        <div
-                          key={s.id}
-                          onClick={() => {
-                            setActiveSessionId(s.id);
-                            if (s.subject_name) {
-                              setChatSubject(s.subject_name);
-                              try { localStorage.setItem('egs_last_subject', s.subject_name); } catch (e) {}
-                            }
-                            if ((s as any).mode) {
-                              setChatMode((s as any).mode);
-                            }
-                            if (isMobile) setSidebarOpen(false);
-                          }}
-                          className={`sidebar-session-item ${activeSessionId === s.id ? 'active' : ''}`}
-                          style={{
-                            padding: '7px 10px',
-                            borderRadius: '8px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            cursor: 'pointer',
-                            transition: 'var(--transition-fast)'
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, overflow: 'hidden' }}>
-                            <MessageSquare size={13} style={{ opacity: 0.6, flexShrink: 0 }} />
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: '0.82rem' }}>
-                              {formatSessionTitle(s.title)}
-                            </span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-                            <span style={{ fontSize: '0.62rem', background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '1px 6px', borderRadius: '6px', whiteSpace: 'nowrap', fontWeight: 600 }}>
-                              {s.subject_name}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={(e) => handleDeleteSession(s.id, e)}
-                              style={{
-                                background: 'transparent',
-                                border: 'none',
-                                color: 'var(--danger-color)',
-                                cursor: 'pointer',
-                                padding: '3px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                borderRadius: '4px',
-                                transition: 'var(--transition-fast)',
-                                opacity: 0.7
-                              }}
-                              className="session-delete-btn"
-                              title="حذف المحادثة"
-                            >
-                              <Trash size={12} />
-                            </button>
-                          </div>
+                    filteredSessions.map((s) => (
+                      <div
+                        key={s.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => {
+                          setActiveSessionId(s.id);
+                          if (s.subject_name) {
+                            setChatSubject(s.subject_name);
+                            try { localStorage.setItem('egs_last_subject', s.subject_name); } catch (e) {}
+                          }
+                          if ((s as any).mode) setChatMode((s as any).mode);
+                          setActiveTab('chat');
+                          closeSidebarIfOverlay();
+                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLElement).click(); }}
+                        className={`sidebar-session-item ${activeSessionId === s.id ? 'active' : ''}`}
+                      >
+                        <div className="sidebar-session-text">
+                          <span className="sidebar-session-title">{formatSessionTitle(s.title)}</span>
+                          <span className="sidebar-session-meta">
+                            {s.subject_name && <span className="sidebar-session-subject">{s.subject_name}</span>}
+                            <span>{timeAgoAr(s.updated_at || s.created_at)}</span>
+                          </span>
                         </div>
-                      ))
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteSession(s.id, e)}
+                          className="session-delete-btn"
+                          title="حذف المحادثة"
+                          aria-label="حذف المحادثة"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))
                   )}
                 </div>
               </div>
             )}
           </div>
 
-          {/* Navigation Category 1: Study & AI Tools */}
-          <div className="sidebar-section-container">
-            <div className="sidebar-category-header">
-              <BookOpen size={12} color="var(--primary-color)" />
-              <span>المذاكرة والذكاء الاصطناعي</span>
-            </div>
-            {[
-              { icon: <MessageSquare size={16} />, label: 'الدردشة والمساعد الذكي', action: () => { setActiveTab('chat'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'chat' },
-              { 
-                icon: <CheckCircle2 size={16} />, 
-                label: 'المهام والإنجاز اليومي', 
-                action: () => { setActiveTab('tasks'); if (isMobile) setSidebarOpen(false); }, 
-                isActive: activeTab === 'tasks',
-                badge: dailyQuestsData?.quests?.some((q: any) => q.completed && !q.claimed) 
-                  ? 'مكافأة!' 
-                  : (dailyQuestsData?.quests?.filter((q: any) => !q.completed).length 
-                      ? `${dailyQuestsData.quests.filter((q: any) => !q.completed).length} متبقية` 
-                      : null)
-              },
-              { icon: <FileText size={16} />, label: 'بنك الامتحانات التقييمية', action: () => { setActiveTab('exams'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'exams' },
-              ...(user ? [
-                { icon: <Brain size={16} />, label: 'المدرب الذكي (الكروت)', action: () => { setActiveTab('flashcards'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'flashcards' },
-              ] : []),
-              { icon: <Bookmark size={16} />, label: 'دفتري الذكي (القوانين)', action: handleOpenNotebook, isActive: showNotebookModal },
-            ].map((item: any, idx) => (
-              <button
-                key={idx}
-                onClick={item.action}
-                className={`sidebar-nav-btn ${item.isActive ? 'active' : ''}`}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }}>
+          {sidebarSections.map(section => section.items.length > 0 && (
+            <div key={section.title} className="sidebar-section-container">
+              <div className="sidebar-category-header">{section.title}</div>
+              {section.items.map(item => (
+                <button
+                  key={item.label}
+                  onClick={item.action}
+                  className={`sidebar-nav-btn ${item.isActive ? 'active' : ''}`}
+                >
                   {item.icon}
-                  <span>{item.label}</span>
-                </div>
-                {item.badge && (
-                  <span className={`sidebar-badge ${item.badge === 'مكافأة!' ? 'gold' : ''}`}>
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-
-          {/* Navigation Category 2: Academic Progress & Competitions */}
-          <div className="sidebar-section-container">
-            <div className="sidebar-category-header">
-              <Trophy size={12} color="#FFB703" />
-              <span>المسار والتفوق الأكاديمي</span>
+                  <span className="sidebar-nav-label">{item.label}</span>
+                  {item.badge && <span className={`sidebar-badge ${item.badgeTone === 'gold' ? 'gold' : ''}`}>{item.badge}</span>}
+                </button>
+              ))}
             </div>
-            {[
-              ...(user ? [
-                { icon: <Trophy size={16} />, label: 'المسابقة ولوحة المتصدرين', action: () => { setActiveTab('leaderboard'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'leaderboard' },
-              ] : []),
-              { icon: <BookOpen size={16} />, label: 'خريطة المنهج والدروس', action: () => { setShowRoadmapModal(true); if (isMobile) setSidebarOpen(false); }, isActive: showRoadmapModal },
-            ].map((item, idx) => (
-              <button
-                key={idx}
-                onClick={item.action}
-                className={`sidebar-nav-btn ${item.isActive ? 'active' : ''}`}
-              >
-                {item.icon}
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </div>
-
-          {/* Navigation Category 3: Account & Platform Services */}
-          <div className="sidebar-section-container">
-            <div className="sidebar-category-header">
-              <ShieldCheck size={12} color="var(--tech-cyan)" />
-              <span>الحساب والخدمات</span>
-            </div>
-            {[
-              ...(isUserSubscribed ? [
-                { icon: <ShieldCheck size={16} />, label: 'اشتراكي الحالي', action: () => { setActiveTab('subscriptions'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'subscriptions' || activeTab === 'beta' }
-              ] : [
-                { icon: <CreditCard size={16} />, label: 'باقات الاشتراك', action: () => { setActiveTab('subscriptions'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'subscriptions' || activeTab === 'beta' }
-              ]),
-              ...(user ? [
-                { icon: <User size={16} />, label: 'الملف الشخصي', action: () => { setActiveTab('profile'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'profile' }
-              ] : []),
-              ...(user?.role === 'admin' ? [{ icon: <Settings size={16} />, label: 'لوحة التحكم الإدارية', action: () => { setActiveTab('admin'); if (isMobile) setSidebarOpen(false); }, isActive: activeTab === 'admin' }] : []),
-              { icon: <Phone size={16} />, label: 'تواصل معنا', action: () => { window.location.href = '/contact'; }, isActive: false },
-              { icon: <Download size={16} />, label: 'تحميل وتثبيت التطبيق', action: () => { window.location.href = '/download'; }, isActive: false },
-              {
-                icon: <Compass size={16} />,
-                label: 'جولة في المنصة',
-                action: () => {
-                  startTour(getTourScreenForTab(activeTab));
-                  if (isMobile) setSidebarOpen(false);
-                },
-                isActive: false
-              }
-            ].map((item, idx) => (
-              <button
-                key={idx}
-                onClick={item.action}
-                className={`sidebar-nav-btn ${item.isActive ? 'active' : ''}`}
-              >
-                {item.icon}
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </div>
-
+          ))}
         </div>
 
-        {/* Footer Identity Section */}
-        <div style={{ padding: '16px 18px', borderTop: '1px solid var(--border-color)', background: 'var(--sidebar-bg)' }}>
+        <div className="app-sidebar-footer">
           {user ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <div style={{
-                  background: 'var(--primary-color)',
-                  color: 'var(--text-on-primary)',
-                  width: '36px', height: '36px',
-                  borderRadius: '10px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontWeight: 800,
-                  fontSize: '1rem',
-                  flexShrink: 0,
-                  boxShadow: '0 2px 10px var(--primary-glow)'
-                }}>
-                  {user.name ? user.name[0].toUpperCase() : <User size={16} />}
+            <div className="sidebar-user-card">
+              <div className="sidebar-user-row">
+                <span className="user-avatar-circle" aria-hidden="true">{user.name ? user.name.trim()[0] : <User size={16} />}</span>
+                <div className="sidebar-user-text">
+                  <strong>{user.name}</strong>
+                  <span className={isUserSubscribed ? 'plan-active' : ''}>
+                    {isUserSubscribed ? `${planShortLabel} · متبقي ${daysAr(remainingDays)}` : `${planShortLabel} · ${dailyAllowance} نقاط يومياً`}
+                  </span>
                 </div>
-                <div style={{ flex: 1, overflow: 'hidden' }}>
-                  <h4 style={{ fontSize: '0.88rem', fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-main)', margin: 0 }}>{user.name}</h4>
-                  <div style={{ marginTop: '3px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                    <span className={`plan-badge plan-badge-${user.plan_type?.startsWith('pro') ? 'pro' : user.plan_type === 'max' ? 'max' : 'free'}`}>
-                      {user.plan_type === 'pro_3m' || user.plan_type === 'max' ? 'باقة 3 أشهر' :
-                       user.plan_type === 'pro_2m' ? 'باقة شهرين' :
-                       user.plan_type === 'pro_1m' || user.plan_type === 'pro' ? 'باقة شهر' :
-                       'باقة مجانية (5 عملات يومياً)'}
-                    </span>
-                    <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                      الرصيد: {coins.toFixed(2)} عملة ذكاء
-                    </span>
-                  </div>
-                </div>
+                <button onClick={handleLogout} className="sidebar-logout-btn" title="تسجيل الخروج" aria-label="تسجيل الخروج">
+                  <LogOut size={17} />
+                </button>
               </div>
-              
-              <button
-                onClick={handleLogout}
-                className="btn-danger"
-                style={{ width: '100%', padding: '8px', fontSize: '0.82rem', borderRadius: 'var(--radius-sm)' }}
-              >
-                <LogOut size={14} />
-                <span>تسجيل الخروج</span>
-              </button>
+              <div className="sidebar-balance">
+                <div className="sidebar-balance-labels">
+                  <span>رصيد الذكاء اليوم</span>
+                  <span className="num" dir="ltr">{Number(coins.toFixed(1))} / {dailyAllowance}</span>
+                </div>
+                <div className="meter"><span style={{ width: `${Math.max(0, Math.min(100, (coins / dailyAllowance) * 100))}%` }} /></div>
+              </div>
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center', marginBottom: '2px' }}>
-                رصيدك اليومي المجاني: {coins.toFixed(2)} عملة ذكاء
-              </div>
+            <div className="sidebar-guest-card">
+              <p>سجّل مجاناً واحصل على 20 نقطة ذكاء للتجربة</p>
+              <button
+                onClick={() => { setAuthTab('register'); setShowAuthModal(true); }}
+                className="btn-primary"
+                style={{ width: '100%', padding: '11px 14px', fontSize: '0.88rem' }}
+              >
+                إنشاء حساب مجاني
+              </button>
               <button
                 onClick={() => { setAuthTab('login'); setShowAuthModal(true); }}
-                className="btn-primary"
-                style={{ width: '100%', padding: '11px 14px', fontSize: '0.88rem', borderRadius: 'var(--radius-sm)', border: 'none', cursor: 'pointer' }}
+                className="btn-secondary"
+                style={{ width: '100%', padding: '9px 14px', fontSize: '0.84rem' }}
               >
-                تسجيل الدخول / إنشاء حساب
+                تسجيل الدخول
               </button>
             </div>
           )}
 
-          {/* Quick Footer Policy & Contact Links */}
-          <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid var(--border-color)', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', flexWrap: 'wrap', fontSize: '0.72rem' }}>
-            <a href="/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>الخصوصية</a>
-            <span style={{ color: 'var(--border-color)' }}>•</span>
-            <a href="/terms#refund" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>الإرجاع والاشتراكات</a>
-            <span style={{ color: 'var(--border-color)' }}>•</span>
-            <a href="/contact" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>تواصل معنا</a>
-            <span style={{ color: 'var(--border-color)' }}>•</span>
-            <a href="/download" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>تحميل التطبيق</a>
-            <span style={{ color: 'var(--border-color)' }}>•</span>
-            <a href="/delete-account" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--text-muted)', textDecoration: 'none' }}>حذف الحساب</a>
-          </div>
+          <nav className="sidebar-footer-links" aria-label="روابط السياسات والتواصل">
+            <a href="/terms" target="_blank" rel="noopener noreferrer">الشروط</a>
+            <a href="/privacy" target="_blank" rel="noopener noreferrer">الخصوصية</a>
+            <a href="/contact" target="_blank" rel="noopener noreferrer">تواصل معنا</a>
+          </nav>
         </div>
-
-
       </aside>
 
       {/* Main Workspace Panel */}
-      <main 
-        style={{ 
-          flex: 1, 
-          height: '100%', 
-          overflow: 'hidden', 
-          display: 'flex', 
-          flexDirection: 'column', 
-          position: 'relative',
-          borderRadius: isMobile ? '0' : 'var(--radius-lg)',
-          border: isMobile ? 'none' : '1px solid var(--border-color)',
-          boxShadow: isMobile ? 'none' : 'var(--shadow-md)',
-          background: 'var(--bg-color)'
-        }}
-      >
-        
-        {/* VIEW 1: Chat Workspace */}
-        {activeTab === 'chat' && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', height: '100%', background: 'var(--bg-color)' }}>
-            
-            {/* Header */}
-            <header 
-              className="header-responsive"
-              style={{
-                padding: isMobile ? '0 10px' : '12px 24px',
-                paddingTop: isMobile ? 'calc(env(safe-area-inset-top, 0px) + 2px)' : '0',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                background: 'var(--header-bg, var(--card-bg))',
-                borderBottom: '1px solid var(--border-color)',
-                height: isMobile ? 'calc(58px + env(safe-area-inset-top, 0px))' : '64px',
-                zIndex: 5,
-                color: 'var(--text-main)',
-                direction: 'rtl'
-              }}
-            >
-              {/* Brand Context (RTL Right): Sidebar Toggle & Subject Capsule */}
-              <div className="header-brand-context" style={{ order: isMobile ? 1 : 2 }}>
+      <main className="app-main">
+        {(activeTab === 'chat' || (!isMobile && activeTab !== 'admin')) && (
+          <header className="header-responsive app-header">
+            <div className="header-brand-context">
+              {(!sidebarOpen || sidebarOverlay) && (
                 <button
                   type="button"
-                  onClick={() => { if (!isTourOpen) setSidebarOpen(!sidebarOpen); }}
+                  onClick={() => { if (!isTourOpen) setSidebarOpen(true); }}
                   className="header-icon-btn"
-                  style={{ borderRadius: 'var(--radius-sm)', width: isMobile ? '38px' : '34px', height: isMobile ? '38px' : '34px' }}
-                  title={sidebarOpen ? "إغلاق القائمة الجانبية" : "فتح القائمة الجانبية"}
+                  title="فتح القائمة الجانبية"
+                  aria-label="فتح القائمة الجانبية"
+                  aria-expanded={sidebarOpen}
                 >
-                  {sidebarOpen ? <PanelLeftClose size={isMobile ? 20 : 18} /> : <PanelLeftOpen size={isMobile ? 20 : 18} />}
+                  <PanelRightOpen size={19} />
                 </button>
+              )}
+              {!sidebarOpen && !isMobile && (
+                <button type="button" className="header-wordmark-btn" onClick={() => setActiveTab('chat')} aria-label="الرئيسية" style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                  <BrandMark size={28} />
+                  <BrandWordmark size="1.2rem" />
+                </button>
+              )}
 
-                {chatSubject && (
-                  <div 
-                    onClick={() => { if (!isTourOpen) setShowSubjectSheet(true); }}
-                    className="header-subject-capsule"
-                    title="المادة المقررة الحالية — اضغط لتغيير المادة"
+              {chatSubject && (activeTab === 'chat' || !isMobile) && (
+                <button
+                  type="button"
+                  onClick={() => { if (!isTourOpen) setShowSubjectSheet(true); }}
+                  className="header-subject-capsule"
+                  title="المادة الحالية — اضغط لتغيير المادة"
+                >
+                  <span className="subject-tag">
+                    {getSubjectIcon(chatSubject, 17)}
+                    <span>{chatSubject}</span>
+                  </span>
+                  {!isMobile && (
+                    <span className="grade-tag">· {user ? gradeName(user.grade_level) : gradeName(chatGrade)}</span>
+                  )}
+                  <ChevronDown size={15} className="capsule-chevron" />
+                </button>
+              )}
+
+              {!isMobile && activeTab === 'chat' && activeSessionId && messages.length > 0 && (
+                <span className="header-session-title">
+                  {formatSessionTitle(sessions.find(s => s.id === activeSessionId)?.title || '')}
+                </span>
+              )}
+            </div>
+
+            <div className="header-actions">
+              {user && !isMobile && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => goTab('tasks')}
+                    className={`header-stat-pill tasks ${activeTab === 'tasks' ? 'active' : ''}`}
+                    title="مهام المذاكرة اليومية"
                   >
-                    <span className="subject-tag">
-                      {getSubjectIcon(chatSubject, isMobile ? 16 : 18)}
-                      <span>{chatSubject}</span>
+                    <ListChecks size={16} />
+                    <span className="pill-label strong">المهام</span>
+                    <span className="pill-value muted">
+                      {dailyQuestsData?.quests ? `${dailyQuestsData.quests.filter((q: any) => q.completed).length}/${dailyQuestsData.quests.length}` : '0/3'}
                     </span>
-                    {!isMobile && (
-                      <>
-                        <span className="grade-divider" />
-                        <span className="grade-tag">{user ? GRADE_NAMES[user.grade_level] : GRADE_NAMES[chatGrade]}</span>
-                      </>
+                    {hasUnclaimedQuest && <span className="tasks-dot-glow" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => goTab(isUserSubscribed ? 'profile' : 'subscriptions')}
+                    className={`header-stat-pill coins ${coins <= 5 && !isUserSubscribed ? 'low' : ''}`}
+                    title={isUserSubscribed ? 'رصيد نقاط الذكاء اليومية' : 'رصيد نقاط الذكاء — اضغط للاشتراك'}
+                  >
+                    <Coins size={16} />
+                    <span className="pill-value">{Number(coins.toFixed(1))}</span>
+                    <span className="pill-label">رصيد</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => goTab('leaderboard')}
+                    className="header-stat-pill points"
+                    title="نقاط الترتيب — اضغط لعرض لوحة المتصدرين"
+                  >
+                    <Star size={16} />
+                    <span className="pill-value">{points.toLocaleString('en-US')}</span>
+                    <span className="pill-label">ترتيب</span>
+                    {pointsBonusAnim && <span className="points-plus-badge">+{pointsBonusAnim}</span>}
+                  </button>
+                  {activeTab === 'chat' && messages.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={cycleChatFont}
+                      className="header-icon-btn"
+                      title="تكبير خط المحادثة"
+                      aria-label="تكبير خط المحادثة"
+                    >
+                      <Type size={17} />
+                    </button>
+                  )}
+                  <span className="header-stat-divider" />
+                </>
+              )}
+
+              {user && isMobile && (
+                <div className="header-student-stats" role="group" aria-label="رصيدك">
+                  <button
+                    type="button"
+                    onClick={() => { if (isUserSubscribed) goTab('profile'); else setShowUpgradeSheet(true); }}
+                    className={`header-stat-pill coins ${coins <= 5 && !isUserSubscribed ? 'low' : ''}`}
+                    title="رصيد نقاط الذكاء"
+                  >
+                    <span className="pill-value">{Number(coins.toFixed(1))}</span>
+                    <Coins size={15} />
+                  </button>
+                  <span className="header-stat-divider" />
+                  <button type="button" onClick={() => goTab('leaderboard')} className="header-stat-pill points" title="نقاط الترتيب">
+                    <span className="pill-value">{points.toLocaleString('en-US')}</span>
+                    <Star size={15} />
+                    {pointsBonusAnim && <span className="points-plus-badge">+{pointsBonusAnim}</span>}
+                  </button>
+                </div>
+              )}
+
+              <button
+                type="button"
+                onClick={handleOpenNotebook}
+                className={`header-icon-btn ${notebookItems.length > 0 ? 'active-gold' : ''}`}
+                title="دفتري الذكي"
+                aria-label="دفتري الذكي"
+              >
+                <Bookmark size={18} />
+                {notebookItems.length > 0 && <span className="header-count-badge">{notebookItems.length}</span>}
+              </button>
+
+              <div style={{ position: 'relative' }}>
+                <button
+                  onClick={() => {
+                    if (!isTourOpen) {
+                      setShowNotifCenter(prev => {
+                        const next = !prev;
+                        if (next) loadNotifications();
+                        return next;
+                      });
+                    }
+                  }}
+                  className="header-icon-btn"
+                  title="الإشعارات"
+                  aria-label="الإشعارات"
+                >
+                  <Bell size={18} />
+                  {activeNotifications.filter(n => !dismissedNotifIds.includes(n.id)).length > 0 && <span className="header-alert-dot" />}
+                </button>
+                {showNotifCenter && !isTourOpen && (
+                  <div className="notif-dropdown custom-scrollbar">
+                    <div className="notif-dropdown-title">الإشعارات</div>
+                    {activeNotifications.filter(n => !dismissedNotifIds.includes(n.id)).length === 0 ? (
+                      <p className="notif-empty">لا توجد إشعارات جديدة</p>
+                    ) : (
+                      activeNotifications.filter(n => !dismissedNotifIds.includes(n.id)).map(n => (
+                        <div key={n.id} className="notif-item">
+                          <div className="notif-item-head">
+                            <span>{n.title}</span>
+                            <button onClick={() => handleDismissNotification(n.id)} aria-label="إخفاء الإشعار">
+                              <X size={15} />
+                            </button>
+                          </div>
+                          <p>{n.body}</p>
+                        </div>
+                      ))
                     )}
                   </div>
                 )}
               </div>
 
-              {/* Student Stats & Utilities (RTL Left) */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '6px' : '10px', order: isMobile ? 2 : 1 }}>
-                {user && (
-                  <div className="header-student-stats">
-                    {/* Tasks Pill (Desktop only — on mobile Tasks is permanently docked in bottom nav) */}
-                    {!isMobile && (
-                      <>
-                        <div 
-                          onClick={() => {
-                            setActiveTab('tasks');
-                            if (isMobile) setSidebarOpen(false);
-                          }}
-                          className="header-stat-pill tasks"
-                          title="مهام المذاكرة اليومية والمنهج — اضغط للانتقال"
-                        >
-                          <CheckCircle2 size={14} />
-                          <span>{dailyQuestsData?.quests ? `${dailyQuestsData.quests.filter((q: any) => q.completed).length}/${dailyQuestsData.quests.length}` : 'المهام'}</span>
-                          {dailyQuestsData?.quests?.some((q: any) => q.completed && !q.claimed) && (
-                            <span className="tasks-dot-glow" />
-                          )}
-                        </div>
-                        <span className="header-stat-divider" />
-                      </>
-                    )}
+              <button
+                onClick={toggleTheme}
+                className="header-icon-btn"
+                title={resolvedTheme === 'light' ? 'الوضع المظلم' : 'الوضع المضيء'}
+                aria-label="تبديل المظهر"
+              >
+                {resolvedTheme === 'light' ? <Moon size={18} /> : <Sun size={18} />}
+              </button>
 
-                    {/* Coins Pill */}
-                    <div 
-                      onClick={() => {
-                        if (isUserSubscribed) {
-                          setActiveTab('profile');
-                          if (isMobile) setSidebarOpen(false);
-                        } else {
-                          if (isMobile) {
-                            setShowUpgradeSheet(true);
-                          } else {
-                            setActiveTab('subscriptions');
-                          }
-                        }
-                      }}
-                      className={`header-stat-pill coins ${coins <= 5 && !isUserSubscribed ? 'low' : ''}`}
-                      title={isUserSubscribed ? "رصيد عملات الذكاء الاصطناعي اليومية (تتجدد تلقائياً)" : "رصيد عملات الذكاء الاصطناعي — اضغط للترقية"}
-                    >
-                      <Coins size={14} />
-                      <span>{coins.toFixed(isMobile ? 1 : 2)}</span>
-                      {coins <= 5 && !isUserSubscribed && <Plus size={11} />}
-                    </div>
-
-                    <span className="header-stat-divider" />
-
-                    {/* Points Pill */}
-                    <div 
-                      onClick={() => {
-                        setActiveTab('leaderboard');
-                        if (isMobile) setSidebarOpen(false);
-                      }}
-                      className="header-stat-pill points"
-                      title="نقاط الترتيب والمسابقة — اضغط لعرض لوحة المتصدرين"
-                    >
-                      <Trophy size={14} />
-                      <span>{points}</span>
-                      {pointsBonusAnim && (
-                        <span className="points-plus-badge">+{pointsBonusAnim}</span>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Notebook button */}
-                <button
-                  type="button"
-                  onClick={handleOpenNotebook}
-                  className="header-icon-btn active-gold"
-                  style={{ width: isMobile ? '38px' : '34px', height: isMobile ? '38px' : '34px' }}
-                  title="دفتري الذكي (القوانين والملاحظات المحفوظة)"
-                >
-                  <Bookmark size={17} />
-                  {notebookItems.length > 0 && (
-                    <span style={{ position: 'absolute', top: '-3px', right: '-3px', background: '#FFB703', color: '#0D1B2A', fontSize: '0.6rem', fontWeight: 900, padding: '1px 4px', borderRadius: '10px' }}>
-                      {notebookItems.length}
-                    </span>
-                  )}
-                </button>
-
-                {/* Notifications */}
-                <div style={{ position: 'relative' }}>
+              {!isMobile && (
+                user ? (
+                  <button
+                    type="button"
+                    onClick={() => goTab('profile')}
+                    className="user-avatar-circle header-avatar"
+                    title={`الملف الشخصي (${user.name})`}
+                  >
+                    {user.name ? user.name.trim()[0] : <User size={15} />}
+                  </button>
+                ) : (
                   <button
                     onClick={() => {
-                      if (!isTourOpen) {
-                        setShowNotifCenter(prev => {
-                          const next = !prev;
-                          if (next) loadNotifications();
-                          return next;
-                        });
-                      }
+                      if (isTourOpen) return;
+                      setAuthTab('login');
+                      setShowAuthModal(true);
                     }}
-                    className="header-icon-btn"
-                    style={{ width: isMobile ? '38px' : '34px', height: isMobile ? '38px' : '34px' }}
-                    title="مركز الإشعارات والتنبيهات"
+                    className="btn-primary"
+                    style={{ padding: '8px 18px', fontSize: '0.86rem' }}
                   >
-                    <Bell size={17} />
-                    {activeNotifications.filter(n => !dismissedNotifIds.includes(n.id)).length > 0 && (
-                      <span style={{ position: 'absolute', top: '3px', left: '3px', width: '7px', height: '7px', borderRadius: '50%', background: 'var(--danger-color)' }} />
-                    )}
+                    <LogIn size={16} />
+                    <span>دخول</span>
                   </button>
-                  {showNotifCenter && !isTourOpen && (
-                    <div 
-                      style={isMobile ? {
-                        position: 'fixed',
-                        top: 'calc(60px + env(safe-area-inset-top, 0px))',
-                        left: '12px',
-                        right: '12px',
-                        maxHeight: '70vh',
-                        overflowY: 'auto',
-                        background: 'var(--card-bg)',
-                        border: '1px solid var(--border-color)',
-                        borderRadius: 'var(--radius-md)',
-                        boxShadow: 'var(--shadow-lg)',
-                        zIndex: 100,
-                        padding: '10px'
-                      } : {
-                        position: 'absolute',
-                        top: '42px',
-                        right: 0,
-                        width: '320px',
-                        maxHeight: '400px',
-                        overflowY: 'auto',
-                        background: 'var(--card-bg)',
-                        border: '1px solid var(--border-color)',
-                        borderRadius: 'var(--radius-md)',
-                        boxShadow: 'var(--shadow-lg)',
-                        zIndex: 50,
-                        padding: '10px'
-                      }} 
-                      className="custom-scrollbar"
-                    >
-                      <div style={{ fontWeight: 700, fontSize: '0.85rem', color: 'var(--text-main)', padding: '6px 8px 10px', borderBottom: '1px solid var(--border-color)', marginBottom: '6px', textAlign: 'right' }}>الإشعارات والتنبيهات</div>
-                      {activeNotifications.filter(n => !dismissedNotifIds.includes(n.id)).length === 0 ? (
-                        <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8rem', padding: '20px 0' }}>لا توجد إشعارات جديدة</p>
-                      ) : (
-                        activeNotifications.filter(n => !dismissedNotifIds.includes(n.id)).map(n => (
-                          <div key={n.id} style={{ padding: '10px 8px', borderRadius: 'var(--radius-sm)', marginBottom: '4px', background: 'var(--alpha-white-2)', textAlign: 'right' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
-                              <span style={{ fontWeight: 700, fontSize: '0.82rem', color: 'var(--text-main)' }}>{n.title}</span>
-                              <button onClick={() => handleDismissNotification(n.id)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', flexShrink: 0 }}>
-                                <X size={15} />
-                              </button>
-                            </div>
-                            <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: '4px', whiteSpace: 'normal', wordBreak: 'break-word' }}>{n.body}</p>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  )}
-                </div>
+                )
+              )}
+            </div>
+          </header>
+        )}
 
-                {/* App Tour (Desktop only — on mobile available via sidebar) */}
-                {!isMobile && (
-                  <button
-                    onClick={() => startTour(getTourScreenForTab(activeTab))}
-                    className="header-icon-btn"
-                    title="جولة تعريفية في المنصة"
-                    aria-label="جولة سريعة في المنصة"
-                  >
-                    <HelpCircle size={16} />
-                  </button>
-                )}
-
-                {/* Theme Switcher */}
-                <button
-                  onClick={toggleTheme}
-                  className="header-icon-btn"
-                  style={{ width: isMobile ? '38px' : '34px', height: isMobile ? '38px' : '34px' }}
-                  title={resolvedTheme === 'light' ? "تفعيل الوضع المظلم" : "تفعيل الوضع المضيء"}
-                  aria-label="تبديل مظهر المنصة"
-                >
-                  {resolvedTheme === 'light' ? <Moon size={17} /> : <Sun size={17} />}
-                </button>
-
-                {/* Subscriptions CTA for Desktop Unsubscribed */}
-                {!isMobile && !isUserSubscribed && (
-                  <button
-                    onClick={() => setActiveTab('subscriptions')}
-                    className="header-sub-btn"
-                    style={{ padding: '5px 12px', fontSize: '0.8rem' }}
-                  >
-                    <CreditCard size={14} />
-                    <span>الاشتراكات</span>
-                  </button>
-                )}
-
-                {/* Profile Avatar or Login CTA (Desktop only — on mobile Profile is tab #5 in bottom nav) */}
-                {!isMobile && (
-                  user ? (
-                    <div
-                      onClick={() => setActiveTab('profile')}
-                      style={{
-                        width: '34px',
-                        height: '34px',
-                        borderRadius: '50%',
-                        background: 'var(--primary-color)',
-                        color: 'var(--text-on-primary)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontWeight: 800,
-                        fontSize: '0.85rem',
-                        cursor: 'pointer',
-                        border: '1.5px solid var(--border-primary)',
-                        boxShadow: '0 2px 8px var(--primary-glow)',
-                        flexShrink: 0
-                      }}
-                      title={`الملف الشخصي (${user.name})`}
-                    >
-                      {user.name ? user.name[0].toUpperCase() : <User size={15} />}
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        if (isTourOpen) return;
-                        setAuthTab('login');
-                        setShowAuthModal(true);
-                      }}
-                      className="btn-primary"
-                      style={{
-                        padding: '7px 16px',
-                        borderRadius: 'var(--radius-full)',
-                        fontSize: '0.84rem',
-                        fontWeight: 800,
-                        border: 'none',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px'
-                      }}
-                    >
-                      <LogIn size={15} />
-                      <span>دخول</span>
-                    </button>
-                  )
-                )}
-              </div>
-            </header>
+        {/* VIEW 1: Chat Workspace */}
+        {activeTab === 'chat' && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, background: 'var(--bg-color)' }}>
 
             {/* Chat Area Messages */}
             <div
@@ -13399,60 +12175,36 @@ export default function App() {
                 flexDirection: 'column',
                 position: 'relative'
               }}
-              className="custom-scrollbar"
+              className={`custom-scrollbar chat-scroll chat-font-${chatFontLevel}`}
             >
               {messages.length === 0 ? (
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', width: '100%', padding: isMobile ? '12px 4px' : '20px 12px' }}>
                   <div id="tour-chat-hero" className="animate-scale-in" style={{
                     width: '100%',
-                    maxWidth: '820px',
+                    maxWidth: '940px',
                     margin: 'auto',
                     display: 'flex',
                     flexDirection: 'column',
                     alignItems: 'center',
                     gap: isMobile ? '10px' : '18px'
                   }}>
-                    <div style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: isMobile ? '3px' : '6px' }}>
-                      {/* Brand Icon */}
-                      <div style={{ position: 'relative', display: 'inline-block', marginBottom: '2px' }}>
-                        <div 
-                          className="brand-logo-frame"
-                          style={{
-                            width: isMobile ? '46px' : '58px',
-                            height: isMobile ? '46px' : '58px',
-                            borderRadius: isMobile ? '14px' : '18px'
-                          }}
-                        >
-                          <img src="/logo.png" alt="EGS AI Logo" style={{ width: '86%', height: '86%', objectFit: 'contain' }} />
-                        </div>
-                      </div>
-                      
-                      <h2 style={{ fontSize: isMobile ? '1.15rem' : '1.75rem', fontWeight: 900, color: 'var(--text-main)', letterSpacing: '-0.5px', lineHeight: 1.25, margin: 0 }}>
-                        {user ? `مرحباً بك يا ${user.name} في EGS AI` : 'مرحباً بك في EGS AI'}
+                    <div className="chat-hero-head">
+                      <BrandMark size={isMobile ? 60 : 64} glow />
+                      <h2>
+                        {user
+                          ? (isMobile ? `مرحباً يا ${user.name.trim().split(/\s+/)[0]}` : <>مرحباً بك يا {user.name.trim().split(/\s+/)[0]} في EGS&nbsp;AI</>)
+                          : <>مرحباً بك في EGS&nbsp;AI</>}
                       </h2>
-                      <p style={{ color: 'var(--text-muted)', fontSize: isMobile ? '0.78rem' : '0.9rem', lineHeight: isMobile ? '1.35' : '1.5', maxWidth: '520px', margin: '0 auto' }}>
-                        {user 
-                          ? <>مساعدك الذكي المعتمد لمنهج <strong style={{ color: 'var(--primary-color)' }}>{chatSubject || 'المرحلة الدراسية'}</strong> — {GRADE_NAMES[user.grade_level]}.</>
-                          : <>منصتك التعليمية الذكية لمدارس ومناهج جمهورية مصر العربية.</>
-                        }
+                      <p>
+                        {isMobile
+                          ? 'اسأل عن أي درس، صوّر المسألة، أو ابعت رسالة صوتية.'
+                          : `اسأل عن أي درس في منهج ${chatSubject || 'مادتك'}، صوّر المسألة، أو اطلب اختباراً قصيراً.`}
                       </p>
                       {user && !isUserSubscribed && (
-                        <div style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          background: 'var(--primary-light)',
-                          border: '1px solid var(--border-primary)',
-                          borderRadius: 'var(--radius-full)',
-                          padding: '3px 12px',
-                          fontSize: isMobile ? '0.7rem' : '0.76rem',
-                          color: 'var(--primary-color)',
-                          fontWeight: 700,
-                          marginTop: '2px'
-                        }}>
-                          <Sparkles size={12} />
-                          <span>رصيدك اليومي المجاني متاح للمذاكرة — اطرح أي سؤال أو حل مسألة</span>
-                        </div>
+                        <span className="chat-hero-note">
+                          <Sparkles size={13} />
+                          <span>معاك {Number(coins.toFixed(1))} نقطة ذكاء النهارده — بتتجدد كل يوم الساعة 12 بالليل</span>
+                        </span>
                       )}
                     </div>
 
@@ -13482,7 +12234,7 @@ export default function App() {
                           </div>
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <div style={{ fontSize: isMobile ? '0.86rem' : '0.96rem', fontWeight: 800, color: 'var(--text-main)', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', lineHeight: '1.3' }}>
-                              <span>أنشئ حسابك الآن مجاناً وابدأ تجربة EGS AI</span>
+                              <span>أنشئ حسابك الآن مجاناً وابدأ تجربة EGS&nbsp;AI</span>
                             </div>
                             <div style={{ fontSize: isMobile ? '0.72rem' : '0.78rem', color: 'var(--text-secondary)', marginTop: '3px', lineHeight: '1.45' }}>
                               سجل حسابك مجاناً للحصول على رصيدك التجريبي الكامل وبدء المذاكرة وحل أصعب مسائل المنهج المصري فوراً.
@@ -13566,62 +12318,68 @@ export default function App() {
                       {renderInputForm(true)}
                     </div>
 
-                    {/* In-Chat Daily Quests Circuit Tracker / Tasks Button */}
-                    {(() => {
-                      const questsList = dailyQuestsData?.quests || DEFAULT_DAILY_QUESTS;
-                      const rewardPoints = (dailyQuestsData?.quests ? dailyQuestsData.quests.length : questsList.length) * 5;
+                    {user && (() => {
+                      const questsList: any[] = dailyQuestsData?.quests || DEFAULT_DAILY_QUESTS;
+                      const doneCount = questsList.filter((q: any) => q.completed).length;
+                      const streak = dailyQuestsData?.streakDays || user.study_streak || 1;
+                      const shields = user.streak_shields ?? 1;
+                      const openTasks = () => { setActiveTab('tasks'); if (sidebarOverlay) setSidebarOpen(false); };
                       return (
-                        <div 
-                          onClick={() => {
-                            setActiveTab('tasks');
-                            if (isMobile) setSidebarOpen(false);
-                          }}
-                          className="chat-quests-circuit-bar"
+                        <div
+                          onClick={openTasks}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openTasks(); } }}
+                          className="chat-quests-strip"
                           role="button"
-                          title="انقر لفتح صفحة المهام والإنجاز اليومي"
+                          tabIndex={0}
+                          title="افتح صفحة المهام اليومية"
                         >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                            <CheckCircle2 size={16} color="var(--primary-color)" />
-                            <span style={{ fontWeight: 800, color: 'var(--text-main)', fontSize: '0.82rem' }}>
-                              حلبة الإنجاز اليومي:
-                            </span>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
-                              {questsList.map((q: any, i: number) => (
-                                <span
-                                  key={q.id || i}
-                                  style={{
-                                    fontSize: '0.72rem',
-                                    padding: '2px 7px',
-                                    borderRadius: 'var(--radius-full)',
-                                    background: q.completed ? 'rgba(34, 197, 94, 0.15)' : 'var(--alpha-white-3)',
-                                    color: q.completed ? 'var(--success-color)' : 'var(--text-muted)',
-                                    fontWeight: 700,
-                                    display: 'inline-flex',
-                                    alignItems: 'center',
-                                    gap: '3px'
-                                  }}
-                                >
-                                  {q.completed ? <CheckCircle size={10} /> : <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'var(--text-muted)' }} />}
-                                  {q.title || `مهمة ${i+1}`}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 700, color: 'var(--primary-color)', flexShrink: 0 }}>
-                            <span>+{rewardPoints} نقطة</span>
-                            <ArrowLeft size={13} />
-                          </div>
+                          {isMobile ? (
+                            <>
+                              <span className="quest-dots" aria-hidden="true">
+                                {questsList.map((q: any, i: number) => (
+                                  <span key={q.id || i} className={q.completed ? 'done' : ''}>{q.completed && <Check size={12} strokeWidth={3} />}</span>
+                                ))}
+                              </span>
+                              <span className="quest-strip-text">مهام اليوم: {doneCount} من {questsList.length} مكتملة</span>
+                              <span className="quest-streak"><Flame size={15} /> <span className="num">{streak}</span></span>
+                              <ArrowLeft size={16} className="quest-strip-arrow" />
+                            </>
+                          ) : (
+                            <>
+                              <span className="quest-chain">
+                                {questsList.map((q: any, i: number) => (
+                                  <React.Fragment key={q.id || i}>
+                                    {i > 0 && <span className="quest-chain-line" />}
+                                    <span className={`quest-chip ${q.completed ? 'done' : ''}`}>
+                                      {q.completed ? <Check size={13} strokeWidth={3} /> : <span className="quest-ring" />}
+                                      {QUEST_SHORT_LABELS[q.id] || q.title}
+                                    </span>
+                                  </React.Fragment>
+                                ))}
+                              </span>
+                              <span className="quest-streak">
+                                <Flame size={15} />
+                                سلسلة {daysAr(streak)}{shields > 0 ? ` · ${shields === 1 ? 'درع حماية واحد' : `${shields} دروع حماية`}` : ''}
+                              </span>
+                              <span className="quest-strip-link">
+                                مهام المذاكرة اليومية: {doneCount} من {questsList.length} — عرض المهام
+                                <ArrowLeft size={15} />
+                              </span>
+                            </>
+                          )}
                         </div>
                       );
                     })()}
-                    
-                    <p style={{ textAlign: 'center', fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '4px', lineHeight: '1.5', opacity: 0.85 }}>
-                      EGS AI نظام ذكاء اصطناعي للمساعدة في المذاكرة — تحقق دائماً من الكتب المدرسية والمقررات الرسمية.
-                    </p>
+
+                    {!isMobile && (
+                      <p className="chat-disclaimer">
+                        إجابات EGS&nbsp;AI مبنية على منهجك المقرر. راجع المعلومات المهمة مع كتابك المدرسي.
+                      </p>
+                    )}
                   </div>
                 </div>
               ) : (
-                <div style={{ maxWidth: '800px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: isMobile ? '14px' : '20px', width: '100%' }} className="chat-font-md">
+                <div style={{ maxWidth: '940px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: isMobile ? '16px' : '26px', width: '100%' }}>
 
                   {messages.map((msg, index) => {
                     const isMsgStreaming = Boolean(msg.isStreaming || (chatLoading && index === messages.length - 1));
@@ -13644,16 +12402,7 @@ export default function App() {
                           transition: 'background 0.3s ease, padding 0.3s ease'
                         }}
                       >
-                        {/* Avatar */}
-                        {msg.sender === 'user' ? (
-                          <div className="message-avatar message-avatar-user">
-                            {user?.name ? user.name[0].toUpperCase() : 'أ'}
-                          </div>
-                        ) : (
-                          <div className="message-avatar message-avatar-ai" style={{ overflow: 'hidden', padding: 0 }}>
-                            <img src="/logo.png" alt="EGS AI Logo" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
-                          </div>
-                        )}
+                        {msg.sender === 'ai' && !isMobile && <BrandMark size={38} />}
 
                         {/* Bubble content */}
                         <div 
@@ -13667,21 +12416,23 @@ export default function App() {
                             flex: 1
                           }}
                         >
-                        {/* Search Steps Panel — shows RAG search process */}
-                        {msg.sender === 'ai' && (msg.searchSteps && msg.searchSteps.length > 0 || (msg.isThinking && (!msg.searchSteps || msg.searchSteps.length === 0))) && (
+                        {msg.sender === 'ai' && ((msg.searchSteps && msg.searchSteps.length > 0) || msg.isThinking || msg.thought) && (
+                        <div className="msg-meta-row">
+                        {(msg.searchSteps && msg.searchSteps.length > 0 || (msg.isThinking && (!msg.searchSteps || msg.searchSteps.length === 0))) && (
                           <SearchStepsPanel
                             steps={msg.searchSteps}
                             isSearching={msg.isThinking}
                           />
                         )}
 
-                        {/* Render Thought Process for AI responses */}
-                        {msg.sender === 'ai' && (msg.thought || msg.isThinking) && (
-                          <ThoughtBlock 
-                            thought={msg.thought} 
-                            duration={msg.duration} 
-                            isThinking={msg.isThinking} 
+                        {(msg.thought || msg.isThinking) && (
+                          <ThoughtBlock
+                            thought={msg.thought}
+                            duration={msg.duration}
+                            isThinking={msg.isThinking}
                           />
+                        )}
+                        </div>
                         )}
 
                         {/* Message Bubble Body */}
@@ -13831,7 +12582,7 @@ export default function App() {
                                   } else {
                                     setActiveTab('profile');
                                   }
-                                  if (isMobile) setSidebarOpen(false);
+                                  if (sidebarOverlay) setSidebarOpen(false);
                                 }}
                                 onSparkPrompt={(sparkText: string) => {
                                   handleSendMessage(undefined, sparkText);
@@ -13853,179 +12604,94 @@ export default function App() {
                           )
                         )}
                         
-                        {/* Actions below bubble */}
-                        {msg.sender === 'ai' && msg.message && !isMsgStreaming && (
-                          <div className="animate-fade-in" style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '6px' : '10px', marginTop: '8px', flexWrap: 'wrap' }}>
-                            <button
-                              type="button"
-                              onClick={() => navigator.clipboard.writeText(msg.message)}
-                              style={{
-                                background: isMobile ? 'var(--alpha-white-4)' : 'transparent',
-                                border: isMobile ? '1px solid var(--border-color)' : 'none',
-                                borderRadius: isMobile ? 'var(--radius-full)' : '0',
-                                color: 'var(--text-muted)',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '5px',
-                                fontSize: isMobile ? '0.78rem' : '0.7rem',
-                                padding: isMobile ? '7px 12px' : '0',
-                                minHeight: isMobile ? '36px' : 'auto',
-                                opacity: 0.85,
-                                transition: 'var(--transition)'
-                              }}
-                              onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-                              onMouseLeave={(e) => e.currentTarget.style.opacity = '0.85'}
-                            >
-                              <Copy size={isMobile ? 16 : 13} />
-                              <span>نسخ الإجابة</span>
-                            </button>
-                            {/* English Pronunciation Read-Aloud Button - strictly restricted to English content */}
-                            {isEnglishSpeechEligible(msg.message) && (
-                              <button
-                                type="button"
-                                onClick={() => handlePlayEnglish(msg.message, msg.id || `msg-${index}`)}
-                                style={{
-                                  background: playingSpeechId === (msg.id || `msg-${index}`) 
-                                    ? 'rgba(255, 183, 3, 0.16)' 
-                                    : 'rgba(0, 180, 216, 0.1)',
-                                  border: playingSpeechId === (msg.id || `msg-${index}`) 
-                                    ? '1px solid var(--primary-color)' 
-                                    : '1px solid rgba(0, 180, 216, 0.35)',
-                                  borderRadius: 'var(--radius-full)',
-                                  color: playingSpeechId === (msg.id || `msg-${index}`) ? 'var(--primary-color)' : 'var(--tech-cyan, #00B4D8)',
-                                  cursor: 'pointer',
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: '6px',
-                                  fontSize: isMobile ? '0.78rem' : '0.74rem',
-                                  fontWeight: 700,
-                                  padding: isMobile ? '7px 14px' : '6px 14px',
-                                  minHeight: '36px',
-                                  opacity: 1,
-                                  transition: 'var(--transition)',
-                                  boxShadow: playingSpeechId === (msg.id || `msg-${index}`) ? '0 0 12px rgba(255, 183, 3, 0.35)' : 'none'
-                                }}
-                                title="استماع للنطق الكامل بالإنجليزية (Read Aloud)"
-                                aria-label="استماع للنطق الكامل بالإنجليزية"
-                              >
-                                {playingSpeechId === (msg.id || `msg-${index}`) ? (
-                                  <VolumeX size={isMobile ? 16 : 14} style={{ color: 'var(--primary-color)' }} />
-                                ) : (
-                                  <Volume2 size={isMobile ? 16 : 14} />
+                        {msg.sender === 'ai' && msg.message && !isMsgStreaming && (() => {
+                          const msgKey = msg.id || `msg-${index}`;
+                          const saved = isMessageBookmarked(msg, index);
+                          const isSpeaking = playingSpeechId === msgKey;
+                          const failed = msg.hasError || msg.message.includes('خطأ') || msg.message.includes('Error');
+                          return (
+                            <div className="msg-actions animate-fade-in">
+                              <div className="msg-actions-group">
+                                <button type="button" className="msg-action-btn" onClick={() => navigator.clipboard.writeText(msg.message)} title="نسخ الإجابة" aria-label="نسخ الإجابة">
+                                  <Copy size={16} />
+                                  <span>نسخ</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`msg-action-btn ${saved ? 'saved' : ''}`}
+                                  onClick={() => handleBookmarkMessage(msg, index)}
+                                  title={saved ? 'محفوظ في دفتري — اضغط للإزالة' : 'حفظ في دفتري الذكي'}
+                                  aria-label={saved ? 'محفوظ في دفتري' : 'حفظ في دفتري'}
+                                  aria-pressed={saved}
+                                >
+                                  {saved ? <BookmarkCheck size={16} /> : <Bookmark size={16} />}
+                                  <span>{saved ? 'محفوظ في دفتري' : 'حفظ في دفتري'}</span>
+                                </button>
+                                {isEnglishSpeechEligible(msg.message) && (
+                                  <button
+                                    type="button"
+                                    className={`msg-action-btn speak ${isSpeaking ? 'saved' : ''}`}
+                                    onClick={() => handlePlayEnglish(msg.message, msgKey)}
+                                    title="استماع للنطق بالإنجليزية"
+                                    aria-label="استماع للنطق بالإنجليزية"
+                                  >
+                                    {isSpeaking ? <VolumeX size={16} /> : <Volume2 size={16} />}
+                                    <span>{isSpeaking ? 'إيقاف النطق' : 'استماع'}</span>
+                                  </button>
                                 )}
-                                <span>{playingSpeechId === (msg.id || `msg-${index}`) ? 'إيقاف النطق' : 'نطق الرسالة بالإنجليزية'}</span>
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => handleBookmarkMessage(msg, index)}
-                              style={{
-                                background: isMobile ? 'var(--alpha-white-4)' : 'transparent',
-                                border: isMobile ? '1px solid var(--border-color)' : 'none',
-                                borderRadius: isMobile ? 'var(--radius-full)' : '0',
-                                color: isMessageBookmarked(msg, index) ? '#FFB703' : 'var(--text-muted)',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '5px',
-                                fontSize: isMobile ? '0.78rem' : '0.7rem',
-                                padding: isMobile ? '7px 12px' : '0',
-                                minHeight: isMobile ? '36px' : 'auto',
-                                opacity: isMessageBookmarked(msg, index) ? 1 : 0.85,
-                                transition: 'var(--transition)'
-                              }}
-                              onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-                              onMouseLeave={(e) => e.currentTarget.style.opacity = isMessageBookmarked(msg, index) ? '1' : '0.85'}
-                              title={isMessageBookmarked(msg, index) ? 'محفوظ في دفتري الذكي — اضغط للحذف من الدفتر' : 'حفظ في دفتري الذكي وبنك القوانين'}
-                            >
-                              {isMessageBookmarked(msg, index) ? <BookmarkCheck size={isMobile ? 16 : 14} color="#FFB703" /> : <Bookmark size={isMobile ? 16 : 14} />}
-                              <span>{isMessageBookmarked(msg, index) ? 'محفوظ في دفتري' : 'حفظ في دفتري'}</span>
-                            </button>
-                            {/* Stream Retry Button on Error / Partial Failure */}
-                            {(msg.hasError || msg.message.includes('خطأ') || msg.message.includes('Error')) && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  let queryText = lastFailedUserQuery?.text || '';
-                                  for (let i = index - 1; i >= 0; i--) {
-                                    if (messages[i].sender === 'user') {
-                                      queryText = messages[i].message;
-                                      break;
-                                    }
-                                  }
-                                  if (queryText) {
-                                    handleSendMessage(undefined, queryText);
-                                  }
-                                }}
-                                style={{
-                                  background: 'rgba(239, 68, 68, 0.12)',
-                                  border: '1px solid #ef4444',
-                                  borderRadius: isMobile ? 'var(--radius-full)' : '6px',
-                                  color: '#ef4444',
-                                  cursor: 'pointer',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '5px',
-                                  fontSize: isMobile ? '0.78rem' : '0.7rem',
-                                  padding: isMobile ? '7px 12px' : '4px 8px',
-                                  minHeight: isMobile ? '36px' : 'auto',
-                                  fontWeight: 700
-                                }}
-                                title="إعادة إرسال السؤال والمحاولة مرة أخرى"
-                              >
-                                <RotateCcw size={isMobile ? 16 : 13} />
-                                <span>إعادة المحاولة</span>
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const prevUserMsg = [...messages.slice(0, index)].reverse().find(m => m.sender === 'user');
-                                setReportTarget({ content: msg.message, userQuery: prevUserMsg?.message || '' });
-                              }}
-                              style={{
-                                background: isMobile ? 'var(--alpha-white-4)' : 'transparent',
-                                border: isMobile ? '1px solid var(--border-color)' : 'none',
-                                borderRadius: isMobile ? 'var(--radius-full)' : '0',
-                                color: 'var(--text-muted)',
-                                cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '5px',
-                                fontSize: isMobile ? '0.78rem' : '0.7rem',
-                                padding: isMobile ? '7px 12px' : '0',
-                                minHeight: isMobile ? '36px' : 'auto',
-                                opacity: 0.85,
-                                transition: 'var(--transition)'
-                              }}
-                              onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--danger-color)'; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.85'; e.currentTarget.style.color = 'var(--text-muted)'; }}
-                            >
-                              <AlertCircle size={isMobile ? 16 : 13} />
-                              <span>الإبلاغ عن الرد</span>
-                            </button>
-                            {!isMobile && (
-                              <span
-                                title="الإجابات مُولَّدة تلقائياً بواسطة ذكاء اصطناعي وقد تحتوي أخطاء"
-                                style={{ fontSize: '0.68rem', color: 'var(--text-muted)', opacity: 0.6, cursor: 'default' }}
-                              >
-                                تنبيه: قد يخطئ الذكاء الاصطناعي
-                              </span>
-                            )}
-                          </div>
-                        )}
+                                {failed && (
+                                  <button
+                                    type="button"
+                                    className="msg-action-btn danger"
+                                    onClick={() => {
+                                      let queryText = lastFailedUserQuery?.text || '';
+                                      for (let i = index - 1; i >= 0; i--) {
+                                        if (messages[i].sender === 'user') { queryText = messages[i].message; break; }
+                                      }
+                                      if (queryText) handleSendMessage(undefined, queryText);
+                                    }}
+                                    title="إعادة المحاولة"
+                                    aria-label="إعادة المحاولة"
+                                  >
+                                    <RotateCcw size={16} />
+                                    <span>إعادة المحاولة</span>
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="msg-action-btn report"
+                                  onClick={() => {
+                                    const prevUserMsg = [...messages.slice(0, index)].reverse().find(m => m.sender === 'user');
+                                    setReportTarget({ content: msg.message, userQuery: prevUserMsg?.message || '' });
+                                  }}
+                                  title="الإبلاغ عن الإجابة"
+                                  aria-label="الإبلاغ عن الإجابة"
+                                >
+                                  <Flag size={16} />
+                                  <span>إبلاغ</span>
+                                </button>
+                              </div>
+                              {!!msg.coinsUsed && (
+                                <span
+                                  className={`msg-cost ${msg.fairUseRate || msg.peakRate ? 'warn' : ''}`}
+                                  title={msg.fairUseRate ? 'خصم مضاعف مؤقتاً لتجاوز معدل الاستخدام العادل لباقتك' : msg.peakRate ? 'تم الإرسال في وقت ذروة الخوادم' : 'النقاط المخصومة لهذه الإجابة'}
+                                >
+                                  تكلفة الإجابة: {Number(msg.coinsUsed.toFixed(1))} نقطة{msg.thought ? ' · تفكير عميق' : ''}{msg.fairUseRate ? ' · استخدام مكثف' : msg.peakRate ? ' · وقت الذروة' : ''}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </div>
                     </div>
                   );
                 })}
                   {chatLoading && (messages.length === 0 || messages[messages.length - 1].sender !== 'ai') && (
-                    <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
-                      <div style={{ width: '36px', height: '36px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--primary-color)', color: '#ffffff' }}>
+                    <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                      {!isMobile && <BrandMark size={38} />}
+                      <div className="msg-status-pill">
                         <Loader2 size={16} className="animate-spin" />
-                      </div>
-                      <div style={{ padding: '14px 20px', border: '1px solid var(--border-color)', background: 'var(--card-bg)', borderRadius: '18px 18px 18px 4px', boxShadow: 'var(--shadow-sm)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                        <span>
                           {messages.length > 0 && messages[messages.length - 1]?.message?.startsWith('[IMAGE_MESSAGE:') 
                             ? 'تحليل الصورة...' 
                             : 'EGS AI يفكر ويبحث في المنهج...'}
@@ -14052,11 +12718,11 @@ export default function App() {
 
             {/* Input Bar */}
             {messages.length > 0 && (
-              <div style={{ padding: isMobile ? '6px 10px calc(6px + 62px + env(safe-area-inset-bottom, 0px))' : '18px 24px', borderTop: '1px solid var(--border-color)', background: 'var(--sidebar-bg)' }}>
+              <div className="chat-dock-area">
                 {renderInputForm(false)}
                 {!isMobile && (
-                  <p style={{ textAlign: 'center', fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.5' }}>
-                    EGS AI ذكاء اصطناعي وقد يرتكب أخطاءً — تحقق دائماً من المناهج والكتب المدرسية الرسمية. الإجابات مُولَّدة تلقائياً ولسنا مسؤولين عنها بشكل كامل.
+                  <p className="chat-disclaimer">
+                    إجابات EGS&nbsp;AI مبنية على منهجك المقرر. راجع المعلومات المهمة مع كتابك المدرسي.
                   </p>
                 )}
               </div>
@@ -14069,33 +12735,8 @@ export default function App() {
 
         {/* VIEW 2: Subscriptions Page */}
         {(activeTab === 'subscriptions' || activeTab === 'beta') && (
-          <div className="mobile-main-with-nav" style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '24px 16px' : '40px 24px', background: 'var(--bg-color)' }}>
-            {isMobile && (
-              <button 
-                onClick={() => setActiveTab('chat')}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  background: 'var(--card-bg)',
-                  border: '1px solid var(--border-color)',
-                  color: 'var(--text-main)',
-                  padding: '8px 16px',
-                  borderRadius: 'var(--radius-md)',
-                  cursor: 'pointer',
-                  marginBottom: '24px',
-                  fontWeight: 700,
-                  fontSize: '0.88rem',
-                  fontFamily: 'var(--font-arabic)',
-                  boxShadow: 'var(--shadow-sm)',
-                  transition: 'var(--transition)'
-                }}
-              >
-                <ArrowRight size={16} />
-                <span>العودة للدردشة</span>
-              </button>
-            )}
-            <div id="tour-subscriptions-header" style={{ maxWidth: '920px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '32px' }} className="animate-scale-in">
+          <div className="mobile-main-with-nav scroll-visible page-scroll">
+            <div id="tour-subscriptions-header" className="page-container animate-fade-in" style={{ maxWidth: '1140px' }}>
 
               {isUserSubscribed ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
@@ -14295,389 +12936,129 @@ export default function App() {
                 </div>
               ) : (
                 <>
-                  {/* Title & Header */}
-                  <div style={{ textAlign: 'center' }}>
-                    {user?.subscription_status === 'expired' && (
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'var(--danger-bg)', color: 'var(--danger-color)', padding: '8px 18px', borderRadius: 'var(--radius-full)', fontSize: '0.88rem', fontWeight: 800, marginBottom: '16px', border: '1px solid rgba(248, 113, 113, 0.25)' }}>
-                        <AlertCircle size={16} />
-                        <span>انتهت فترة اشتراكك السابقة. تم إيقاف التجديد اليومي التلقائي لمنع تجاوز المدة.</span>
+                  <div className="page-head">
+                    <div className="page-head-text">
+                      <button type="button" className="page-back-link" onClick={() => setActiveTab('chat')}>
+                        <ArrowRight size={16} />
+                        <span>العودة للمحادثة</span>
+                      </button>
+                      <h1>{user?.subscription_status === 'expired' ? 'جدّد اشتراكك' : 'باقات الاشتراك'}</h1>
+                      <p>كل الباقات بنفس سعر الاستخدام — الفرق فقط في عدد النقاط اليومية ومدة الاشتراك.</p>
+                    </div>
+                    {user && (
+                      <div className="page-head-actions">
+                        <span className={`soft-pill ${coins <= 1 ? 'danger' : ''}`}>
+                          <Coins size={15} />
+                          رصيدك الحالي: <strong className="num">{Number(coins.toFixed(1))}</strong> من {dailyAllowance} نقاط مجانية اليوم
+                        </span>
                       </div>
                     )}
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 16px', borderRadius: 'var(--radius-full)', fontSize: '0.85rem', fontWeight: 800, marginBottom: '14px' }}>
-                      <CreditCard size={15} />
-                      <span>الاشتراكات والأسعار الرسمية</span>
-                    </div>
-                    <h2 style={{ fontSize: isMobile ? '1.5rem' : '1.9rem', fontWeight: 900, color: 'var(--text-main)' }}>
-                      {user?.subscription_status === 'expired' ? 'جدّد اشتراكك لمواصلة التفوق' : 'اختر باقة الاشتراك المناسبة لك'}
-                    </h2>
-                    <p style={{ color: 'var(--text-muted)', marginTop: '8px', fontSize: '0.92rem', lineHeight: '1.7', maxWidth: '640px', margin: '8px auto 0' }}>
-                      احصل على التفعيل الفوري للمساعد الذكي الفائق (Pro Model)، ميزة التفكير المستفيض، وتوليد امتحانات تفاعلية غير محدودة مع تجديد يومي دقيق للرصيد.
-                    </p>
                   </div>
 
-                  {/* Currency Verification Box for Free / Expired registered users */}
-                  {user && (
-                    <div style={{ background: 'var(--card-bg)', border: '1px solid var(--border-color)', borderRadius: '14px', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <div style={{ width: '38px', height: '38px', borderRadius: '10px', background: 'var(--primary-light)', color: 'var(--primary-color)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                          <ShieldCheck size={20} />
-                        </div>
-                        <div>
-                          <div style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                            الرصيد المتاح حالياً: <span style={{ color: 'var(--primary-color)' }}>{coins.toFixed(2)} نقطة</span>
-                          </div>
-                          <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                            {user.subscription_status === 'expired'
-                              ? 'حسابك في الوضع المجاني بعد انتهاء مدة الاشتراك. النقاط المتبقية صالحة حتى نفادها.'
-                              : 'الرصيد التجريبي المجاني الممنوح لك. اشترك لتفعيل التجديد اليومي التلقائي.'}
-                          </span>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={handleVerifyCurrency}
-                        disabled={isVerifyingCurrency}
-                        style={{
-                          padding: '8px 16px',
-                          background: 'var(--alpha-white-2)',
-                          border: '1px solid var(--border-color)',
-                          borderRadius: 'var(--radius-sm)',
-                          color: 'var(--text-main)',
-                          fontSize: '0.82rem',
-                          fontWeight: 700,
-                          cursor: isVerifyingCurrency ? 'not-allowed' : 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          transition: 'var(--transition)'
-                        }}
-                      >
-                        <RefreshCw size={14} className={isVerifyingCurrency ? 'animate-spin' : ''} />
-                        <span>{isVerifyingCurrency ? 'جاري التحقق...' : 'التحقق من الرصيد'}</span>
-                      </button>
+                  {user?.subscription_status === 'expired' && (
+                    <div className="soft-pill danger" style={{ alignSelf: 'flex-start' }}>
+                      <AlertCircle size={15} />
+                      انتهت فترة اشتراكك السابقة — اختار باقة وكمّل مذاكرتك.
                     </div>
                   )}
 
-                  {/* 3 Student Pricing Cards Grid */}
-                  <div id="tour-subscriptions-plans" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '20px' }}>
-                    
-                    {/* Plan 1: 1 Month (60 EGP) */}
-                    <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--alpha-white-4)', color: 'var(--text-muted)', fontSize: '0.68rem', fontWeight: 900, padding: '3px 10px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-color)' }}>
-                        الباقة التمهيدية
-                      </div>
-                      <h3 style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '6px' }}>باقة شهر (1 Month)</h3>
-                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', margin: '12px 0 8px' }}>
-                        <span style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)' }}>60</span>
-                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-muted)' }}>ج.م / شهرياً</span>
-                      </div>
-                      <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content' }}>
-                        <Zap size={12} />
-                        <span>2.0 جنيه / اليوم (أوفر من ربع حصة درس)</span>
-                      </div>
-                      <div style={{ background: 'var(--alpha-white-2)', color: 'var(--text-main)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center', border: '1px solid var(--border-color)' }}>
-                        80 نقطة يومياً تتجدد كل 24 ساعة
-                      </div>
-                      <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', marginBottom: '16px' }} />
-                      <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 24px', display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> 80 نقطة يومياً تتجدد تلقائياً طوال 30 يوماً</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> استخدام كامل لنموذج Pro الفائق</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> تفعيل ميزة التفكير المستفيض (Deep Thinking)</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> إنشاء امتحانات تفاعلية غير محدودة</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> دعم فني مباشر عبر الواتساب</li>
-                      </ul>
-                      <button
-                        onClick={() => handleSubscribe('pro_1m')}
-                        disabled={subscribingPlan !== null}
-                        style={{
-                          width: '100%',
-                          padding: '12px',
-                          borderRadius: 'var(--radius-md)',
-                          background: 'var(--card-bg)',
-                          border: '1.5px solid var(--border-color)',
-                          color: 'var(--text-main)',
-                          fontWeight: 800,
-                          fontSize: '0.9rem',
-                          cursor: subscribingPlan !== null ? 'not-allowed' : 'pointer',
-                          opacity: subscribingPlan !== null && subscribingPlan !== 'pro_1m' ? 0.6 : 1,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '8px',
-                          transition: 'var(--transition)'
-                        }}
-                      >
-                        {subscribingPlan === 'pro_1m' ? (
-                          <>
-                            <Loader2 size={16} className="animate-spin" />
-                            <span>جاري التجهيز لبوابة كاشير...</span>
-                          </>
-                        ) : (
-                          <>
-                            <CreditCard size={16} />
-                            <span>اشترك لشهر واحد</span>
-                          </>
-                        )}
-                      </button>
-                      <div className="payment-methods-strip">
-                        <span className="payment-brand-pill featured">InstaPay</span>
-                        <span className="payment-brand-pill featured">فودافون كاش</span>
-                        <span className="payment-brand-pill">ميزة</span>
-                        <span className="payment-brand-pill">فيزا/ماستر</span>
-                      </div>
-                    </div>
-
-                    {/* Plan 2: 2 Months (110 EGP - The Decoy) */}
-                    <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden' }}>
-                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--alpha-white-4)', color: 'var(--text-muted)', fontSize: '0.68rem', fontWeight: 900, padding: '3px 10px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-color)' }}>
-                        الباقة المرنة
-                      </div>
-                      <h3 style={{ fontSize: '1.2rem', fontWeight: 900, color: 'var(--text-main)', marginBottom: '6px' }}>باقة شهرين (2 Months)</h3>
-                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', margin: '12px 0 8px' }}>
-                        <span style={{ fontSize: '2rem', fontWeight: 900, color: 'var(--text-main)' }}>110</span>
-                        <span style={{ fontSize: '0.9rem', fontWeight: 700, color: 'var(--text-muted)' }}>ج.م / شهرين</span>
-                      </div>
-                      <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content' }}>
-                        <Zap size={12} />
-                        <span>1.83 جنيه / اليوم (وفر 10 ج.م)</span>
-                      </div>
-                      <div style={{ background: 'var(--alpha-white-2)', color: 'var(--text-main)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', fontWeight: 800, marginBottom: '14px', textAlign: 'center', border: '1px solid var(--border-color)' }}>
-                        90 نقطة يومياً تتجدد كل 24 ساعة
-                      </div>
-                      <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', marginBottom: '16px' }} />
-                      <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 24px', display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> 90 نقطة يومياً تتجدد تلقائياً طوال 60 يوماً</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> جميع ميزات باقة Pro مع ميزة التفكير المستفيض</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> تدريب وحل مسائل وامتحانات تفاعلية متقدمة</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> دعم فني ومتابعة أداء مستمرة</li>
-                      </ul>
-                      <button
-                        onClick={() => handleSubscribe('pro_2m')}
-                        disabled={subscribingPlan !== null}
-                        style={{
-                          width: '100%',
-                          padding: '12px',
-                          borderRadius: 'var(--radius-md)',
-                          background: 'var(--card-bg)',
-                          border: '1.5px solid var(--border-color)',
-                          color: 'var(--text-main)',
-                          fontWeight: 800,
-                          fontSize: '0.9rem',
-                          cursor: subscribingPlan !== null ? 'not-allowed' : 'pointer',
-                          opacity: subscribingPlan !== null && subscribingPlan !== 'pro_2m' ? 0.6 : 1,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '8px',
-                          transition: 'var(--transition)'
-                        }}
-                      >
-                        {subscribingPlan === 'pro_2m' ? (
-                          <>
-                            <Loader2 size={16} className="animate-spin" />
-                            <span>جاري التجهيز لبوابة كاشير...</span>
-                          </>
-                        ) : (
-                          <>
-                            <CreditCard size={16} />
-                            <span>اشترك لشهرين</span>
-                          </>
-                        )}
-                      </button>
-                      <div className="payment-methods-strip">
-                        <span className="payment-brand-pill featured">InstaPay</span>
-                        <span className="payment-brand-pill featured">فودافون كاش</span>
-                        <span className="payment-brand-pill">ميزة</span>
-                        <span className="payment-brand-pill">فيزا/ماستر</span>
-                      </div>
-                    </div>
-
-                    {/* Plan 3: 3 Months (140 EGP - The Hero Tier) */}
-                    <div className="pricing-hero-card glass">
-                      <div style={{ position: 'absolute', top: '14px', left: '14px', background: 'var(--primary-color)', color: 'var(--text-on-primary)', fontSize: '0.7rem', fontWeight: 900, padding: '4px 12px', borderRadius: 'var(--radius-full)', boxShadow: '0 2px 8px rgba(255, 183, 3, 0.3)' }}>
-                        خيار 85% من الطلاب المتفوقين
-                      </div>
-                      <h3 style={{ fontSize: '1.25rem', fontWeight: 900, color: 'var(--primary-color)', marginBottom: '6px' }}>باقة 3 أشهر (الترم بالكامل)</h3>
-                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '4px', margin: '12px 0 8px' }}>
-                        <span style={{ fontSize: '2.2rem', fontWeight: 900, color: 'var(--text-main)' }}>140</span>
-                        <span style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--primary-color)' }}>ج.م / الترم كاملاً</span>
-                      </div>
-                      <div className="pricing-micro-badge" style={{ marginBottom: '12px', width: 'fit-content', background: 'rgba(255, 183, 3, 0.15)', borderColor: 'var(--primary-color)', color: 'var(--primary-color)' }}>
-                        <Zap size={12} />
-                        <span>فقط 1.5 جنيه / اليوم (وفر 40 ج.م + ضمان الترم)</span>
-                      </div>
-                      <div style={{ background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.84rem', fontWeight: 900, marginBottom: '14px', textAlign: 'center', border: '1px solid var(--border-primary)' }}>
-                        120 نقطة يومياً تتجدد تلقائياً كل 24 ساعة
-                      </div>
-                      <hr style={{ border: 'none', borderTop: '1px solid var(--border-color)', marginBottom: '16px' }} />
-                      <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 24px', display: 'flex', flexDirection: 'column', gap: '10px', flex: 1, fontSize: '0.86rem', color: 'var(--text-secondary)' }}>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: 700 }}><CheckCircle size={15} color="var(--primary-color)" /> 120 نقطة يومياً تتجدد تلقائياً طوال 90 يوماً</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> أولوية قصوى وسرعة فائقة في الإجابات والحلول</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> تغطية شاملة لترم كامل في الامتحانات ونماذج البوكليت</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> درع حماية دائم لسلسلة المذاكرة (Streak Shield)</li>
-                        <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><CheckCircle size={15} color="var(--primary-color)" /> متابعة خاصة ودعم فني مخصص للطلاب وأولياء الأمور</li>
-                      </ul>
-                      <button
-                        onClick={() => handleSubscribe('pro_3m')}
-                        disabled={subscribingPlan !== null}
-                        className="btn-primary"
-                        style={{
-                          width: '100%',
-                          padding: '13px',
-                          borderRadius: 'var(--radius-md)',
-                          fontWeight: 900,
-                          fontSize: '0.95rem',
-                          border: 'none',
-                          cursor: subscribingPlan !== null ? 'not-allowed' : 'pointer',
-                          boxShadow: 'var(--shadow-glow)',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '8px',
-                          transition: 'var(--transition)'
-                        }}
-                      >
-                        {subscribingPlan === 'pro_3m' ? (
-                          <>
-                            <Loader2 size={16} className="animate-spin" />
-                            <span>جاري التجهيز لبوابة كاشير...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Sparkles size={16} />
-                            <span>اشترك في باقة الترم بالكامل (140 ج.م)</span>
-                          </>
-                        )}
-                      </button>
-                      <div className="payment-methods-strip">
-                        <span className="payment-brand-pill featured">InstaPay</span>
-                        <span className="payment-brand-pill featured">فودافون كاش</span>
-                        <span className="payment-brand-pill">ميزة</span>
-                        <span className="payment-brand-pill">فيزا/ماستر</span>
-                      </div>
-                    </div>
-
+                  <div id="tour-subscriptions-plans" className="plans-grid">
+                    {Object.values(KASHIER_PLANS).map((plan) => {
+                      const copy = PLAN_CARD_COPY[plan.id];
+                      const usage = pointsPricing.plans[plan.id];
+                      const isHero = plan.id === 'pro_3m';
+                      const regularPrice = KASHIER_PLANS.pro_1m.amount * Math.round(plan.durationDays / 30);
+                      const saving = regularPrice - plan.amount;
+                      const perDay = +(plan.amount / plan.durationDays).toFixed(2);
+                      const isBusy = subscribingPlan === plan.id;
+                      return (
+                        <div key={plan.id} className={`plan-card-v2 ${isHero ? 'hero' : ''}`}>
+                          {isHero && <span className="plan-ribbon"><Crown size={15} /> {copy.ribbon}</span>}
+                          <div className="plan-card-top">
+                            <h3>{copy.title}</h3>
+                            <span className="plan-chip">{copy.badge}</span>
+                          </div>
+                          <div className="plan-price-row">
+                            <span className="plan-price num">{plan.amount}</span>
+                            <span className="plan-period">ج.م / {plan.durationDays} يوماً</span>
+                          </div>
+                          <div className="plan-meta-row">
+                            {saving > 0 && <span className="plan-old-price num">{regularPrice} ج.م</span>}
+                            {saving > 0 && <span className="tag green">وفر {saving} ج.م</span>}
+                            <span className="plan-per-day"><span className="num">{perDay}</span> ج.م في اليوم</span>
+                          </div>
+                          <div className="plan-points-box">
+                            <strong><span className="num">{plan.dailyCoins}</span> نقطة يومياً</strong>
+                            {usage && <span>حوالي {usage.chatsPerDay.offPeak} سؤال أو {usage.thinkingPerDay.offPeak} سؤال بالتفكير العميق</span>}
+                          </div>
+                          <ul className="plan-features">
+                            {copy.features.map((feature) => (
+                              <li key={feature}><Check size={17} strokeWidth={2.5} /> {feature}</li>
+                            ))}
+                          </ul>
+                          <button
+                            type="button"
+                            onClick={() => handleSubscribe(plan.id)}
+                            disabled={subscribingPlan !== null}
+                            className={`plan-cta ${isHero ? 'btn-primary' : 'btn-secondary'}`}
+                          >
+                            {isBusy && <Loader2 size={17} className="animate-spin" />}
+                            <span>{isBusy ? 'جاري التجهيز للدفع...' : `${copy.cta} (${plan.amount} ج.م)`}</span>
+                          </button>
+                          {isHero && isMobile && user && (
+                            <a
+                              className="plan-parent-btn"
+                              href={`https://wa.me/?text=${encodeURIComponent(`السلام عليكم، أنا بذاكر على منصة EGS AI وعايز أشترك في باقة 3 شهور بـ ${plan.amount} ج.م. ممكن تشترك لي من الرابط ده: ${typeof window !== 'undefined' ? `${window.location.origin}/sponsor?student_id=${user.id}&plan=pro_3m` : ''}`)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              <MessageCircle size={16} />
+                              أرسلها لولي أمرك على واتساب
+                            </a>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
 
-                  {/* Pro Superpowers Comparison Table */}
-                  <div className="glass" style={{ padding: isMobile ? '20px 16px' : '28px 24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)', direction: 'rtl' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-                      <Crown size={22} color="#FFB703" />
-                      <div>
-                        <h4 style={{ fontSize: '1.1rem', fontWeight: 900, margin: 0, color: 'var(--text-main)' }}>
-                          مقارنة القدرات الفائقة: الحساب التجريبي مقابل باقات Pro
-                        </h4>
-                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                          كل ما تحتاجه للحصول على الدرجات النهائية وتوفير آلاف الجنيهات في الدروس الخصوصية
-                        </span>
-                      </div>
-                    </div>
-
-                    <div style={{ overflowX: 'auto' }} className="custom-scrollbar">
-                      <table className="pro-superpowers-table">
-                        <thead>
-                          <tr>
-                            <th style={{ width: '40%' }}>الميزة التعليمية</th>
-                            <th style={{ width: '30%', color: 'var(--text-muted)' }}>الحساب المجاني</th>
-                            <th style={{ width: '30%', color: 'var(--primary-color)' }}>باقات Pro الأكاديمية</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>رصيد العملات اليومي المتجدد</td>
-                            <td style={{ color: 'var(--text-muted)' }}>رصيد تجريبي لمرة واحدة</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>80 إلى 120 نقطة يومياً تتجدد تلقائياً</td>
-                          </tr>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>نموذج التفكير المعمق للمسائل (Deep Thinking)</td>
-                            <td style={{ color: 'var(--text-muted)' }}>غير متوفر</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>متاح بالكامل مع خطوات الحل التفصيلية</td>
-                          </tr>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>حل وتصوير أسئلة الكتب الخارجية والكاميرا</td>
-                            <td style={{ color: 'var(--text-muted)' }}>محدود جداً</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>غير محدود (المعاصر، الامتحان، الأضواء)</td>
-                          </tr>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>محاكي بوكليت الوزارة والتشخيص الأكاديمي</td>
-                            <td style={{ color: 'var(--text-muted)' }}>تصحيح أولي فقط</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>توليد بوكليت كامل + تشخيص مفاهيمي فوري</td>
-                          </tr>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>دفتري الذكي وبنك القوانين السحابي</td>
-                            <td style={{ color: 'var(--text-muted)' }}>محدود محلياً</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>سحابي دائم للمراجعة ليلة الامتحان</td>
-                          </tr>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>توقعات ليلة الامتحان ومراجعة الجمهورية</td>
-                            <td style={{ color: 'var(--text-muted)' }}>غير متوفر</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>أولوية قصوى ونماذج امتحانات متوقعة</td>
-                          </tr>
-                          <tr>
-                            <td style={{ fontWeight: 700 }}>دعم فني وأكاديمي مباشر عبر الواتساب</td>
-                            <td style={{ color: 'var(--text-muted)' }}>دعم تلقائي</td>
-                            <td style={{ color: '#22c55e', fontWeight: 800 }}>دعم مباشر سريع للطلاب وأولياء الأمور</td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {/* Payment Gateway Information (Kashier) */}
-                  <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                    <h4 style={{ fontWeight: 800, color: 'var(--primary-color)', marginBottom: '10px', fontSize: '0.98rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <ShieldCheck size={18} />
-                      <span>طرق الدفع الإلكتروني الآمنة عبر بوابة كاشير (Kashier)</span>
-                    </h4>
-                    <p style={{ lineHeight: '1.7', fontSize: '0.88rem', color: 'var(--text-secondary)', margin: '0 0 14px' }}>
-                      يتم معالجة كافة المعاملات المالية على الموقع بشكل آمن ومشفر 100% عبر بوابة الدفع <strong>كاشير Kashier</strong> المعتمدة بالبنك المركزي المصري.
-                    </p>
-                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', fontSize: '0.8rem', fontWeight: 700 }}>
-                      {['Visa', 'Mastercard', 'ميزة Meeza', 'فودافون كاش', 'أورانج كاش', 'اتصالات كاش', 'WE Pay', 'Instapay'].map((method, i) => (
-                        <span key={i} style={{ background: 'var(--primary-light)', color: 'var(--primary-color)', padding: '5px 12px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-primary)' }}>
-                          {method}
-                        </span>
+                  <div className="pay-strip">
+                    <div className="pay-strip-methods">
+                      <span className="pay-strip-label"><Lock size={16} /> دفع آمن عبر كاشير</span>
+                      {['Visa', 'Mastercard', 'ميزة', 'فودافون كاش', 'أورنج كاش', 'اتصالات كاش', 'WE Pay', 'إنستاباي'].map((method) => (
+                        <span key={method} className="payment-brand-pill">{method}</span>
                       ))}
                     </div>
+                    <button type="button" className="pay-strip-toggle" onClick={() => setShowPointsGuide(v => !v)} aria-expanded={showPointsGuide}>
+                      <span>كيف تُخصم النقاط؟</span>
+                      <ChevronDown size={16} style={{ transform: showPointsGuide ? 'rotate(180deg)' : 'none', transition: 'var(--transition)' }} />
+                    </button>
                   </div>
+
+                  {showPointsGuide && <PointsUsageGuide pricing={pointsPricing} isMobile={isMobile} />}
                 </>
               )}
 
-              {/* Cancellation & Refund Policy Notice */}
-              <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)', direction: 'rtl' }}>
-                <h4 style={{ fontWeight: 800, color: 'var(--primary-color)', marginBottom: '8px', fontSize: '0.92rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <AlertCircle size={17} />
-                  <span>سياسة الإلغاء والاسترجاع (Refund Policy):</span>
-                </h4>
-                <p style={{ lineHeight: '1.7', fontSize: '0.84rem', color: 'var(--text-secondary)', margin: 0 }}>
-                  يمكنك طلب إلغاء الاشتراك واسترداد المبلغ المدفوع خلال <strong>3 أيام (72 ساعة)</strong> فقط من تاريخ وتوقيت الشراء، <strong>بشرط ألا تكون قد استخدمت أي جزء من نقاط الباقة المتاحة</strong>. في حال استخدام أية نقطة، يعتبر الاشتراك غير قابل للاسترجاع.
-                </p>
-              </div>
-
-              {/* Points system info card */}
-              <div className="glass" style={{ padding: '18px 24px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <Sparkles size={18} color="var(--primary-color)" />
-                  <span style={{ fontSize: '0.88rem', fontWeight: 600 }}>رصيد نقاطك الحالي في الحساب:</span>
-                </div>
-                <div style={{ fontSize: '1.1rem', fontWeight: 900, color: 'var(--primary-color)' }}>
-                  {coins.toFixed(2)} نقطة
-                </div>
-              </div>
-
-              {/* Support & Contact Banner */}
-              <div style={{ textAlign: 'center', padding: '16px', background: 'var(--primary-light)', borderRadius: 'var(--radius-lg)', color: 'var(--primary-color)', fontSize: '0.88rem', fontWeight: 700 }}>
-                تحتاج مساعدة أو استفسار بخصوص الاشتراكات؟ تواصل معنا عبر الهاتف/واتساب: <a href="tel:01037220587" style={{ color: 'inherit', textDecoration: 'underline', direction: 'ltr', display: 'inline-block' }}>01037220587</a> أو البريد الإلكتروني: <a href="mailto:business@egsaiedu.com" style={{ color: 'inherit', textDecoration: 'underline' }}>business@egsaiedu.com</a>
-              </div>
-
-              {/* Website Footer Links */}
-              <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-color)', textAlign: 'center', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '16px', flexWrap: 'wrap', fontSize: '0.84rem' }}>
-                <a href="/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', fontWeight: 600, textDecoration: 'none' }}>سياسة الخصوصية</a>
-                <span style={{ color: 'var(--border-color)' }}>•</span>
-                <a href="/terms#refund" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', fontWeight: 600, textDecoration: 'none' }}>سياسة الإرجاع والاسترجاع</a>
-                <span style={{ color: 'var(--border-color)' }}>•</span>
-                <a href="/contact" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', fontWeight: 600, textDecoration: 'none' }}>نموذج التواصل والدعم الفني</a>
+              <div className="plans-footer">
+                <span className="plans-footer-refund">
+                  <ShieldCheck size={17} />
+                  استرداد كامل خلال 3 أيام من الشراء بشرط عدم استهلاك أي نقطة —{' '}
+                  <a href="/terms#refund" target="_blank" rel="noopener noreferrer">سياسة الاسترداد</a>
+                </span>
+                <span className="plans-footer-contact">
+                  واتساب: <a href="tel:01037220587" dir="ltr">01037220587</a>
+                  <a href="mailto:business@egsaiedu.com">business@egsaiedu.com</a>
+                </span>
+                {user && !isUserSubscribed && !isMobile && (
+                  <a
+                    className="soft-pill plans-parent-link"
+                    href={`https://wa.me/?text=${encodeURIComponent(`السلام عليكم، أنا بذاكر على منصة EGS AI وعايز أشترك في باقة. ممكن تشترك لي من الرابط ده: ${typeof window !== 'undefined' ? `${window.location.origin}/sponsor?student_id=${user.id}&plan=pro_3m` : ''}`)}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <MessageCircle size={15} />
+                    أرسل الباقة لولي أمرك
+                  </a>
+                )}
               </div>
 
             </div>
@@ -15008,7 +13389,7 @@ export default function App() {
                   <div className="glass" style={{ padding: '20px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '10px' }}>
                     <span style={{ fontSize: '0.9rem', fontWeight: 800, color: 'var(--primary-color)' }}>توزيع الطلاب حسب الصفوف</span>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {Object.entries(GRADE_NAMES).map(([key, name]) => {
+                      {stageEntriesWithUnselected.map(([key, name]) => {
                         const count = dashboardStats?.usersByGrade?.[key] || 0;
                         const pct = dashboardStats?.totalUsers ? Math.round((count / dashboardStats.totalUsers) * 100) : 0;
                         return (
@@ -15039,7 +13420,7 @@ export default function App() {
                         </span>
                         <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
                           <span className="plan-badge plan-badge-free" style={{ fontSize: '0.72rem' }}>
-                            {GRADE_NAMES[dashboardStats.highestUsageUser.grade_level]}
+                            {gradeName(dashboardStats.highestUsageUser.grade_level)}
                           </span>
                           <span className="plan-badge plan-badge-pro" style={{ fontSize: '0.72rem' }}>
                             {dashboardStats.highestUsageUser.message_count} رسالة
@@ -15057,7 +13438,7 @@ export default function App() {
                     {dashboardStats?.highestUsageGrade ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                         <span style={{ fontSize: '1.25rem', fontWeight: 900, color: 'var(--primary-color)' }}>
-                          {GRADE_NAMES[dashboardStats.highestUsageGrade.grade_level]}
+                          {gradeName(dashboardStats.highestUsageGrade.grade_level)}
                         </span>
                         <span style={{ fontSize: '0.84rem', color: 'var(--text-secondary)' }}>
                           إجمالي رسائل هذا الصف: {dashboardStats.highestUsageGrade.message_count} رسالة
@@ -15160,7 +13541,7 @@ export default function App() {
                         <span>توزيع مجموعات البطاقات حسب الصفوف الدراسية</span>
                       </span>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {Object.entries(GRADE_NAMES).map(([key, name]) => {
+                        {stageEntriesWithUnselected.map(([key, name]) => {
                           const count = dashboardStats?.flashcardsByGrade?.[key] || 0;
                           const totalDecks = dashboardStats?.totalFlashcardDecksCount || 1;
                           const pct = count > 0 ? Math.round((count / totalDecks) * 100) : 0;
@@ -15268,7 +13649,7 @@ export default function App() {
                         <span>توزيع مستخدمي التطبيق حسب الصفوف الدراسية</span>
                       </span>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {Object.entries(GRADE_NAMES).map(([key, name]) => {
+                        {stageEntriesWithUnselected.map(([key, name]) => {
                           const count = dashboardStats?.pwaUsersByGrade?.[key] || 0;
                           const totalPwa = dashboardStats?.totalPwaUsersCount || 1;
                           const pct = count > 0 ? Math.round((count / totalPwa) * 100) : 0;
@@ -15345,7 +13726,7 @@ export default function App() {
                               </div>
 
                               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
-                                <span>{GRADE_NAMES[stu.grade_level] || stu.grade_level}</span>
+                                <span>{gradeName(stu.grade_level)}</span>
                                 <span style={{ direction: 'ltr' }}>{stu.email || stu.phone}</span>
                               </div>
 
@@ -15391,75 +13772,18 @@ export default function App() {
               {/* Curriculum & Content Management Section */}
               {adminSection === 'curriculum' && (
               <>
-              {/* Grade Level Activations */}
-              <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--primary-color)', marginBottom: '12px' }}>
-                  تفعيل المراحل والصفوف الدراسية
-                </h3>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
-                  حدد الصفوف الدراسية المتاحة للطلاب الجدد عند التسجيل والطلاب الحاليين في المنصة.
-                </p>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px' }}>
-                  {Object.entries(GRADE_NAMES).map(([key, name]) => {
-                    const isChecked = activeGradeLevels.includes(key);
-                    return (
-                      <label key={key} style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', padding: '10px 14px', borderRadius: 'var(--radius-sm)', background: isChecked ? 'var(--primary-light)' : 'var(--alpha-white-2)', border: '1px solid', borderColor: isChecked ? 'var(--primary-color)' : 'var(--border-color)', transition: 'var(--transition)' }}>
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => handleToggleGradeActive(key)}
-                          style={{ accentColor: 'var(--primary-color)', width: '16px', height: '16px' }}
-                        />
-                        <span style={{ fontSize: '0.85rem', fontWeight: 600, color: isChecked ? 'var(--primary-color)' : 'var(--text-main)' }}>{name}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Baccalaureate Tracks Activation */}
-              <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>
-                  <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                    إدارة وتفعيل مسارات السنة الثانية بكالوريا
-                  </h3>
-                  {savingTracks && (
-                    <span style={{ fontSize: '0.75rem', color: 'var(--accent-gold)' }}>جاري حفظ التغييرات...</span>
-                  )}
-                </div>
-                <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
-                  حدد المسارات المتاحة لطلاب الصف الثاني الثانوي (البكالوريا) لتظهر لهم في خيارات التسجيل واختيار المواد الدراسية.
-                </p>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
-                  {Object.values(BACCALAUREATE_TRACKS).map((track) => {
-                    const isChecked = activeTracks.includes(track.id);
-                    const trackElectives = getElectiveSubjectsForTrack(track.id);
-                    return (
-                      <label key={track.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', cursor: 'pointer', padding: '12px 14px', borderRadius: 'var(--radius-sm)', background: isChecked ? 'var(--primary-light)' : 'var(--alpha-white-2)', border: '1px solid', borderColor: isChecked ? 'var(--primary-color)' : 'var(--border-color)', transition: 'var(--transition)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            onChange={() => handleToggleTrackActive(track.id)}
-                            style={{ accentColor: 'var(--primary-color)', width: '16px', height: '16px' }}
-                          />
-                          <span style={{ fontSize: '0.88rem', fontWeight: 700, color: isChecked ? 'var(--primary-color)' : 'var(--text-main)' }}>{track.name}</span>
-                        </div>
-                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginRight: '26px' }}>{track.description}</span>
-                        {trackElectives.length > 0 ? (
-                          <span style={{ fontSize: '0.7rem', color: 'var(--primary-color)', marginRight: '26px', marginTop: '2px' }}>
-                            المواد المضافة للمسار: {trackElectives.join('، ')}
-                          </span>
-                        ) : (
-                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginRight: '26px', marginTop: '2px' }}>
-                            لا توجد مواد مضافة لهذا المسار حتى الآن
-                          </span>
-                        )}
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
+              <EducationCatalogManager
+                token={token}
+                curricula={curriculums}
+                onCatalogSaved={(catalog) => {
+                  applyEducationCatalog(catalog);
+                  loadSystemConfig(undefined, undefined, true);
+                }}
+                onCurriculaChanged={() => {
+                  loadCurriculums();
+                  loadSystemConfig(undefined, undefined, true);
+                }}
+              />
 
               {/* Two Column Layout */}
               <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr', gap: '24px' }}>
@@ -15531,16 +13855,20 @@ export default function App() {
                       <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>السنة الدراسية:</label>
                       <select
                         value={uploadGrade}
-                        onChange={(e) => setUploadGrade(e.target.value)}
+                        onChange={(e) => { setUploadGrade(e.target.value); setUploadTrackId(''); setUploadIsElective(false); }}
                         style={{ padding: '10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', outline: 'none', background: 'var(--sidebar-bg)', color: 'var(--text-main)' }}
                       >
-                        {Object.entries(GRADE_NAMES).map(([key, name]) => (
-                          <option key={key} value={key} style={{ background: 'var(--card-bg)' }}>{name}</option>
+                        {sortedSystems(educationCatalog).map(sys => (
+                          <optgroup key={sys.id} label={sys.name}>
+                            {stagesOfSystem(educationCatalog, sys.id).map(st => (
+                              <option key={st.id} value={st.id} style={{ background: 'var(--card-bg)' }}>{st.name}{st.active ? '' : ' (غير مفعل)'}</option>
+                            ))}
+                          </optgroup>
                         ))}
                       </select>
                     </div>
 
-                    {uploadGrade === '2_high' && (
+                    {tracksOfStage(educationCatalog, uploadGrade).length > 0 && (
                       <>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                           <label style={{ fontSize: '0.85rem', fontWeight: 600 }}>المسار الدراسي (اختياري / مادة تخصص):</label>
@@ -15549,14 +13877,14 @@ export default function App() {
                             onChange={(e) => setUploadTrackId(e.target.value)}
                             style={{ padding: '10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', outline: 'none', background: 'var(--sidebar-bg)', color: 'var(--text-main)' }}
                           >
-                            <option value="">مادة مشتركة لجميع مسارات البكالوريا</option>
-                            {Object.values(BACCALAUREATE_TRACKS).map((track) => (
+                            <option value="">مادة مشتركة لجميع مسارات هذا الصف</option>
+                            {tracksOfStage(educationCatalog, uploadGrade).map((track) => (
                               <option key={track.id} value={track.id}>{track.name}</option>
                             ))}
                           </select>
                         </div>
 
-                        {uploadTrackId && (
+                        {findStage(educationCatalog, uploadGrade)?.electivesEnabled && (
                           <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.82rem', color: 'var(--text-main)', cursor: 'pointer' }}>
                             <input
                               type="checkbox"
@@ -15564,7 +13892,7 @@ export default function App() {
                               onChange={(e) => setUploadIsElective(e.target.checked)}
                               style={{ accentColor: 'var(--primary-color)', width: '15px', height: '15px' }}
                             />
-                            <span>هذه المادة هي مادة اختيارية في هذا المسار</span>
+                            <span>مادة اختيارية (يختارها الطالب ضمن مساره)</span>
                           </label>
                         )}
                       </>
@@ -15732,10 +14060,15 @@ export default function App() {
                                 )}
                               </td>
                               <td style={{ padding: '12px 8px' }}>
-                                <div>{GRADE_NAMES[curr.grade_level]}</div>
-                                {curr.track_id && BACCALAUREATE_TRACKS[curr.track_id] && (
+                                <div>{gradeName(curr.grade_level)}</div>
+                                {(curr.track_id || curr.is_elective) && (
                                   <div style={{ fontSize: '0.72rem', color: 'var(--primary-color)', marginTop: '2px', fontWeight: 600 }}>
-                                    {BACCALAUREATE_TRACKS[curr.track_id].name} {curr.is_elective ? '(اختيارية)' : ''}
+                                    {trackName(educationCatalog, curr.track_id)} {curr.is_elective ? '(اختيارية)' : ''}
+                                  </div>
+                                )}
+                                {(educationCatalog.subjectLinks[curr.id]?.stageIds.length || 0) > 0 && (
+                                  <div style={{ fontSize: '0.72rem', color: 'var(--accent-cyan)', marginTop: '2px' }}>
+                                    مشتركة مع: {educationCatalog.subjectLinks[curr.id].stageIds.map(id => gradeName(id)).join('، ')}
                                   </div>
                                 )}
                               </td>
@@ -16574,7 +14907,7 @@ export default function App() {
                         }}
                       >
                         <option value="all">جميع الصفوف الدراسية</option>
-                        {Object.entries(GRADE_NAMES).map(([val, label]) => (
+                        {stageEntriesWithUnselected.map(([val, label]) => (
                           <option key={val} value={val}>{label}</option>
                         ))}
                       </select>
@@ -16684,7 +15017,7 @@ export default function App() {
                                       </span>
 
                                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.74rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                        <span>{GRADE_NAMES[u.grade_level] || u.grade_level}</span>
+                                        <span>{gradeName(u.grade_level)}</span>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                           <span style={{
                                             padding: '1px 6px',
@@ -16873,7 +15206,7 @@ export default function App() {
                               <div style={{ padding: '10px', borderRadius: 'var(--radius-sm)', background: 'var(--sidebar-bg)', border: '1px solid var(--border-color)' }}>
                                 <span style={{ fontSize: '0.74rem', color: 'var(--text-muted)', display: 'block' }}>الصف الدراسي</span>
                                 <span style={{ fontSize: '0.84rem', fontWeight: 700, color: 'var(--text-main)', marginTop: '4px', display: 'block' }}>
-                                  {GRADE_NAMES[selectedCsStudent.grade_level] || selectedCsStudent.grade_level}
+                                  {gradeName(selectedCsStudent.grade_level)}
                                 </span>
                               </div>
 
@@ -17607,37 +15940,17 @@ export default function App() {
 
         {/* VIEW 4: Student Profile */}
         {activeTab === 'profile' && user && (
-          <div className="mobile-main-with-nav" style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '24px 16px' : '40px 24px', background: 'var(--bg-color)' }}>
-            {isMobile && (
-              <button 
-                onClick={() => setActiveTab('chat')}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  background: 'var(--card-bg)',
-                  border: '1px solid var(--border-color)',
-                  color: 'var(--text-main)',
-                  padding: '8px 16px',
-                  borderRadius: 'var(--radius-md)',
-                  cursor: 'pointer',
-                  marginBottom: '24px',
-                  fontWeight: 700,
-                  fontSize: '0.88rem',
-                  fontFamily: 'var(--font-arabic)',
-                  boxShadow: 'var(--shadow-sm)',
-                  transition: 'var(--transition)'
-                }}
-              >
-                <ArrowRight size={16} />
-                <span>العودة للدردشة</span>
-              </button>
-            )}
-            <div style={{ maxWidth: '600px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '30px' }} className="animate-scale-in">
-              
-              <div>
-                <h2 style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--text-main)' }}>الملف الشخصي للطالب</h2>
-                <p style={{ color: 'var(--text-muted)', marginTop: '4px' }}>تعديل بياناتك الشخصية وتغيير كلمة المرور وإدارة باقة اشتراكك التعليمي.</p>
+          <div className="mobile-main-with-nav page-scroll custom-scrollbar">
+            <div className="page-container narrow profile-page" style={{ maxWidth: '640px' }}>
+              <div className="page-head">
+                <div className="page-head-text">
+                  <button type="button" className="page-back-link" onClick={() => setActiveTab('chat')}>
+                    <ArrowRight size={16} />
+                    <span>العودة للمحادثة</span>
+                  </button>
+                  <h1>الملف الشخصي</h1>
+                  <p>بياناتك، مسارك الدراسي، كلمة المرور، وأجهزتك المتصلة.</p>
+                </div>
               </div>
 
 
@@ -17692,109 +16005,88 @@ export default function App() {
                   </div>
                 </form>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-                  <div>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block' }}>البريد الإلكتروني:</span>
-                    <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-main)', direction: 'ltr', display: 'inline-block', marginTop: '4px' }}>{user.email || user.phone}</span>
-                  </div>
-                  <div>
-                    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>الصف الدراسي الحالي:</span>
-                    <select
-                      value={user.grade_level}
-                      onChange={(e) => {
-                        const newGrade = e.target.value;
-                        if (newGrade === '2_high') {
-                          handleUpdateUserGrade(newGrade, selectedTrack, selectedElective);
-                        } else {
-                          handleUpdateUserGrade(newGrade, null, null);
-                        }
-                      }}
-                      style={{
-                        padding: '6px 10px',
-                        borderRadius: '6px',
-                        border: '1px solid var(--border-color)',
-                        background: 'var(--sidebar-bg)',
-                        color: 'var(--text-main)',
-                        fontSize: '0.85rem',
-                        fontWeight: 600,
-                        outline: 'none',
-                        width: '100%',
-                      }}
-                    >
-                      {Object.entries(GRADE_NAMES)
-                        .filter(([key]) => user.role === 'admin' || activeGradeLevels.length === 0 || activeGradeLevels.includes(key) || key === user.grade_level)
-                        .map(([key, name]) => (
-                          <option key={key} value={key}>{name}</option>
-                        ))
-                      }
-                    </select>
-                  </div>
+                <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block' }}>البريد الإلكتروني:</span>
+                  <span style={{ fontSize: '1rem', fontWeight: 700, color: 'var(--text-main)', direction: 'ltr', display: 'inline-block', marginTop: '4px', overflowWrap: 'anywhere' }}>{user.email || user.phone}</span>
+                </div>
+              </div>
+
+              {/* Study path: system, stage, track, elective and resulting subjects */}
+              <div className="glass" style={{ padding: '24px', borderRadius: 'var(--radius-md)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '16px', color: 'var(--text-main)' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <GraduationCap size={20} style={{ color: 'var(--accent-cyan)' }} />
+                  <h3 style={{ fontSize: '1.1rem', fontWeight: 700, color: 'var(--text-main)' }}>مساري الدراسي</h3>
                 </div>
 
-                {user.grade_level === '2_high' && (
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px', borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
-                    <div>
-                      <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>مسار البكالوريا:</span>
-                      <select
-                        value={user.track_id || selectedTrack}
-                        onChange={(e) => {
-                          const newTrack = e.target.value;
-                          const electives = getElectiveSubjectsForTrack(newTrack);
-                          const newElective = electives.length > 0 ? electives[0] : '';
-                          handleUpdateUserGrade('2_high', newTrack, newElective);
-                        }}
-                        style={{
-                          padding: '6px 10px',
-                          borderRadius: '6px',
-                          border: '1px solid var(--border-color)',
-                          background: 'var(--sidebar-bg)',
-                          color: 'var(--text-main)',
-                          fontSize: '0.85rem',
-                          fontWeight: 600,
-                          outline: 'none',
-                          width: '100%',
-                        }}
-                      >
-                        {Object.values(BACCALAUREATE_TRACKS)
-                          .filter(t => user.role === 'admin' || activeTracks.length === 0 || activeTracks.includes(t.id) || t.id === user.track_id)
-                          .map((track) => (
-                            <option key={track.id} value={track.id}>{track.name}</option>
-                          ))
-                        }
-                      </select>
-                    </div>
+                {!profilePathDraft ? (
+                  <>
                     {(() => {
-                      const currentTrack = user.track_id || selectedTrack;
-                      const electives = getElectiveSubjectsForTrack(currentTrack);
-                      if (electives.length === 0) return null;
+                      const stage = findStage(educationCatalog, user.grade_level);
+                      const system = stage ? findSystem(educationCatalog, stage.systemId) : undefined;
+                      const subjects = getActiveSubjectsForGrade(user.grade_level);
                       return (
-                        <div>
-                          <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>المادة الاختيارية:</span>
-                          <select
-                            value={user.elective_subject || selectedElective || electives[0]}
-                            onChange={(e) => {
-                              handleUpdateUserGrade('2_high', currentTrack, e.target.value);
-                            }}
-                            style={{
-                              padding: '6px 10px',
-                              borderRadius: '6px',
-                              border: '1px solid var(--border-color)',
-                              background: 'var(--sidebar-bg)',
-                              color: 'var(--text-main)',
-                              fontSize: '0.85rem',
-                              fontWeight: 600,
-                              outline: 'none',
-                              width: '100%',
-                            }}
-                          >
-                            {electives.map((subj) => (
-                              <option key={subj} value={subj}>{subj}</option>
-                            ))}
-                          </select>
-                        </div>
+                        <>
+                          <div className="study-path-summary">
+                            <div className="study-path-item"><span>النظام التعليمي</span><strong>{system?.name || 'غير محدد'}</strong></div>
+                            <div className="study-path-item"><span>الصف الدراسي</span><strong>{gradeName(user.grade_level)}</strong></div>
+                            {user.track_id && <div className="study-path-item"><span>المسار أو الشعبة</span><strong>{trackName(educationCatalog, user.track_id) || user.track_id}</strong></div>}
+                            {user.elective_subject && <div className="study-path-item"><span>المادة الاختيارية</span><strong>{user.elective_subject}</strong></div>}
+                          </div>
+                          {stage && subjects.length > 0 && (
+                            <div className="path-subjects">
+                              <h4 className="path-section-title" style={{ marginBottom: '8px' }}>موادك الدراسية ({subjects.length})</h4>
+                              <div className="path-subject-list">
+                                {subjects.map(c => (
+                                  <span key={c.id} className="path-subject">{c.subject_name}{c.is_placeholder && <small>قيد الإعداد</small>}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>
                       );
                     })()}
-                  </div>
+                    <div className="study-path-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        onClick={() => setProfilePathDraft({ stageId: user.grade_level === UNSELECTED_STAGE ? '' : user.grade_level, trackId: user.track_id || null, electiveSubject: user.elective_subject || null })}
+                      >
+                        <Layers size={16} />
+                        <span>تغيير الصف أو المسار أو المواد</span>
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <StudyPathPicker
+                      catalog={educationCatalog}
+                      curricula={curriculums}
+                      activeCurriculumIds={activeCurriculumIds}
+                      value={profilePathDraft}
+                      current={{ stageId: user.grade_level, trackId: user.track_id, electiveSubject: user.elective_subject }}
+                      onChange={setProfilePathDraft}
+                    />
+                    <p className="path-hint">تغيير الصف أو المسار يفتح لك محادثة جديدة بمواد مسارك الجديد، ومحادثاتك وتقدمك السابق محفوظين.</p>
+                    <div className="study-path-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        disabled={profilePathSaving || !isPathComplete(educationCatalog, profilePathDraft, { stageId: user.grade_level, trackId: user.track_id })}
+                        onClick={async () => {
+                          setProfilePathSaving(true);
+                          const ok = await handleUpdateUserGrade(profilePathDraft.stageId, profilePathDraft.trackId || null, profilePathDraft.electiveSubject || null);
+                          setProfilePathSaving(false);
+                          if (ok) setProfilePathDraft(null);
+                        }}
+                      >
+                        {profilePathSaving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                        <span>حفظ مساري الدراسي</span>
+                      </button>
+                      <button type="button" className="btn-secondary" disabled={profilePathSaving} onClick={() => setProfilePathDraft(null)}>
+                        إلغاء
+                      </button>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -18308,33 +16600,7 @@ export default function App() {
 
         {/* VIEW 5: Exams & Testing */}
         {activeTab === 'exams' && (
-          <div className="mobile-main-with-nav" style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '24px 16px' : '40px 24px', background: 'var(--bg-color)', direction: 'rtl', display: 'flex', flexDirection: 'column' }}>
-            {isMobile && (
-              <button 
-                onClick={() => setActiveTab('chat')}
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  background: 'var(--card-bg)',
-                  border: '1px solid var(--border-color)',
-                  color: 'var(--text-main)',
-                  padding: '8px 16px',
-                  borderRadius: 'var(--radius-md)',
-                  cursor: 'pointer',
-                  marginBottom: '24px',
-                  fontWeight: 700,
-                  fontSize: '0.88rem',
-                  fontFamily: 'var(--font-arabic)',
-                  boxShadow: 'var(--shadow-sm)',
-                  transition: 'var(--transition)',
-                  alignSelf: 'flex-start'
-                }}
-              >
-                <ArrowRight size={16} />
-                <span>العودة للدردشة</span>
-              </button>
-            )}
+          <div className={`mobile-main-with-nav page-scroll custom-scrollbar ${selectedExam && !examResult ? 'exam-active' : ''}`} style={{ display: 'flex', flexDirection: 'column' }}>
             {!user ? (
               <div id="tour-exams-header" style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', width: '100%', padding: '20px' }}>
                 <div id="tour-exams-list" className="glass text-center animate-scale-in" style={{
@@ -18434,15 +16700,17 @@ export default function App() {
                 </div>
               </div>
             ) : (
-              <div style={{ maxWidth: '900px', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '30px', width: '100%' }} className="animate-scale-in">
-              
-              {/* Header */}
-              <div id="tour-exams-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '16px', borderBottom: '1px solid var(--border-color)', paddingBottom: '20px' }}>
-                <div>
-                  <h2 style={{ fontSize: '1.8rem', fontWeight: 800, color: 'var(--text-main)' }}>الامتحانات والاختبارات التقييمية</h2>
-                  <p style={{ color: 'var(--text-muted)', marginTop: '4px', fontSize: '0.92rem' }}>
-                    قسم التقييم الذكي القائم على الذكاء الاصطناعي لقياس فهمك للمنهج الدراسي وتصحيح أخطائك.
-                  </p>
+              <div className="page-container" style={{ maxWidth: '1000px' }}>
+
+              {!(selectedExam && !examResult) && (
+              <div id="tour-exams-header" className="page-head">
+                <div className="page-head-text">
+                  <button type="button" className="page-back-link" onClick={() => setActiveTab('chat')}>
+                    <ArrowRight size={16} />
+                    <span>العودة للمحادثة</span>
+                  </button>
+                  <h1>بنك الامتحانات</h1>
+                  <p>امتحانات من دروس منهجك بتصحيح فوري وشرح لكل غلطة.</p>
                 </div>
                 
                 {!selectedExam && (
@@ -18461,22 +16729,7 @@ export default function App() {
                       if (subj) fetchCurriculumStructure(targetGrade, subj);
                     }}
                     disabled={generatingExam}
-                    className="btn-primary"
-                    style={{
-                      padding: '12px 22px',
-                      borderRadius: '12px',
-                      fontWeight: 800,
-                      fontSize: '0.9rem',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '8px',
-                      border: 'none',
-                      cursor: 'pointer',
-                      color: 'var(--text-on-primary)',
-                      background: 'var(--primary-color)',
-                      boxShadow: 'var(--shadow-glow)',
-                      transition: 'var(--transition)'
-                    }}
+                    className="btn-primary compact"
                   >
                     {generatingExam ? (
                       <>
@@ -18485,17 +16738,19 @@ export default function App() {
                       </>
                     ) : (
                       <>
-                        <span>توليد امتحان مخصص جديد</span>
+                        <Plus size={17} strokeWidth={2.5} />
+                        <span>امتحان جديد</span>
                       </>
                     )}
                   </button>
                 )}
               </div>
+              )}
 
               {selectedExam ? (
                 /* Exam Session (Wizard or Results) */
-                <div className="glass animate-scale-in" style={{ padding: '30px', borderRadius: 'var(--radius-lg)', background: 'var(--card-bg)', border: '1px solid var(--border-color)', color: 'var(--text-main)' }}>
-                  
+                <div className={`exam-session ${examResult ? 'result' : 'taking'} animate-fade-in`}>
+
                   {examResult ? (
                     /* Exam Graded Result View */
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', alignItems: 'center', textAlign: 'center' }}>
@@ -18506,7 +16761,7 @@ export default function App() {
                       <div>
                         <h3 style={{ fontSize: '1.4rem', fontWeight: 800, margin: '0' }}>نتيجة التقييم: {selectedExam?.title || 'امتحان تقييمي'}</h3>
                         <p style={{ fontSize: '0.88rem', color: 'var(--text-muted)', marginTop: '4px' }}>
-                          المادة: {selectedExam?.subject_name || ''} · الصف الدراسي: {GRADE_NAMES[selectedExam?.grade_level] || ''}
+                          المادة: {selectedExam?.subject_name || ''} · الصف الدراسي: {gradeName(selectedExam?.grade_level)}
                         </p>
                       </div>
 
@@ -18680,11 +16935,11 @@ export default function App() {
                                     }
                                     setExamTimeRemaining(durationSec);
                                   } else {
-                                    alert(data.error || 'تعذر توليد الاختبار العلاجي');
+                                    notify(data.error || 'تعذر توليد الاختبار العلاجي', 'error');
                                   }
                                 } catch (e) {
                                   console.error(e);
-                                  alert('حدث خطأ أثناء إعداد الاختبار العلاجي');
+                                  notify('حدث خطأ أثناء إعداد الاختبار العلاجي', 'error');
                                 } finally {
                                   setGeneratingRemedialExam(false);
                                 }
@@ -18823,82 +17078,39 @@ export default function App() {
                     </div>
                   ) : (
                     /* Active Test taking */
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px' }}>
-                        <div>
-                          <h3 style={{ fontSize: '1.25rem', fontWeight: 800, margin: '0' }}>{selectedExam?.title || 'امتحان تقييمي'}</h3>
-                          <p style={{ fontSize: '0.82rem', color: 'var(--text-muted)', margin: '4px 0 0' }}>
-                            المادة: {selectedExam?.subject_name || ''} · الصف الدراسي: {GRADE_NAMES[selectedExam?.grade_level] || ''}
-                          </p>
+                    <div className="exam-taking">
+                      <div className="exam-taking-head">
+                        <button
+                          type="button"
+                          className="square-btn"
+                          onClick={async () => {
+                            if (Object.keys(activeExamAnswers).length > 0 && !(await askConfirm('متأكد إنك عايز تخرج من الاختبار؟ إجاباتك مش هتتحفظ.'))) return;
+                            setSelectedExam(null);
+                            setActiveExamAnswers({});
+                            localStorage.removeItem('egs_active_exam_id');
+                            localStorage.removeItem('egs_active_exam_time');
+                            setExamTimeRemaining(0);
+                          }}
+                          aria-label="الخروج من الاختبار"
+                          title="الخروج من الاختبار"
+                        >
+                          <ArrowRight size={20} />
+                        </button>
+                        <div className="exam-taking-title">
+                          <h3>{selectedExam?.title || 'اختبار'}</h3>
+                          <span>{[selectedExam?.subject_name, `${selectedExam?.questions?.length || 0} ${(selectedExam?.questions?.length || 0) > 2 && (selectedExam?.questions?.length || 0) <= 10 ? 'أسئلة' : 'سؤال'}`, gradeName(selectedExam?.grade_level)].filter(Boolean).join(' · ')}</span>
                         </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                          <div
-                            className={examTimeRemaining <= 60 ? 'timer-pulse' : ''}
-                            style={{
-                              background: examTimeRemaining <= 60 ? 'rgba(239, 68, 68, 0.1)' : 'rgba(255, 255, 255, 0.04)',
-                              border: examTimeRemaining <= 60 ? '1.5px solid #ef4444' : '1px solid var(--border-color)',
-                              color: examTimeRemaining <= 60 ? '#f87171' : 'var(--text-main)',
-                              padding: '6px 12px',
-                              borderRadius: '8px',
-                              fontWeight: 900,
-                              fontFamily: 'monospace',
-                              fontSize: '0.95rem',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '6px'
-                            }}
-                          >
-                            <Clock size={15} />
-                            <span>
-                              {(() => {
-                                const mins = Math.floor(examTimeRemaining / 60);
-                                const secs = examTimeRemaining % 60;
-                                return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-                              })()}
-                            </span>
-                          </div>
-
-                          <button
-                            onClick={() => {
-                              if (Object.keys(activeExamAnswers).length > 0 && !confirm('هل أنت متأكد من مغادرة الامتحان؟ لن يتم حفظ تقدمك.')) return;
-                              setSelectedExam(null);
-                              setActiveExamAnswers({});
-                              localStorage.removeItem('egs_active_exam_id');
-                              localStorage.removeItem('egs_active_exam_time');
-                              setExamTimeRemaining(0);
-                            }}
-                            style={{
-                              background: 'transparent',
-                              border: '1.5px solid var(--border-color)',
-                              color: 'var(--text-main)',
-                              padding: '6px 14px',
-                              borderRadius: '8px',
-                              cursor: 'pointer',
-                              fontSize: '0.8rem',
-                              fontWeight: 700
-                            }}
-                          >
-                            خروج وإلغاء
-                          </button>
-                        </div>
+                        {examTimeRemaining > 0 && (
+                          <span className={`exam-timer ${examTimeRemaining <= 60 ? 'urgent timer-pulse' : ''}`}>
+                            <Clock size={16} />
+                            <span className="num" dir="ltr">{`${Math.floor(examTimeRemaining / 60).toString().padStart(2, '0')}:${(examTimeRemaining % 60).toString().padStart(2, '0')}`}</span>
+                          </span>
+                        )}
                       </div>
 
                       {/* Question Navigation Matrix */}
                       <div className="exam-nav-matrix">
-                        <div style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                          <span style={{ fontWeight: 700, color: 'var(--text-main)' }}>مصفوفة التنقل بين الأسئلة:</span>
-                          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--primary-color)' }} />
-                              تمت الإجابة ({(selectedExam.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length})
-                            </span>
-                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                              <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#FFB703' }} />
-                              مُعلّم للمراجعة ({Object.values(flaggedExamQuestions).filter(Boolean).length})
-                            </span>
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                        <div className="exam-nav-grid">
                           {(selectedExam.questions || []).map((q: any, qIdx: number) => {
                             const isAnswered = activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '';
                             const isFlagged = Boolean(flaggedExamQuestions[q.id]);
@@ -18910,98 +17122,63 @@ export default function App() {
                                   const el = document.getElementById(`exam-q-${q.id || qIdx}`);
                                   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
                                 }}
-                                className={`exam-nav-btn ${isFlagged ? 'flagged' : (isAnswered ? 'answered' : '')}`}
-                                title={isFlagged ? `سؤال ${qIdx + 1} (مُعلّم للمراجعة)` : (isAnswered ? `سؤال ${qIdx + 1} (تمت الإجابة)` : `سؤال ${qIdx + 1} (لم يُجب بعد)`)}
+                                className={`exam-nav-btn ${isFlagged ? 'flagged' : ''} ${isAnswered ? 'answered' : ''}`}
+                                title={`السؤال ${qIdx + 1}${isFlagged ? ' — للمراجعة' : isAnswered ? ' — تمت الإجابة' : ' — لم يُجب بعد'}`}
                               >
                                 {qIdx + 1}
-                                {isFlagged && (
-                                  <span style={{ position: 'absolute', top: '3px', right: '3px', width: '6px', height: '6px', borderRadius: '50%', background: '#FFB703' }} />
-                                )}
                               </button>
                             );
                           })}
                         </div>
+                        <div className="exam-nav-legend">
+                          <span><i className="lg answered" /> مُجاب</span>
+                          <span><i className="lg" /> لم يُجب</span>
+                          <span><i className="lg flagged" /> للمراجعة</span>
+                        </div>
                       </div>
 
                       {/* Questions List */}
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+                      <div className="exam-questions">
                         {(selectedExam.questions || []).map((q: any, qIdx: number) => {
                           const isEnglishExam = isEnglishSubject(selectedExam?.subject_name) || isEnglishText(q?.question);
+                          const isAnswered = activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '';
+                          const typeLabel = q.type === 'multiple_choice' ? (isEnglishExam ? 'Multiple choice' : 'اختيار من متعدد') : q.type === 'true_false' ? (isEnglishExam ? 'True / False' : 'صح أم خطأ') : (isEnglishExam ? 'Essay' : 'مقالي');
                           return (
-                          <div id={`exam-q-${q.id || qIdx}`} key={q.id || qIdx} style={{
-                            background: 'var(--sidebar-bg)',
-                            padding: '20px',
-                            borderRadius: '12px',
-                            border: flaggedExamQuestions[q.id] ? '1.5px solid #FFB703' : '1px solid var(--border-color)',
-                            direction: isEnglishExam ? 'ltr' : 'rtl',
-                            textAlign: isEnglishExam ? 'left' : 'right'
-                          }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', gap: '8px' }}>
-                              <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', flex: 1 }}>
-                                <span style={{ background: 'var(--primary-color)', color: 'var(--text-on-primary)', borderRadius: '6px', padding: '2px 8px', fontSize: '0.78rem', fontWeight: 800 }}>
-                                  {isEnglishExam ? `Q ${qIdx + 1}` : `س ${formatArabicNumerals(String(qIdx + 1), false)}`}
-                                </span>
-                                <span style={{ fontWeight: 700, fontSize: '0.98rem', lineHeight: '1.5' }}>{renderFormattedMath(q.question)}</span>
-                              </div>
+                          <div
+                            id={`exam-q-${q.id || qIdx}`}
+                            key={q.id || qIdx}
+                            className={`exam-q-card ${isAnswered ? 'answered' : ''} ${flaggedExamQuestions[q.id] ? 'flagged' : ''}`}
+                            dir={isEnglishExam ? 'ltr' : 'rtl'}
+                          >
+                            <div className="exam-q-head">
+                              <span className="exam-q-chip">{isEnglishExam ? `Question ${qIdx + 1}` : `السؤال ${qIdx + 1}`} · {typeLabel}</span>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  setFlaggedExamQuestions(prev => ({ ...prev, [q.id]: !prev[q.id] }));
-                                }}
-                                style={{
-                                  background: flaggedExamQuestions[q.id] ? 'rgba(255, 183, 3, 0.18)' : 'transparent',
-                                  border: flaggedExamQuestions[q.id] ? '1px solid #FFB703' : '1px solid var(--border-color)',
-                                  color: flaggedExamQuestions[q.id] ? '#FFB703' : 'var(--text-muted)',
-                                  borderRadius: '6px',
-                                  padding: '4px 8px',
-                                  fontSize: '0.74rem',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  cursor: 'pointer',
-                                  flexShrink: 0
-                                }}
-                                title={flaggedExamQuestions[q.id] ? 'إلغاء التعليم للمراجعة' : 'تعليم السؤال للمراجعة لاحقاً'}
+                                onClick={() => setFlaggedExamQuestions(prev => ({ ...prev, [q.id]: !prev[q.id] }))}
+                                className={`exam-flag-btn ${flaggedExamQuestions[q.id] ? 'on' : ''}`}
+                                aria-pressed={Boolean(flaggedExamQuestions[q.id])}
+                                title={flaggedExamQuestions[q.id] ? 'إلغاء التعليم للمراجعة' : 'تعليم السؤال للمراجعة'}
+                                aria-label="تعليم السؤال للمراجعة"
                               >
-                                <Star size={13} fill={flaggedExamQuestions[q.id] ? '#FFB703' : 'none'} />
-                                <span>{flaggedExamQuestions[q.id] ? 'مُعلّم' : 'تعليم'}</span>
+                                <Star size={20} fill={flaggedExamQuestions[q.id] ? 'currentColor' : 'none'} />
                               </button>
                             </div>
+                            <div className="exam-q-text">{renderFormattedMath(q.question)}</div>
 
-                            {/* Answer Fields depending on type */}
                             {q.type === 'multiple_choice' && q.options && (
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              <div className="exam-options" role="radiogroup">
                                 {q.options.map((opt: string, oIdx: number) => {
                                   const isChecked = activeExamAnswers[q.id] === opt;
                                   return (
-                                    <label
-                                      key={oIdx}
-                                      style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '10px',
-                                        padding: '10px 14px',
-                                        borderRadius: '8px',
-                                        border: isChecked ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                                        background: isChecked ? 'var(--primary-light)' : 'var(--card-bg)',
-                                        cursor: 'pointer',
-                                        fontSize: '0.88rem',
-                                        transition: 'var(--transition)',
-                                        fontWeight: 600,
-                                        direction: isEnglishExam ? 'ltr' : 'rtl',
-                                        textAlign: isEnglishExam ? 'left' : 'right'
-                                      }}
-                                    >
+                                    <label key={oIdx} className={`exam-option ${isChecked ? 'checked' : ''}`}>
                                       <input
                                         type="radio"
                                         name={`q-${q.id}`}
                                         checked={isChecked}
-                                        onChange={() => {
-                                          setActiveExamAnswers(prev => ({ ...prev, [q.id]: opt }));
-                                        }}
-                                        style={{ accentColor: 'var(--primary-color)', width: '16px', height: '16px' }}
+                                        onChange={() => setActiveExamAnswers(prev => ({ ...prev, [q.id]: opt }))}
                                       />
-                                      <span>{renderFormattedMath(opt)}</span>
+                                      <span className="exam-radio" aria-hidden="true" />
+                                      <span className="exam-option-text">{renderFormattedMath(opt)}</span>
                                     </label>
                                   );
                                 })}
@@ -19009,61 +17186,35 @@ export default function App() {
                             )}
 
                             {q.type === 'true_false' && (
-                              <div style={{ display: 'flex', gap: '14px' }}>
+                              <div className="exam-tf">
                                 {[
                                   { val: 'true', label: isEnglishExam ? 'True' : 'صح' },
                                   { val: 'false', label: isEnglishExam ? 'False' : 'خطأ' }
-                                ].map((tf) => {
-                                  const isChecked = activeExamAnswers[q.id] === tf.val;
-                                  return (
-                                    <button
-                                      key={tf.val}
-                                      type="button"
-                                      onClick={() => {
-                                        setActiveExamAnswers(prev => ({ ...prev, [q.id]: tf.val }));
-                                      }}
-                                      style={{
-                                        flex: 1,
-                                        padding: '10px',
-                                        borderRadius: '8px',
-                                        border: isChecked ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
-                                        background: isChecked ? 'var(--primary-light)' : 'var(--card-bg)',
-                                        color: 'var(--text-main)',
-                                        fontWeight: 700,
-                                        cursor: 'pointer',
-                                        fontSize: '0.88rem',
-                                        transition: 'var(--transition)'
-                                      }}
-                                    >
-                                      {tf.label}
-                                    </button>
-                                  );
-                                })}
+                                ].map((tf) => (
+                                  <button
+                                    key={tf.val}
+                                    type="button"
+                                    onClick={() => setActiveExamAnswers(prev => ({ ...prev, [q.id]: tf.val }))}
+                                    className={`exam-tf-btn ${activeExamAnswers[q.id] === tf.val ? 'checked' : ''}`}
+                                    aria-pressed={activeExamAnswers[q.id] === tf.val}
+                                  >
+                                    {tf.label}
+                                  </button>
+                                ))}
                               </div>
                             )}
 
                             {q.type === 'essay' && (
                               <textarea
                                 rows={4}
-                                placeholder={isEnglishExam ? "Type your answer here in English..." : "اكتب إجابتك المقالية بالتفصيل هنا..."}
+                                placeholder={isEnglishExam ? 'Type your answer here...' : 'اكتب إجابتك هنا...'}
                                 value={activeExamAnswers[q.id] || ''}
                                 onChange={(e) => {
                                   const val = e.target.value;
                                   setActiveExamAnswers(prev => ({ ...prev, [q.id]: val }));
                                 }}
-                                style={{
-                                  width: '100%',
-                                  padding: '12px',
-                                  borderRadius: '8px',
-                                  border: '1px solid var(--border-color)',
-                                  outline: 'none',
-                                  background: 'var(--card-bg)',
-                                  color: 'var(--text-main)',
-                                  fontSize: '0.88rem',
-                                  lineHeight: '1.5',
-                                  direction: isEnglishExam ? 'ltr' : 'rtl',
-                                  textAlign: isEnglishExam ? 'left' : 'right'
-                                }}
+                                className="form-input exam-essay"
+                                dir={isEnglishExam ? 'ltr' : 'rtl'}
                               />
                             )}
                           </div>
@@ -19117,50 +17268,26 @@ export default function App() {
                   {/* Mobile Sticky Bar for Exam Taking */}
                   {selectedExam && !examResult && isMobile && (
                     <div className="exam-taking-sticky-bar">
-                      <div className="exam-progress-chip">
-                        <span>تمت الإجابة:</span>
-                        <strong style={{ color: 'var(--primary-color)' }}>
-                          {(selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length} / {selectedExam?.questions?.length || 0}
-                        </strong>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const totalQ = selectedExam?.questions?.length || 0;
-                          const answeredQ = (selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length;
-                          if (answeredQ < totalQ) {
-                            setShowUnansweredConfirmModal(true);
-                          } else {
-                            handleSubmitExam();
-                          }
-                        }}
-                        disabled={gradingLoading}
-                        className="btn-primary"
-                        style={{
-                          padding: '8px 16px',
-                          borderRadius: 'var(--radius-full)',
-                          fontWeight: 800,
-                          fontSize: '0.82rem',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          border: 'none',
-                          cursor: 'pointer',
-                          whiteSpace: 'nowrap'
-                        }}
-                      >
-                        {gradingLoading ? (
+                      {(() => {
+                        const totalQ = selectedExam?.questions?.length || 0;
+                        const answeredQ = (selectedExam?.questions || []).filter((q: any) => activeExamAnswers[q.id] !== undefined && activeExamAnswers[q.id] !== '').length;
+                        return (
                           <>
-                            <Loader2 className="animate-spin" size={14} />
-                            <span>جاري التصحيح...</span>
+                            <div className="exam-progress-block">
+                              <strong>أجبت {answeredQ} من {totalQ}</strong>
+                              <div className="meter cyan"><span style={{ width: `${totalQ ? (answeredQ / totalQ) * 100 : 0}%` }} /></div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { if (answeredQ < totalQ) setShowUnansweredConfirmModal(true); else handleSubmitExam(); }}
+                              disabled={gradingLoading}
+                              className="btn-primary exam-submit-btn"
+                            >
+                              {gradingLoading ? <><Loader2 className="animate-spin" size={17} /><span>جاري التصحيح...</span></> : <span>تسليم الاختبار</span>}
+                            </button>
                           </>
-                        ) : (
-                          <>
-                            <Send size={14} />
-                            <span>تسليم الامتحان</span>
-                          </>
-                        )}
-                      </button>
+                        );
+                      })()}
                     </div>
                   )}
 
@@ -19205,137 +17332,111 @@ export default function App() {
                 </div>
               ) : (
                 /* Main listing view */
-                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1.2fr 0.8fr', gap: '24px' }}>
-                  
-                  {/* Column 1: Available Exams */}
-                  <div id="tour-exams-list" style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    <h3 style={{ fontWeight: 800, fontSize: '1.1rem', color: 'var(--text-main)' }}>الامتحانات المتوفرة</h3>
-                    
+                <div className="exams-layout">
+                  <div id="tour-exams-list" className="exams-col">
+                    <h2 className="section-title">امتحاناتك الجاهزة</h2>
                     {loadingExams ? (
-                      <div style={{ display: 'flex', justifyContent: 'center', padding: '30px' }}>
-                        <Loader2 className="animate-spin" size={30} style={{ color: 'var(--primary-color)' }} />
-                      </div>
+                      <div className="empty-card"><Loader2 className="animate-spin" size={26} /></div>
                     ) : exams.length === 0 ? (
-                      <div className="glass" style={{ padding: '24px', borderRadius: '12px', color: 'var(--text-muted)', textAlign: 'center', border: '1px dashed var(--border-color)' }}>
-                        لا توجد امتحانات مخصصة نشطة حالياً.
-                        <button onClick={() => {
-                          const targetGrade = user ? user.grade_level : chatGrade;
-                          const activeSubjs = getActiveSubjectsForGrade(targetGrade);
-                          const subj = examSubject || chatSubject || (activeSubjs[0]?.subject_name || '');
-                          setExamSubject(subj);
-                          setExamTopic('');
-                          setSelectedExamLesson(null);
-                          setLessonSearchQuery('');
-                          setExamLessonTab('curriculum');
-                          setShowExamCreateModal(true);
-                          if (subj) fetchCurriculumStructure(targetGrade, subj);
-                        }} style={{ display: 'block', margin: '12px auto 0', background: 'transparent', border: 'none', color: 'var(--primary-color)', fontWeight: 700, cursor: 'pointer' }}>
-                          توليد أول امتحان مخصص الآن
+                      <div className="empty-card">
+                        <FileText size={26} />
+                        <strong>لسه مفيش امتحانات</strong>
+                        <span>اعمل امتحان من دروس منهجك واعرف مستواك في دقايق.</span>
+                        <button
+                          type="button"
+                          className="btn-primary compact"
+                          onClick={() => {
+                            const targetGrade = user ? user.grade_level : chatGrade;
+                            const activeSubjs = getActiveSubjectsForGrade(targetGrade);
+                            const subj = examSubject || chatSubject || (activeSubjs[0]?.subject_name || '');
+                            setExamSubject(subj);
+                            setExamTopic('');
+                            setSelectedExamLesson(null);
+                            setLessonSearchQuery('');
+                            setExamLessonTab('curriculum');
+                            setShowExamCreateModal(true);
+                            if (subj) fetchCurriculumStructure(targetGrade, subj);
+                          }}
+                        >
+                          <Plus size={17} strokeWidth={2.5} />
+                          اعمل أول امتحان
                         </button>
                       </div>
                     ) : (
-                      exams.map((ex: any) => (
-                        <div key={ex.id} className="glass animate-scale-in" style={{ padding: '18px', borderRadius: '12px', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
-                          <div>
-                            <h4 style={{ fontWeight: 800, fontSize: '0.98rem', margin: '0 0 4px' }}>{ex.title}</h4>
-                            <div style={{ display: 'flex', gap: '8px', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                              <span>المادة: {ex.subject_name}</span>
-                              <span>·</span>
-                              <span>الصف: {GRADE_NAMES[ex.grade_level]}</span>
-                              <span>·</span>
-                              <span>الأسئلة: {ex.questions?.length || 3}</span>
+                      exams.map((ex: any) => {
+                        const qCount = ex.questions?.length || 0;
+                        return (
+                          <div key={ex.id} className="exam-list-card">
+                            <span className="stat-icon violet"><FileText size={20} /></span>
+                            <div className="exam-list-text">
+                              <strong>{ex.title}</strong>
+                              <span>{[ex.subject_name, `${qCount} ${qCount > 2 && qCount <= 10 ? 'أسئلة' : 'سؤال'}`, gradeName(ex.grade_level)].filter(Boolean).join(' · ')}</span>
                             </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedExam(ex);
+                                setActiveExamAnswers({});
+                                setExamResult(null);
+                                const durationSeconds = (ex.questions?.length || 5) * 120;
+                                localStorage.setItem('egs_active_exam_id', ex.id);
+                                localStorage.setItem('egs_active_exam_time', String(durationSeconds));
+                                setExamTimeRemaining(durationSeconds);
+                              }}
+                              className="btn-primary compact"
+                            >
+                              <span>ابدأ الامتحان</span>
+                              <ArrowLeft size={16} />
+                            </button>
                           </div>
-                          <button
-                            onClick={() => {
-                              setSelectedExam(ex);
-                              setActiveExamAnswers({});
-                              setExamResult(null);
-                              const durationSeconds = (ex.questions?.length || 5) * 120;
-                              localStorage.setItem('egs_active_exam_id', ex.id);
-                              localStorage.setItem('egs_active_exam_time', String(durationSeconds));
-                              setExamTimeRemaining(durationSeconds);
-                            }}
-                            className="btn-primary"
-                            style={{
-                              padding: '8px 16px',
-                              borderRadius: '8px',
-                              fontWeight: 700,
-                              fontSize: '0.82rem',
-                              border: 'none',
-                              cursor: 'pointer',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '6px'
-                            }}
-                          >
-                            <FileText size={14} />
-                            <span>بدء التحدي</span>
-                          </button>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
 
-                  {/* Column 2: History of submissions */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    <h3 style={{ fontWeight: 800, fontSize: '1.1rem', color: 'var(--text-main)' }}>سجل الدرجات والتقييمات</h3>
-                    
+                  <div className="exams-col">
+                    <h2 className="section-title">سجل درجاتك</h2>
                     {loadingExams ? (
-                      <div style={{ display: 'flex', justifyContent: 'center', padding: '30px' }}>
-                        <Loader2 className="animate-spin" size={24} style={{ color: 'var(--primary-color)' }} />
-                      </div>
+                      <div className="empty-card"><Loader2 className="animate-spin" size={24} /></div>
                     ) : submissions.length === 0 ? (
-                      <div className="glass" style={{ padding: '20px', borderRadius: '12px', color: 'var(--text-muted)', textAlign: 'center', border: '1px dashed var(--border-color)', fontSize: '0.85rem' }}>
-                        لم تقم بتقديم أي امتحانات بعد.
+                      <div className="empty-card">
+                        <BarChart3 size={24} />
+                        <span>درجاتك هتظهر هنا بعد أول امتحان.</span>
                       </div>
                     ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                      <div className="panel-card score-history">
                         {submissions.map((sub: any) => {
                           const associatedExam = exams.find(e => e.id === sub.exam_id);
-                          const title = associatedExam ? associatedExam.title : 'امتحان تقييمي ذكي';
-                          const scoreColor = sub.score >= 80 ? 'var(--success-color)' : (sub.score >= 50 ? 'orange' : 'var(--danger-color)');
+                          const tone = sub.score >= 80 ? 'good' : sub.score >= 50 ? 'mid' : 'low';
                           return (
-                            <div key={sub.id} className="glass" style={{ padding: '14px', borderRadius: '10px', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span style={{ fontWeight: 700, fontSize: '0.88rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '160px' }}>{title}</span>
-                                <span style={{ fontWeight: 900, color: scoreColor, fontSize: '0.92rem', background: 'var(--sidebar-bg)', padding: '2px 8px', borderRadius: '6px' }}>
-                                  {sub.score}%
-                                </span>
-                              </div>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                                <span>{new Date(sub.submitted_at).toLocaleDateString('ar-EG')}</span>
-                                <button
-                                  onClick={() => {
-                                    const mockExam = associatedExam || {
-                                      id: sub.exam_id,
-                                      title: 'امتحان تقييمي ذكي سابق',
-                                      subject_name: chatSubject,
-                                      grade_level: user?.grade_level || chatGrade,
-                                      questions: []
-                                    };
-                                    setSelectedExam(mockExam);
-                                    setExamResult(sub);
-                                  }}
-                                  style={{
-                                    background: 'transparent',
-                                    border: 'none',
-                                    color: 'var(--primary-color)',
-                                    fontWeight: 700,
-                                    cursor: 'pointer',
-                                    padding: '0'
-                                  }}
-                                >
-                                   عرض التقييم
-                                </button>
-                              </div>
-                            </div>
+                            <button
+                              key={sub.id}
+                              type="button"
+                              className="score-row"
+                              onClick={() => {
+                                setSelectedExam(associatedExam || {
+                                  id: sub.exam_id,
+                                  title: 'امتحان سابق',
+                                  subject_name: chatSubject,
+                                  grade_level: user?.grade_level || chatGrade,
+                                  questions: []
+                                });
+                                setExamResult(sub);
+                              }}
+                              title="عرض التقييم"
+                            >
+                              <span className={`score-badge ${tone} num`}>{sub.score}%</span>
+                              <span className="score-row-text">
+                                <strong>{associatedExam ? associatedExam.title : 'امتحان سابق'}</strong>
+                                <span>{new Date(sub.submitted_at).toLocaleDateString('ar-EG', { day: 'numeric', month: 'long' })}</span>
+                              </span>
+                              <ChevronLeft size={18} className="score-row-arrow" />
+                            </button>
                           );
                         })}
                       </div>
                     )}
                   </div>
-
                 </div>
               )}
 
@@ -19346,11 +17447,16 @@ export default function App() {
 
         {/* Flashcards (Subject-Level Stacked Active Recall) Tab */}
         {activeTab === 'flashcards' && (
-          <div className="mobile-main-with-nav" style={{ flex: 1, padding: isMobile ? '16px' : '32px', display: 'flex', flexDirection: 'column', gap: '24px', direction: 'rtl', fontFamily: 'var(--font-arabic)', overflowY: 'auto' }}>
-            <div id="tour-flashcards-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '16px' }}>
-              <div>
-                <h2 style={{ fontSize: '1.5rem', fontWeight: 900, color: 'var(--primary-color)', margin: 0 }}>المدرب الذكي (Flashcards)</h2>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', margin: '4px 0 0' }}>مجموعات مراجعة مجمعة حسب المواد الدراسية بنظام الكروت المتراكمة</p>
+          <div className="mobile-main-with-nav page-scroll custom-scrollbar">
+            <div className="page-container">
+            <div id="tour-flashcards-header" className="page-head">
+              <div className="page-head-text">
+                <button type="button" className="page-back-link" onClick={() => selectedFlashcardSubject ? setSelectedFlashcardSubject(null) : setActiveTab('chat')}>
+                  <ArrowRight size={16} />
+                  <span>{selectedFlashcardSubject ? 'كل المواد' : 'العودة للمحادثة'}</span>
+                </button>
+                <h1>المدرب الذكي</h1>
+                <p>كروت مراجعة لكل مادة بنظام لايتنر — راجع اللي محتاج مراجعة أكتر.</p>
               </div>
 
               {!selectedFlashcardSubject && (
@@ -19368,10 +17474,10 @@ export default function App() {
                     setShowFlashcardCreateModal(true);
                     if (subj) fetchCurriculumStructure(targetGrade, subj);
                   }}
-                  className="btn-primary"
-                  style={{ padding: '10px 20px', borderRadius: '10px', fontSize: '0.88rem', fontWeight: 700, border: 'none', cursor: 'pointer' }}
+                  className="btn-primary compact"
                 >
-                  <span>إنشاء كروت تعليمية</span>
+                  <Plus size={17} strokeWidth={2.5} />
+                  <span>كروت جديدة</span>
                 </button>
               )}
             </div>
@@ -19437,40 +17543,18 @@ export default function App() {
 
                 {/* Deck Filter Pills */}
                 {subjectDecks.length > 0 && (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center' }}>
-                    <span style={{ fontSize: '0.82rem', color: 'var(--text-muted)', fontWeight: 700 }}>المجموعات:</span>
-                    <button
-                      onClick={() => setDeckFilter(null)}
-                      style={{
-                        padding: '6px 14px',
-                        borderRadius: '20px',
-                        fontSize: '0.78rem',
-                        fontWeight: 700,
-                        border: '1px solid var(--border-color)',
-                        cursor: 'pointer',
-                        background: deckFilter === null ? 'var(--primary-light)' : 'rgba(255, 255, 255, 0.04)',
-                        color: deckFilter === null ? 'var(--primary-color)' : 'var(--text-muted)',
-                      }}
-                    >
-                      الكل ({subjectCards.length})
+                  <div className="chip-tabs deck-chips custom-scrollbar">
+                    <button type="button" onClick={() => setDeckFilter(null)} className={`chip-tab ${deckFilter === null ? 'active' : ''}`}>
+                      الكل · {subjectCards.length}
                     </button>
                     {subjectDecks.map(d => (
                       <div
                         key={d.id}
+                        role="button"
+                        tabIndex={0}
                         onClick={() => setDeckFilter(deckFilter === d.id ? null : d.id)}
-                        style={{
-                          padding: '6px 12px',
-                          borderRadius: '20px',
-                          fontSize: '0.78rem',
-                          fontWeight: 700,
-                          border: '1px solid var(--border-color)',
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          background: deckFilter === d.id ? 'var(--primary-light)' : 'rgba(255, 255, 255, 0.04)',
-                          color: deckFilter === d.id ? 'var(--primary-color)' : 'var(--text-muted)',
-                        }}
+                        onKeyDown={(e) => { if (e.key === 'Enter') setDeckFilter(deckFilter === d.id ? null : d.id); }}
+                        className={`chip-tab deck-chip ${deckFilter === d.id ? 'active' : ''}`}
                       >
                         <span>{d.title}</span>
                         <button
@@ -19622,7 +17706,7 @@ export default function App() {
                                         <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
                                           <span>تقييم الاستدعاء:</span>
                                           {reviewedCardRatings[card.id] && (
-                                            <span style={{ color: 'var(--success-color)', fontSize: '0.7rem', fontWeight: 800 }}>✓ تم الحفظ</span>
+                                            <span style={{ color: 'var(--success-color)', fontSize: '0.7rem', fontWeight: 800, display: 'inline-flex', alignItems: 'center', gap: '4px' }}><Check size={12} strokeWidth={3} /> تم الحفظ</span>
                                           )}
                                         </span>
                                         <div style={{ display: 'flex', gap: '4px' }}>
@@ -19777,7 +17861,7 @@ export default function App() {
 
                         {/* Active Top Playing Card */}
                         <div
-                          style={{ position: 'relative', width: '100%', height: isMobile ? '310px' : '330px', zIndex: 3 }}
+                          style={{ position: 'relative', width: '100%', height: isMobile ? '440px' : '430px', zIndex: 3 }}
                           className={isDealingAway ? 'playing-card-slide-off' : ''}
                         >
                           <div
@@ -19793,7 +17877,7 @@ export default function App() {
                             }}
                           >
                             <div className={`flashcard-container ${isCardFlipped ? 'flipped' : ''}`} style={{ width: '100%', height: '100%' }}>
-                              <div className="flashcard-front" style={{ position: 'relative', padding: isMobile ? '16px 14px' : '20px 24px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                              <div className="flashcard-front" style={{ padding: isMobile ? '16px 14px' : '20px 24px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '8px', alignItems: 'center' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--primary-color)', fontWeight: 800 }}>
@@ -19850,10 +17934,10 @@ export default function App() {
                                 </span>
                               </div>
 
-                              <div className="flashcard-back" style={{ position: 'relative', padding: isMobile ? '14px 12px' : '18px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                              <div className="flashcard-back" style={{ padding: isMobile ? '14px 12px' : '18px 20px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
                                 <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', marginBottom: '6px', alignItems: 'center' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <span style={{ fontSize: '0.75rem', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--success-color)', fontWeight: 800 }}>الإجابة النموذجية</span>
+                                    <span className="tag green">الإجابة</span>
                                     {isEnglishSpeechEligible(activeCard?.answer) && (
                                       <button
                                         type="button"
@@ -19920,95 +18004,52 @@ export default function App() {
                                   </div>
                                 </div>
 
-                                <div dir="auto" style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: isMobile ? '0.98rem' : '1.1rem', fontWeight: 800, lineHeight: 1.6, margin: 0, overflowY: 'auto', maxHeight: isMobile ? '120px' : '140px', width: '100%' }}>
+                                <div dir="auto" className="card-back-q">{renderFormattedMath(activeCard?.question)}</div>
+                                <div dir="auto" className="card-back-a">
                                   {renderFormattedMath(activeCard?.answer)}
                                 </div>
 
                                 {/* Leitner Recall Assessment embedded directly on card back */}
-                                <div
-                                  style={{
-                                    width: '100%',
-                                    marginTop: 'auto',
-                                    paddingTop: '8px',
-                                    borderTop: '1px solid var(--border-color)',
-                                    display: 'flex',
-                                    flexDirection: 'column',
-                                    gap: '6px'
-                                  }}
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <span style={{ fontSize: isMobile ? '0.72rem' : '0.76rem', color: 'var(--text-muted)', fontWeight: 700 }}>
-                                      تقييم الاستدعاء (انقر للتقييم والتمرير):
-                                    </span>
-                                    {reviewedCardRatings[activeCard?.id] ? (
-                                      <span style={{ color: 'var(--success-color)', fontSize: '0.7rem', fontWeight: 800 }}>✓ تم الحفظ</span>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        disabled={isDealingAway}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          advancePlayingCard();
-                                        }}
-                                        style={{
-                                          background: 'transparent',
-                                          border: 'none',
-                                          color: 'var(--text-muted)',
-                                          cursor: isDealingAway ? 'not-allowed' : 'pointer',
-                                          fontSize: '0.7rem',
-                                          textDecoration: 'underline',
-                                          padding: '2px 4px'
-                                        }}
-                                      >
-                                        تخطي دون تقييم
-                                      </button>
-                                    )}
-                                  </div>
-
-                                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: isMobile ? '4px' : '6px', width: '100%' }}>
+                                <div className="rate-block" onClick={(e) => e.stopPropagation()}>
+                                  <span className="rate-title">قيّم مدى تذكرك</span>
+                                  <div className="rate-grid">
                                     {[
-                                      { val: 1, label: 'صعب جداً', color: '#ef4444' },
-                                      { val: 2, label: 'خاطئ', color: '#f97316' },
-                                      { val: 3, label: 'مقبول', color: '#eab308' },
-                                      { val: 4, label: 'سهل', color: '#00b4d8' },
-                                      { val: 5, label: 'ممتاز', color: '#10b981' }
+                                      { val: 1, label: 'صعب جداً' },
+                                      { val: 2, label: 'صعب' },
+                                      { val: 3, label: 'متوسط' },
+                                      { val: 4, label: 'جيد' },
+                                      { val: 5, label: 'ممتاز' }
                                     ].map(r => {
-                                      const isThisReviewing = reviewingCardId === activeCard?.id;
-                                      const isRated = reviewedCardRatings[activeCard?.id] === r.val;
+                                      const busy = reviewingCardId === activeCard?.id || isDealingAway;
                                       return (
                                         <button
                                           key={r.val}
                                           type="button"
-                                          disabled={isThisReviewing || isDealingAway}
+                                          disabled={busy}
                                           onClick={(e) => {
                                             e.stopPropagation();
                                             submitSubjectCardReview(activeCard.id, r.val, false);
                                           }}
-                                          style={{
-                                            background: isRated ? r.color : 'var(--hover-bg)',
-                                            border: `1px solid ${isRated ? r.color : 'var(--border-color)'}`,
-                                            borderRadius: '8px',
-                                            padding: isMobile ? '5px 2px' : '6px 4px',
-                                            color: isRated ? '#ffffff' : 'var(--text-main)',
-                                            fontSize: isMobile ? '0.65rem' : '0.72rem',
-                                            fontWeight: 700,
-                                            cursor: (isThisReviewing || isDealingAway) ? 'not-allowed' : 'pointer',
-                                            transition: 'all 0.18s ease',
-                                            opacity: (isThisReviewing || isDealingAway) ? 0.6 : 1,
-                                            display: 'flex',
-                                            flexDirection: 'column',
-                                            alignItems: 'center',
-                                            justifyContent: 'center',
-                                            minHeight: isMobile ? '42px' : '46px'
-                                          }}
+                                          className={`rate-tile r${r.val} ${reviewedCardRatings[activeCard?.id] === r.val ? 'rated' : ''}`}
                                         >
-                                          <span style={{ fontSize: isMobile ? '0.85rem' : '0.95rem', fontWeight: 800, color: isRated ? '#ffffff' : r.color, lineHeight: 1.1 }}>{r.val}</span>
-                                          <span style={{ fontSize: isMobile ? '0.62rem' : '0.68rem', marginTop: '2px', whiteSpace: 'nowrap' }}>{r.label}</span>
+                                          <strong className="num">{r.val}</strong>
+                                          <span>{r.label}</span>
                                         </button>
                                       );
                                     })}
                                   </div>
+                                  {reviewedCardRatings[activeCard?.id] ? (
+                                    <span className="rate-saved"><Check size={15} strokeWidth={2.5} /> تم الحفظ</span>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={isDealingAway}
+                                      onClick={(e) => { e.stopPropagation(); advancePlayingCard(); }}
+                                      className="link-btn rate-skip"
+                                    >
+                                      تخطي بدون تقييم
+                                    </button>
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -20066,10 +18107,9 @@ export default function App() {
                             
                             <button
                               onClick={() => fetchSubjectCards(group.subject_name)}
-                              className="btn-primary"
-                              style={{ padding: '8px 16px', borderRadius: '8px', fontSize: '0.8rem', fontWeight: 700, border: 'none', cursor: 'pointer' }}
+                              className="btn-primary compact"
                             >
-                              مراجعة الكروت المتراكمة
+                              ابدأ المراجعة
                             </button>
                           </div>
                         </div>
@@ -20079,6 +18119,7 @@ export default function App() {
                 )}
               </div>
             )}
+            </div>
           </div>
         )}
 
@@ -20294,7 +18335,7 @@ export default function App() {
             <div className="glass" style={{ maxWidth: '480px', width: '100%', borderRadius: '20px', padding: '24px', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <h3 style={{ margin: 0, fontSize: '1.1rem', fontWeight: 900, color: 'var(--text-main)' }}>تعديل الكارت</h3>
-                <button onClick={() => setEditingCard(null)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '1.2rem', cursor: 'pointer' }}>✕</button>
+                <button onClick={() => setEditingCard(null)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '1.2rem', cursor: 'pointer', display: 'inline-flex' }} aria-label="إغلاق"><X size={20} /></button>
               </div>
 
               <div>
@@ -20326,363 +18367,149 @@ export default function App() {
         )}
 
         {/* Leaderboard & Competition Tab */}
-        {activeTab === 'leaderboard' && (
-          <div className="mobile-main-with-nav" style={{ flex: 1, padding: isMobile ? '16px 12px' : '32px 24px', display: 'flex', flexDirection: 'column', gap: isMobile ? '16px' : '24px', direction: 'rtl', fontFamily: 'var(--font-arabic)', overflowY: 'auto' }}>
-            <div className="leaderboard-container">
-              
-              {/* Leaderboard Header & Filter Controls */}
-              <div id="tour-leaderboard-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '16px', flexWrap: 'wrap', gap: '12px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <button 
-                    onClick={() => setActiveTab('chat')}
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                      background: 'var(--card-bg)',
-                      border: '1px solid var(--border-color)',
-                      color: 'var(--text-main)',
-                      padding: '6px 12px',
-                      borderRadius: 'var(--radius-md)',
-                      cursor: 'pointer',
-                      fontWeight: 700,
-                      fontSize: '0.82rem',
-                      fontFamily: 'var(--font-arabic)',
-                      boxShadow: 'var(--shadow-xs)'
-                    }}
-                    title="العودة للدردشة"
-                  >
-                    <ArrowRight size={15} />
-                    <span>الدردشة</span>
-                  </button>
-                  <div>
-                    <h2 style={{ fontSize: isMobile ? '1.25rem' : '1.5rem', fontWeight: 900, color: 'var(--primary-color)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <Trophy size={isMobile ? 20 : 24} />
-                      <span>المسابقة ولوحة المتصدرين</span>
-                    </h2>
-                    <p style={{ color: 'var(--text-muted)', fontSize: isMobile ? '0.76rem' : '0.86rem', margin: '2px 0 0' }}>
-                      أفضل 10 طلاب متفوقين حسب نقاط الترتيب والمثابرة الأكاديمية
-                    </p>
+        {activeTab === 'leaderboard' && (() => {
+          const myRow = user ? leaderboardData.find(r => r.user_id === user.id) : null;
+          const myRank = myRow || userLeaderboardRank;
+          const myPoints = myRank?.points ?? points ?? 0;
+          const tenth = leaderboardData.length >= 10 ? leaderboardData[9] : null;
+          const gapToTen = tenth && myRank && (myRank.rank_number || 99) > 10 ? Math.max(1, (tenth.points || 0) - myPoints + 1) : 0;
+          const initial = (name?: string) => (name || '؟').trim().charAt(0);
+          const podiumOrder = leaderboardData.length >= 3 ? [leaderboardData[1], leaderboardData[0], leaderboardData[2]] : [];
+          return (
+            <div className="mobile-main-with-nav page-scroll custom-scrollbar">
+              <div className="page-container leaderboard-page">
+                <div id="tour-leaderboard-header" className="page-head">
+                  <div className="page-head-text">
+                    <button type="button" className="page-back-link" onClick={() => setActiveTab('chat')}>
+                      <ArrowRight size={16} />
+                      <span>العودة للمحادثة</span>
+                    </button>
+                    <h1>لوحة المتصدرين</h1>
+                    <p>أفضل 10 طلاب حسب نقاط الترتيب — ذاكر، حل امتحانات، وكمّل مهامك عشان تطلع لفوق.</p>
+                  </div>
+                  <div className="segmented small" role="tablist" aria-label="نطاق الترتيب">
+                    <button type="button" role="tab" aria-selected={leaderboardFilter === 'my'} className={leaderboardFilter === 'my' ? 'active' : ''} onClick={() => setLeaderboardFilter('my')}>صفّي</button>
+                    <button type="button" role="tab" aria-selected={leaderboardFilter === 'all'} className={leaderboardFilter === 'all' ? 'active' : ''} onClick={() => setLeaderboardFilter('all')}>الكل</button>
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', gap: '6px', background: 'rgba(255, 255, 255, 0.04)', padding: '4px', borderRadius: '10px', border: '1px solid var(--border-color)' }}>
-                  <button
-                    onClick={() => setLeaderboardFilter('my')}
-                    style={{
-                      background: leaderboardFilter === 'my' ? 'var(--primary-color)' : 'transparent',
-                      color: leaderboardFilter === 'my' ? 'var(--text-on-primary)' : 'var(--text-muted)',
-                      border: 'none',
-                      padding: '6px 14px',
-                      borderRadius: '8px',
-                      fontWeight: 700,
-                      fontSize: '0.8rem',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    صفي الدراسي
-                  </button>
-                  <button
-                    onClick={() => setLeaderboardFilter('all')}
-                    style={{
-                      background: leaderboardFilter === 'all' ? 'var(--primary-color)' : 'transparent',
-                      color: leaderboardFilter === 'all' ? 'var(--text-on-primary)' : 'var(--text-muted)',
-                      border: 'none',
-                      padding: '6px 14px',
-                      borderRadius: '8px',
-                      fontWeight: 700,
-                      fontSize: '0.8rem',
-                      cursor: 'pointer',
-                      transition: 'all 0.2s'
-                    }}
-                  >
-                    الترتيب العام
-                  </button>
-                </div>
-              </div>
-
-              {loadingLeaderboard ? (
-                <div style={{ display: 'flex', justifyContent: 'center', padding: '60px 0' }}>
-                  <Loader2 className="animate-spin" size={36} style={{ color: 'var(--primary-color)' }} />
-                </div>
-              ) : leaderboardData.length === 0 ? (
-                <div id="tour-leaderboard-list" className="glass" style={{ padding: '40px', borderRadius: '16px', textAlign: 'center', color: 'var(--text-muted)' }}>
-                  لا يوجد طلاب مسجلون في لوحة المتصدرين بعد.
-                </div>
-              ) : (
-                <div id="tour-leaderboard-list" style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                  
-                  {/* OUT-OF-TOP-10 STUDENT RANK BANNER (Prominent card at the top) */}
-                  {user && userLeaderboardRank && (!leaderboardData.some(r => r.user_id === user.id) || userLeaderboardRank.rank_number > 10) && (
-                    <div className="user-current-rank-card animate-scale-in">
-                      <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '10px' : '16px', flex: 1 }}>
-                        <div 
-                          className="leaderboard-rank rank-default" 
-                          style={{ 
-                            width: isMobile ? '44px' : '52px', 
-                            height: isMobile ? '44px' : '52px', 
-                            fontSize: isMobile ? '1.1rem' : '1.3rem', 
-                            fontWeight: 900, 
-                            borderColor: 'var(--primary-color)', 
-                            background: 'rgba(125, 161, 70, 0.2)', 
-                            color: 'var(--primary-color)' 
-                          }}
-                        >
-                          #{userLeaderboardRank.rank_number}
-                        </div>
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                            <span style={{ fontSize: isMobile ? '0.92rem' : '1.05rem', fontWeight: 900, color: 'var(--text-main)' }}>
-                              {user.name}
-                            </span>
-                            <span style={{ fontSize: '0.62rem', background: 'var(--primary-glow)', color: 'var(--primary-color)', padding: '2px 6px', borderRadius: '4px', fontWeight: 800 }}>
-                              أنت
-                            </span>
-                            <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                              ({GRADE_NAMES[userLeaderboardRank.grade_level || user.grade_level]})
-                            </span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginTop: '6px', flexWrap: 'wrap' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#ffd700', fontSize: isMobile ? '0.78rem' : '0.85rem', fontWeight: 800 }}>
-                              <Trophy size={14} />
-                              <span>{userLeaderboardRank.points || points || 0} نقطة ترتيب</span>
-                            </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#ff7e7e', fontSize: isMobile ? '0.78rem' : '0.85rem', fontWeight: 700 }}>
-                              <Flame size={14} />
-                              <span>{userLeaderboardRank.study_streak || 1} يوم مثابرة</span>
-                            </div>
-                          </div>
-                          {leaderboardData.length >= 10 && (userLeaderboardRank.points || points || 0) < (leaderboardData[leaderboardData.length - 1]?.points || 0) && (
-                            <p style={{ margin: '6px 0 0', fontSize: isMobile ? '0.72rem' : '0.78rem', color: 'var(--text-secondary)' }}>
-                              تفصلك <strong style={{ color: '#ffd700' }}>{Math.max(1, (leaderboardData[leaderboardData.length - 1].points || 0) - (userLeaderboardRank.points || points || 0) + 1)} نقطة</strong> فقط عن دخول قائمة أفضل 10 متصدرين!
-                            </p>
-                          )}
-                        </div>
+                {user && myRank && (
+                  <div className="my-rank-card animate-scale-in">
+                    <div className="my-rank-main">
+                      <span className="my-rank-num num">#{myRank.rank_number}</span>
+                      <span className="user-avatar-circle lg">{initial(user.name)}</span>
+                      <div className="my-rank-text">
+                        <div className="my-rank-name"><strong>{user.name}</strong><span className="you-chip">أنت</span></div>
+                        <span>{[gradeName(myRank.grade_level || user.grade_level), `${Number(myPoints).toLocaleString('en-US')} نقطة`, `سلسلة ${daysAr(myRank.study_streak || 1)}`].join(' · ')}</span>
                       </div>
-
+                    </div>
+                    <div className="my-rank-foot">
+                      <span>
+                        {gapToTen > 0
+                          ? <>باقي <strong className="num">{gapToTen}</strong> نقطة للوصول للمركز العاشر</>
+                          : (myRank.rank_number || 99) <= 10 ? 'إنت ضمن أفضل 10 — حافظ على مكانك!' : 'كمّل مذاكرة واجمع نقاط عشان تدخل أفضل 10'}
+                      </span>
                       <button
                         type="button"
-                        onClick={() => {
-                          setActiveTab('exams');
-                          setShowExamCreateModal(true);
-                        }}
-                        className="btn-primary"
-                        style={{
-                          padding: isMobile ? '8px 14px' : '10px 18px',
-                          borderRadius: '10px',
-                          fontSize: isMobile ? '0.78rem' : '0.84rem',
-                          fontWeight: 800,
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          border: 'none',
-                          cursor: 'pointer',
-                          flexShrink: 0
-                        }}
+                        onClick={() => { setActiveTab('exams'); setShowExamCreateModal(true); }}
+                        className="btn-primary compact"
                       >
-                        <Zap size={15} />
-                        <span>كسب نقاط بالامتحانات</span>
+                        زيادة نقاطي بالامتحانات
                       </button>
                     </div>
-                  )}
+                  </div>
+                )}
 
-                  {/* TOP 3 PODIUM (Gold, Silver, Bronze) */}
-                  {leaderboardData.length >= 3 && (
-                    <div className="leaderboard-podium-container animate-fade-in">
-                      {/* Rank 2 - Silver */}
-                      <div className={`leaderboard-podium-card second ${leaderboardData[1].user_id === user?.id ? 'is-current-user' : ''}`}>
-                        <div className="leaderboard-rank rank-silver" style={{ margin: '0 auto 8px', width: isMobile ? '32px' : '40px', height: isMobile ? '32px' : '40px', fontSize: isMobile ? '0.9rem' : '1.05rem' }}>2</div>
-                        <span style={{ fontSize: isMobile ? '0.82rem' : '0.95rem', fontWeight: 800, color: 'var(--text-main)', maxWidth: isMobile ? '90px' : '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {leaderboardData[1].name}
-                        </span>
-                        {leaderboardData[1].user_id === user?.id && (
-                          <span style={{ fontSize: '0.62rem', background: 'var(--primary-glow)', color: 'var(--primary-color)', padding: '1px 5px', borderRadius: '4px', fontWeight: 800, marginTop: '2px' }}>أنت</span>
-                        )}
-                        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                          {GRADE_NAMES[leaderboardData[1].grade_level]}
-                        </span>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px', color: '#c0c0c0', fontSize: isMobile ? '0.78rem' : '0.88rem', fontWeight: 800, marginTop: '6px' }}>
-                          <Trophy size={13} />
-                          <span>{leaderboardData[1].points || 0}</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#ff7e7e', fontSize: isMobile ? '0.68rem' : '0.75rem', fontWeight: 700, marginTop: '2px' }}>
-                          <Flame size={11} />
-                          <span>{leaderboardData[1].study_streak || 1} يوم</span>
-                        </div>
-                      </div>
-
-                      {/* Rank 1 - Gold (Center, Elevated) */}
-                      <div className={`leaderboard-podium-card first ${leaderboardData[0].user_id === user?.id ? 'is-current-user' : ''}`}>
-                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginBottom: '8px' }}>
-                          <Crown size={isMobile ? 18 : 22} style={{ color: '#ffd700', marginBottom: '2px' }} />
-                          <div className="leaderboard-rank rank-gold" style={{ width: isMobile ? '38px' : '48px', height: isMobile ? '38px' : '48px', fontSize: isMobile ? '1.05rem' : '1.25rem' }}>1</div>
-                        </div>
-                        <span style={{ fontSize: isMobile ? '0.88rem' : '1.05rem', fontWeight: 900, color: 'var(--text-main)', maxWidth: isMobile ? '100px' : '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {leaderboardData[0].name}
-                        </span>
-                        {leaderboardData[0].user_id === user?.id && (
-                          <span style={{ fontSize: '0.65rem', background: 'var(--primary-glow)', color: 'var(--primary-color)', padding: '1px 6px', borderRadius: '4px', fontWeight: 800, marginTop: '2px' }}>أنت</span>
-                        )}
-                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                          {GRADE_NAMES[leaderboardData[0].grade_level]}
-                        </span>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: '#ffd700', fontSize: isMobile ? '0.88rem' : '1.05rem', fontWeight: 900, marginTop: '6px' }}>
-                          <Trophy size={15} />
-                          <span>{leaderboardData[0].points || 0}</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px', color: '#ff7e7e', fontSize: isMobile ? '0.72rem' : '0.8rem', fontWeight: 800, marginTop: '2px' }}>
-                          <Flame size={13} />
-                          <span>{leaderboardData[0].study_streak || 1} يوم</span>
-                        </div>
-                      </div>
-
-                      {/* Rank 3 - Bronze */}
-                      <div className={`leaderboard-podium-card third ${leaderboardData[2].user_id === user?.id ? 'is-current-user' : ''}`}>
-                        <div className="leaderboard-rank rank-bronze" style={{ margin: '0 auto 8px', width: isMobile ? '32px' : '40px', height: isMobile ? '32px' : '40px', fontSize: isMobile ? '0.9rem' : '1.05rem' }}>3</div>
-                        <span style={{ fontSize: isMobile ? '0.82rem' : '0.95rem', fontWeight: 800, color: 'var(--text-main)', maxWidth: isMobile ? '90px' : '180px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {leaderboardData[2].name}
-                        </span>
-                        {leaderboardData[2].user_id === user?.id && (
-                          <span style={{ fontSize: '0.62rem', background: 'var(--primary-glow)', color: 'var(--primary-color)', padding: '1px 5px', borderRadius: '4px', fontWeight: 800, marginTop: '2px' }}>أنت</span>
-                        )}
-                        <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>
-                          {GRADE_NAMES[leaderboardData[2].grade_level]}
-                        </span>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '3px', color: '#cd7f32', fontSize: isMobile ? '0.78rem' : '0.88rem', fontWeight: 800, marginTop: '6px' }}>
-                          <Trophy size={13} />
-                          <span>{leaderboardData[2].points || 0}</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#ff7e7e', fontSize: isMobile ? '0.68rem' : '0.75rem', fontWeight: 700, marginTop: '2px' }}>
-                          <Flame size={11} />
-                          <span>{leaderboardData[2].study_streak || 1} يوم</span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* REMAINING TOP 10 (Ranks 4 to 10) */}
-                  {leaderboardData.slice(leaderboardData.length >= 3 ? 3 : 0, 10).length > 0 && (
-                    isMobile ? (
-                      /* Mobile Cards List for Ranks 4 to 10 */
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {leaderboardData.slice(leaderboardData.length >= 3 ? 3 : 0, 10).map((row) => {
-                          const isCurrentUser = row.user_id === user?.id;
+                {loadingLeaderboard ? (
+                  <div className="empty-card"><Loader2 className="animate-spin" size={28} /></div>
+                ) : leaderboardData.length === 0 ? (
+                  <div id="tour-leaderboard-list" className="empty-card">
+                    <Trophy size={26} />
+                    <strong>لسه مفيش ترتيب</strong>
+                    <span>أول ما الطلاب يبدأوا يجمعوا نقاط هتظهر القائمة هنا.</span>
+                  </div>
+                ) : (
+                  <div id="tour-leaderboard-list" className="leaderboard-body">
+                    {podiumOrder.length === 3 && (
+                      <div className="podium">
+                        {podiumOrder.map((row, i) => {
+                          const place = i === 1 ? 1 : i === 0 ? 2 : 3;
                           return (
-                            <div
-                              key={row.user_id}
-                              className={`leaderboard-mobile-card ${isCurrentUser ? 'is-current-user' : ''}`}
-                            >
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                <div className="leaderboard-rank rank-default" style={{ width: '30px', height: '30px', fontSize: '0.82rem' }}>
-                                  {row.rank_number}
-                                </div>
-                                <div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                    <span style={{ fontSize: '0.85rem', fontWeight: 800, color: isCurrentUser ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                                      {row.name}
-                                    </span>
-                                    {isCurrentUser && (
-                                      <span style={{ fontSize: '0.62rem', background: 'var(--primary-glow)', color: 'var(--primary-color)', padding: '1px 5px', borderRadius: '4px', fontWeight: 800 }}>أنت</span>
-                                    )}
-                                  </div>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-muted)', fontSize: '0.7rem', fontWeight: 700, marginTop: '2px' }}>
-                                    <span>{GRADE_NAMES[row.grade_level]}</span>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#ff7e7e' }}>
-                                      <Flame size={11} />
-                                      <span>{row.study_streak || 1}ي</span>
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'var(--primary-light)', padding: '4px 10px', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-primary)', color: 'var(--primary-color)', fontWeight: 900, fontSize: '0.82rem' }}>
-                                <Trophy size={13} />
-                                <span>{row.points || 0}</span>
-                              </div>
+                            <div key={row.user_id} className={`podium-col p${place} ${row.user_id === user?.id ? 'me' : ''}`}>
+                              {place === 1 && <Crown size={26} className="podium-crown" />}
+                              <span className="podium-avatar">{initial(row.name)}</span>
+                              <strong className="podium-name">{row.name}</strong>
+                              <span className="podium-points"><span className="num">{Number(row.points || 0).toLocaleString('en-US')}</span> نقطة</span>
+                              <div className="podium-block"><span className="num">{place}</span></div>
                             </div>
                           );
                         })}
                       </div>
-                    ) : (
-                      /* Desktop View: Full Clean Glass Grid */
-                      <div className="glass" style={{ borderRadius: '16px', overflow: 'hidden', border: '1px solid var(--border-color)', background: 'var(--card-bg)' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '70px 1fr 160px 140px 120px', padding: '16px 20px', background: 'rgba(255, 255, 255, 0.02)', borderBottom: '1px solid var(--border-color)', fontWeight: 800, fontSize: '0.85rem', color: 'var(--text-muted)' }}>
-                          <div>الترتيب</div>
-                          <div>اسم الطالب</div>
-                          <div>الصف الدراسي</div>
-                          <div style={{ textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
-                            <Trophy size={14} style={{ color: '#ffd700' }} />
-                            <span>نقاط الترتيب</span>
-                          </div>
-                          <div style={{ textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
-                            <Flame size={14} style={{ color: '#ff7e7e' }} />
-                            <span>المثابرة</span>
-                          </div>
-                        </div>
+                    )}
 
-                        <div style={{ display: 'flex', flexDirection: 'column' }}>
-                          {leaderboardData.slice(leaderboardData.length >= 3 ? 3 : 0, 10).map((row, idx) => {
-                            const isCurrentUser = row.user_id === user?.id;
-
-                            return (
-                              <div
-                                key={row.user_id}
-                                className="leaderboard-row"
-                                style={{
-                                  display: 'grid',
-                                  gridTemplateColumns: '70px 1fr 160px 140px 120px',
-                                  padding: '14px 20px',
-                                  alignItems: 'center',
-                                  borderBottom: idx < leaderboardData.length - 4 ? '1px solid rgba(255, 255, 255, 0.03)' : 'none',
-                                  background: isCurrentUser ? 'var(--primary-light)' : 'transparent',
-                                  fontWeight: isCurrentUser ? 800 : 500
-                                }}
-                              >
-                                <div>
-                                  <div className="leaderboard-rank rank-default" style={{ width: '30px', height: '30px', fontSize: '0.84rem' }}>
-                                    {row.rank_number}
-                                  </div>
-                                </div>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: isCurrentUser ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                                  <span style={{ fontWeight: 800 }}>{row.name}</span>
-                                  {isCurrentUser && <span style={{ fontSize: '0.7rem', background: 'var(--primary-glow)', color: 'var(--primary-color)', padding: '2px 6px', borderRadius: '4px', fontWeight: 800 }}>أنت</span>}
-                                </div>
-                                <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
-                                  {GRADE_NAMES[row.grade_level]}
-                                </div>
-                                <div style={{ textAlign: 'center', color: '#ffd700', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
-                                  <Trophy size={14} />
-                                  <span>{row.points || 0}</span>
-                                </div>
-                                <div style={{ textAlign: 'center', color: '#ff7e7e', fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px' }}>
-                                  <Flame size={14} />
-                                  <span>{row.study_streak || 1} يوم</span>
-                                </div>
-                              </div>
-                            );
-                          })}
+                    <div className="rank-list">
+                      {leaderboardData.slice(podiumOrder.length === 3 ? 3 : 0, 10).map((row) => (
+                        <div key={row.user_id} className={`rank-row ${row.user_id === user?.id ? 'me' : ''}`}>
+                          <span className="rank-row-num num">{row.rank_number}</span>
+                          <span className="user-avatar-circle sm">{initial(row.name)}</span>
+                          <div className="rank-row-name">
+                            <strong>{row.name}</strong>
+                            {!isMobile && <span>{gradeName(row.grade_level)}</span>}
+                          </div>
+                          <span className="rank-row-streak"><span className="num">{row.study_streak || 1}</span><Flame size={15} /></span>
+                          <strong className="rank-row-points num">{Number(row.points || 0).toLocaleString('en-US')}</strong>
                         </div>
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
       </main>
 
       {/* Mobile sheets (renders above everything when open) */}
       {renderSubjectSheet()}
-      {renderModeSheet()}
       {renderUpgradeSheet()}
       {renderTeacherConfigSheet()}
 
+      <div className="toast-region" role="status" aria-live="polite">
+        {toasts.map(t => (
+          <div key={t.id} className={`toast toast-${t.tone}`}>
+            {t.tone === 'success' ? <CheckCircle2 size={18} /> : t.tone === 'error' ? <AlertCircle size={18} /> : <Info size={18} />}
+            <span>{t.message}</span>
+            <button type="button" aria-label="إغلاق" onClick={() => setToasts(prev => prev.filter(x => x.id !== t.id))}>
+              <X size={15} />
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {confirmRequest && (
+        <div className="confirm-overlay" onClick={() => closeConfirm(false)}>
+          <div
+            className="confirm-dialog animate-scale-in"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="confirm-dialog-message"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => { if (e.key === 'Escape') closeConfirm(false); }}
+          >
+            <div className="confirm-dialog-icon"><AlertTriangle size={22} /></div>
+            <p id="confirm-dialog-message">{confirmRequest.message}</p>
+            <div className="confirm-dialog-actions">
+              <button type="button" className="btn-secondary" autoFocus onClick={() => closeConfirm(false)}>إلغاء</button>
+              <button type="button" className="btn-danger" onClick={() => closeConfirm(true)}>تأكيد</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Mobile bottom tab bar — thumb-reachable primary navigation */}
       {isMobile && !isTourOpen && !(activeTab === 'exams' && selectedExam && !examResult) && (
-        <nav className="bottom-nav" aria-label="التنقل السفلي" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)' }}>
+        <nav className="bottom-nav" aria-label="التنقل السفلي" style={{ display: 'grid', gridTemplateColumns: `repeat(${user ? 5 : 4}, 1fr)` }}>
           <button
             type="button"
             className={`bottom-nav-item ${activeTab === 'chat' ? 'active' : ''}`}
@@ -20694,17 +18521,19 @@ export default function App() {
             <MessageSquare size={20} />
             <span>الدردشة</span>
           </button>
-          <button
-            type="button"
-            className={`bottom-nav-item ${activeTab === 'subscriptions' || activeTab === 'beta' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveTab('subscriptions');
-              setSidebarOpen(false);
-            }}
-          >
-            <CreditCard size={20} />
-            <span>الاشتراك</span>
-          </button>
+          {user && (
+            <button
+              type="button"
+              className={`bottom-nav-item ${activeTab === 'subscriptions' || activeTab === 'beta' ? 'active' : ''}`}
+              onClick={() => {
+                setActiveTab('subscriptions');
+                setSidebarOpen(false);
+              }}
+            >
+              <CreditCard size={20} />
+              <span>الاشتراك</span>
+            </button>
+          )}
           <button
             type="button"
             className={`bottom-nav-item ${activeTab === 'exams' ? 'active' : ''}`}
@@ -20728,7 +18557,7 @@ export default function App() {
               setSidebarOpen(false);
             }}
           >
-            <Brain size={20} />
+            <Layers size={20} />
             <span>المدرب</span>
           </button>
           <button
@@ -20738,13 +18567,14 @@ export default function App() {
               if (user) {
                 setActiveTab('profile');
               } else {
+                setAuthTab('login');
                 setShowAuthModal(true);
               }
               setSidebarOpen(false);
             }}
           >
-            <User size={20} />
-            <span>حسابي</span>
+            {user ? <User size={20} /> : <LogIn size={20} />}
+            <span>{user ? 'حسابي' : 'دخول'}</span>
           </button>
         </nav>
       )}
@@ -21113,7 +18943,7 @@ export default function App() {
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                 <Smartphone size={20} style={{ color: 'var(--primary-color)' }} />
                 <h3 style={{ fontSize: '1.05rem', fontWeight: 800, color: 'var(--text-main)', margin: 0 }}>
-                  {isIosDevice ? 'إضافة EGS AI إلى الشاشة الرئيسية (iOS)' : 'تثبيت EGS AI على شاشة الهاتف'}
+                  {isIosDevice ? 'إضافة EGS\u00A0AI إلى الشاشة الرئيسية (iOS)' : 'تثبيت EGS\u00A0AI على شاشة الهاتف'}
                 </h3>
               </div>
               <button
@@ -21205,597 +19035,411 @@ export default function App() {
         </div>
       )}
 
-      {/* MODAL 1: Authentication Overlay */}
       {showAuthModal && !isTourOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(12px)', zIndex: 100, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', overflowY: 'auto', padding: '20px 10px' }}>
-          <div className="glass-strong animate-scale-in" style={{ background: 'var(--card-bg)', width: '100%', maxWidth: '420px', borderRadius: 'var(--radius-lg)', overflow: 'hidden', boxShadow: 'var(--shadow-xl)', border: '1px solid var(--border-color)', margin: isMobile ? '20px auto' : '40px auto', flexShrink: 0 }}>
-            
-            {/* Modal Brand Header */}
-            <div style={{ padding: '22px 24px 0', textAlign: 'center' }}>
-              <div className="brand-logo-frame" style={{ width: '54px', height: '54px', borderRadius: '16px', marginBottom: '4px' }}>
-                <img src="/logo.png" alt="EGS AI Logo" style={{ width: '90%', height: '90%', objectFit: 'contain' }} />
+        <div role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" className="auth-screen animate-fade-in">
+          <section className="auth-hero">
+            <div className="auth-hero-top">
+              <div className="auth-brand">
+                <BrandMark size={isMobile ? 44 : 48} glow />
+                <BrandWordmark size={isMobile ? '1.35rem' : '1.5rem'} />
               </div>
-              <h2 style={{ fontSize: '1.35rem', fontWeight: 800, color: 'var(--text-main)' }}>EGS AI</h2>
-              <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '4px', marginBottom: '16px' }}>مساعدك الذكي في المنهج الدراسي</p>
+              {!isMobile && (
+                <a href="/download" className="soft-pill">
+                  <Download size={16} />
+                  تحميل التطبيق
+                </a>
+              )}
             </div>
 
-            {/* Tab Header */}
-            <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', margin: '0 4px' }}>
-              <button
-                onClick={() => { setAuthTab('login'); setOtpStep(false); }}
-                style={{
-                  flex: 1, padding: '13px 16px', border: 'none',
-                  background: 'transparent', fontWeight: 700, fontSize: '0.88rem',
-                  color: authTab === 'login' ? 'var(--primary-color)' : 'var(--text-muted)',
-                  borderBottom: authTab === 'login' ? '2px solid var(--primary-color)' : '2px solid transparent',
-                  cursor: 'pointer', transition: 'var(--transition)', fontFamily: 'var(--font-arabic)',
-                }}
-              >
-                تسجيل الدخول
-              </button>
-              <button
-                onClick={() => { setAuthTab('register'); setOtpStep(false); }}
-                style={{
-                  flex: 1, padding: '13px 16px', border: 'none',
-                  background: 'transparent', fontWeight: 700, fontSize: '0.88rem',
-                  color: authTab === 'register' ? 'var(--primary-color)' : 'var(--text-muted)',
-                  borderBottom: authTab === 'register' ? '2px solid var(--primary-color)' : '2px solid transparent',
-                  cursor: 'pointer', transition: 'var(--transition)', fontFamily: 'var(--font-arabic)',
-                }}
-              >
-                إنشاء حساب جديد
-              </button>
-            </div>
-
-            {/* Form Body */}
-            <form onSubmit={handleAuthSubmit} style={{ padding: '22px 24px 24px', display: 'flex', flexDirection: 'column', gap: '14px', color: 'var(--text-main)' }}>
-              
-              {authError && (
-                <div className="alert alert-danger">
-                  <AlertCircle size={14} />
-                  <span>{authError}</span>
+            <div className="auth-hero-body">
+              {!isMobile && <span className="auth-eyebrow">للمرحلة الإعدادية والثانوية · المنهج المصري</span>}
+              <h1>
+                معلمك الذكي{' '}
+                <span>من كتابك المدرسي</span>
+                {!isMobile && <> خطوة بخطوة</>}
+              </h1>
+              <p>اسأل، صوّر المسألة، أو ابعت رسالة صوتية — والإجابة من منهج صفّك المقرر، بالعربي وبأسلوب مدرس فاهمك.</p>
+              {isMobile ? (
+                <div className="auth-hero-checks">
+                  {['من منهجك بس', 'حل بالخطوات', 'امتحانات'].map(item => (
+                    <span key={item}><Check size={14} strokeWidth={2.5} /> {item}</span>
+                  ))}
+                </div>
+              ) : (
+                <div className="auth-feature-grid">
+                  <div className="auth-feature">
+                    <span className="stat-icon cyan"><BookOpen size={19} /></span>
+                    <strong>من منهجك بس</strong>
+                    <span>ينبّهك لو المعلومة خارج المقرر</span>
+                  </div>
+                  <div className="auth-feature">
+                    <span className="stat-icon amber"><Camera size={19} /></span>
+                    <strong>صوّر المسألة</strong>
+                    <span>حل كامل بالخطوات والرسومات</span>
+                  </div>
+                  <div className="auth-feature">
+                    <span className="stat-icon violet"><FileText size={19} /></span>
+                    <strong>امتحانات وتصحيح</strong>
+                    <span>اختبارات من دروسك وكروت مراجعة</span>
+                  </div>
                 </div>
               )}
+            </div>
 
-              {/* Form Body: Sign up / Login / OTP */}
+            {!isMobile && (
+              <nav className="auth-hero-links" aria-label="روابط">
+                <a href="/terms" target="_blank" rel="noopener noreferrer">الشروط</a>
+                <a href="/privacy" target="_blank" rel="noopener noreferrer">الخصوصية</a>
+                <a href="/contact" target="_blank" rel="noopener noreferrer">تواصل معنا</a>
+                <span dir="ltr">egsaiedu.com</span>
+              </nav>
+            )}
+          </section>
+
+          <section className="auth-panel">
+            <button
+              type="button"
+              className="auth-close"
+              onClick={() => { if (otpStep) { setOtpStep(false); setOtpCode(''); } else { setShowAuthModal(false); resetAuthForm(); } }}
+              aria-label={otpStep ? 'رجوع' : 'إغلاق'}
+              title={otpStep ? 'رجوع' : 'إغلاق'}
+            >
+              {otpStep ? <ArrowRight size={20} /> : <X size={20} />}
+            </button>
+
+            <form onSubmit={handleAuthSubmit} className="auth-form">
               {!otpStep ? (
                 <>
-                  {authTab === 'register' ? (
-                    <>
-                      {/* OPTION 1: Google Quick Registration (تسجيل سريع) */}
-                      <div style={{
-                        background: 'rgba(0, 180, 216, 0.08)',
-                        border: '1px solid rgba(0, 180, 216, 0.25)',
-                        borderRadius: 'var(--radius-md)',
-                        padding: '14px 16px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '10px'
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <div style={{
-                              width: '28px', height: '28px', borderRadius: '8px',
-                              background: 'var(--primary-color)', color: '#fff',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center'
-                            }}>
-                              <Zap size={16} />
-                            </div>
-                            <div>
-                              <div style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--text-main)' }}>
-                                تسجيل سريع
-                              </div>
-                              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                                سجّل بحساب Google في ثواني بضغطة واحدة
-                              </div>
-                            </div>
-                          </div>
-                          <span style={{
-                            fontSize: '0.7rem', fontWeight: 700, padding: '2px 8px',
-                            borderRadius: '20px', background: 'rgba(255, 183, 3, 0.15)',
-                            color: '#FFB703', border: '1px solid rgba(255, 183, 3, 0.3)'
-                          }}>
-                            الأسرع
-                          </span>
-                        </div>
+                  <div className="segmented" role="tablist" aria-label="نوع الدخول">
+                    <button type="button" role="tab" aria-selected={authTab === 'register'} className={authTab === 'register' ? 'active' : ''} onClick={() => { setAuthTab('register'); setOtpStep(false); setAuthError(''); }}>
+                      حساب جديد
+                    </button>
+                    <button type="button" role="tab" aria-selected={authTab === 'login'} className={authTab === 'login' ? 'active' : ''} onClick={() => { setAuthTab('login'); setOtpStep(false); setAuthError(''); }}>
+                      تسجيل الدخول
+                    </button>
+                  </div>
 
-                        <div id="google-signin-button" style={{ minHeight: '42px', width: '100%', display: 'flex', justifyContent: 'center' }}></div>
+                  <div className="auth-heading">
+                    <h2 id="auth-modal-title">
+                      {authTab === 'register' ? (isMobile ? 'ابدأ مجاناً في دقيقة' : 'أهلاً بيك! ابدأ مجاناً') : 'أهلاً بعودتك!'}
+                    </h2>
+                    {!isMobile && <p>{authTab === 'register' ? 'دقيقة واحدة وتبدأ تذاكر مع معلمك الذكي.' : 'كمّل مذاكرتك من مكان ما وقفت.'}</p>}
+                  </div>
+
+                  {inputMessage.trim() && (
+                    <div className="auth-saved-question">
+                      <MessageSquare size={17} />
+                      <div>
+                        <span>سؤالك محفوظ وهنجاوبه أول ما {authTab === 'register' ? 'تسجّل' : 'تدخل'}:</span>
+                        <strong>«{inputMessage.trim().length > 90 ? `${inputMessage.trim().slice(0, 90)}...` : inputMessage.trim()}»</strong>
                       </div>
+                    </div>
+                  )}
 
-                      {/* Divider */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '2px 0' }}>
-                        <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }}></div>
-                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                          أو سجّل بإيميلك وكلمة السر بس
-                        </span>
-                        <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }}></div>
-                      </div>
+                  {authError && (
+                    <div className="alert alert-danger">
+                      <AlertCircle size={15} />
+                      <span>{authError}</span>
+                    </div>
+                  )}
 
-                      {/* OPTION 2: Email & Password ONLY */}
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                        <label className="form-label">البريد الإلكتروني:</label>
-                        <input
-                          type="email" required value={email}
-                          onChange={(e) => setEmail(e.target.value)}
-                          placeholder="اكتب إيميلك هنا (مثال: student@gmail.com)"
-                          className="form-input"
-                          style={{ textAlign: 'left', direction: 'ltr' }}
-                        />
-                      </div>
+                  {!isMobile && <span className="auth-quick-label">تسجيل سريع</span>}
+                  <div id="google-signin-button" className="auth-google-slot" />
 
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                        <label className="form-label">كلمة السر:</label>
-                        <input
-                          type="password" required value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          placeholder="اكتب كلمة سر متقلش عن 6 خانات"
-                          className="form-input"
-                        />
-                      </div>
+                  <div className="auth-divider"><span>أو بالبريد الإلكتروني</span></div>
 
-                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)', cursor: 'pointer', lineHeight: '1.6' }}>
-                        <input
-                          type="checkbox"
-                          checked={termsAccepted}
-                          onChange={(e) => setTermsAccepted(e.target.checked)}
-                          style={{ marginTop: '3px', width: '15px', height: '15px', accentColor: 'var(--primary-color)', flexShrink: 0, cursor: 'pointer' }}
-                        />
-                        <span>
-                          أوافق على{' '}
-                          <a href="/privacy" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', fontWeight: 700 }}>سياسة الخصوصية</a>
-                          {' '}و{' '}
-                          <a href="/terms" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--primary-color)', fontWeight: 700 }}>شروط الاستخدام</a>
-                        </span>
-                      </label>
-                    </>
-                  ) : (
-                    <>
-                      {/* Login Tab: Quick Google Login at Top */}
-                      <div style={{
-                        background: 'rgba(0, 180, 216, 0.08)',
-                        border: '1px solid rgba(0, 180, 216, 0.25)',
-                        borderRadius: 'var(--radius-md)',
-                        padding: '14px 16px',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '10px'
-                      }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <div style={{
-                            width: '28px', height: '28px', borderRadius: '8px',
-                            background: 'var(--primary-color)', color: '#fff',
-                            display: 'flex', alignItems: 'center', justifyContent: 'center'
-                          }}>
-                            <Zap size={16} />
-                          </div>
-                          <div>
-                            <div style={{ fontWeight: 800, fontSize: '0.92rem', color: 'var(--text-main)' }}>
-                              تسجيل سريع بحساب Google
-                            </div>
-                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                              ادخل مباشرة بضغطة واحدة بحسابك
-                            </div>
-                          </div>
-                        </div>
+                  <div className="auth-field">
+                    <label className="form-label" htmlFor="auth-email">البريد الإلكتروني</label>
+                    <input
+                      id="auth-email" name="email" autoComplete="email" inputMode="email"
+                      type="email" required value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="name@example.com"
+                      className="form-input auth-input"
+                      dir="ltr"
+                    />
+                  </div>
 
-                        <div id="google-signin-button" style={{ minHeight: '42px', width: '100%', display: 'flex', justifyContent: 'center' }}></div>
-                      </div>
+                  <div className="auth-field">
+                    <label className="form-label" htmlFor="auth-password">كلمة المرور</label>
+                    <div className="auth-password-wrap">
+                      <input
+                        id="auth-password" name="password" autoComplete={authTab === 'register' ? 'new-password' : 'current-password'}
+                        type={showAuthPassword ? 'text' : 'password'} required value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        placeholder={authTab === 'register' ? '6 أحرف على الأقل' : 'كلمة المرور'}
+                        className="form-input auth-input"
+                        minLength={authTab === 'register' ? 6 : undefined}
+                      />
+                      <button type="button" className="auth-eye" onClick={() => setShowAuthPassword(v => !v)} aria-label={showAuthPassword ? 'إخفاء كلمة المرور' : 'إظهار كلمة المرور'}>
+                        {showAuthPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                      </button>
+                    </div>
+                    {authTab === 'register' && (
+                      <span className={`auth-hint ${password.length >= 6 ? 'ok' : ''}`}>
+                        <Check size={14} strokeWidth={2.5} /> 6 أحرف على الأقل
+                      </span>
+                    )}
+                  </div>
 
-                      {/* Divider */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', margin: '2px 0' }}>
-                        <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }}></div>
-                        <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                          أو ادخل بإيميلك وكلمة السر
-                        </span>
-                        <div style={{ flex: 1, height: '1px', background: 'var(--border-color)' }}></div>
-                      </div>
+                  {authTab === 'register' && (
+                    <label className="auth-terms">
+                      <input type="checkbox" checked={termsAccepted} onChange={(e) => setTermsAccepted(e.target.checked)} />
+                      <span>
+                        أوافق على{' '}
+                        <a href="/terms" target="_blank" rel="noopener noreferrer">شروط الاستخدام</a>
+                        {' '}و<a href="/privacy" target="_blank" rel="noopener noreferrer">سياسة الخصوصية</a>
+                      </span>
+                    </label>
+                  )}
 
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                        <label className="form-label">البريد الإلكتروني:</label>
-                        <input
-                          type="email" required value={email}
-                          onChange={(e) => setEmail(e.target.value)}
-                          placeholder="اكتب إيميلك المسجل"
-                          className="form-input"
-                          style={{ textAlign: 'left', direction: 'ltr' }}
-                        />
-                      </div>
+                  <button
+                    type="submit"
+                    disabled={authLoading || (authTab === 'register' && !termsAccepted)}
+                    className="btn-primary auth-submit"
+                  >
+                    {authLoading ? <Loader2 size={18} className="animate-spin" /> : <span>{authTab === 'login' ? 'تسجيل الدخول' : 'إنشاء حساب مجاني'}</span>}
+                  </button>
 
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                        <label className="form-label">كلمة السر:</label>
-                        <input
-                          type="password" required value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          placeholder="اكتب كلمة السر الخاصة بحسابك"
-                          className="form-input"
-                        />
-                      </div>
-                    </>
+                  {authTab === 'register' && (
+                    <p className="auth-gift"><Gift size={16} /> <strong className="num">20</strong> نقطة ذكاء مجانية فور تأكيد بريدك</p>
                   )}
                 </>
               ) : (
-                /* OTP Verification Step (Egyptian Arabic) */
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', textAlign: 'center' }}>
-                  <div style={{ background: 'rgba(0, 180, 216, 0.12)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '52px', height: '52px', borderRadius: '14px', margin: '0 auto', border: '1px solid #00B4D8' }}>
-                    <Lock size={24} style={{ color: '#00B4D8' }} />
+                <div className="otp-view">
+                  <span className="otp-icon"><Mail size={28} /></span>
+                  <h2 id="auth-modal-title">وصلك كود على إيميلك!</h2>
+                  <p>بعتنا كود من 6 أرقام على</p>
+                  <strong className="otp-email" dir="ltr">{email}</strong>
+                  <p>الكود صالح لمدة 10 دقائق.</p>
+
+                  {authError && (
+                    <div className="alert alert-danger">
+                      <AlertCircle size={15} />
+                      <span>{authError}</span>
+                    </div>
+                  )}
+
+                  <div className="otp-boxes" dir="ltr">
+                    {Array.from({ length: 6 }).map((_, i) => (
+                      <span key={i} className={`otp-box ${i === Math.min(otpCode.length, 5) ? 'active' : ''} ${otpCode[i] ? 'filled' : ''}`}>{otpCode[i] || ''}</span>
+                    ))}
+                    <input
+                      type="text" required maxLength={6} value={otpCode}
+                      onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      inputMode="numeric" autoComplete="one-time-code" aria-label="كود التأكيد المكون من 6 أرقام"
+                      className="otp-hidden-input"
+                      autoFocus
+                    />
                   </div>
-                  <div>
-                    <h4 style={{ fontWeight: 800, fontSize: '1.08rem' }}>وصلك كود على إيميلك!</h4>
-                    <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.5' }}>
-                      بعتنا كود تأكيد مكون من 6 أرقام على <strong style={{ color: 'var(--primary-color)' }}>{email}</strong>.. اكتبه هنا عشان نتأكد إن إيميلك شغال معاك:
-                    </p>
+
+                  <div className="otp-resend-row">
+                    {otpResendIn > 0 ? (
+                      <span>إعادة إرسال الكود بعد <strong className="num">{Math.floor(otpResendIn / 60)}:{String(otpResendIn % 60).padStart(2, '0')}</strong></span>
+                    ) : (
+                      <button type="button" className="link-btn" onClick={handleResendOtp} disabled={authLoading}>إعادة إرسال الكود</button>
+                    )}
+                    <button type="button" className="link-btn" onClick={() => { setOtpStep(false); setOtpCode(''); setAuthError(''); }}>تغيير الإيميل</button>
                   </div>
-                  <input
-                    type="text" required maxLength={6} value={otpCode}
-                    onChange={(e) => setOtpCode(e.target.value)}
-                    placeholder="أدخل الـ 6 أرقام"
-                    className="form-input"
-                    style={{ textAlign: 'center', fontSize: '1.6rem', fontWeight: 800, letterSpacing: '10px', direction: 'ltr' }}
-                  />
+
+                  <div className="otp-note">
+                    <Info size={18} />
+                    <span>مش لاقي الرسالة؟ بص في مجلد الرسائل غير المرغوب فيها (Spam).</span>
+                  </div>
+
+                  <button type="submit" disabled={authLoading || otpCode.length < 6} className="btn-primary auth-submit">
+                    {authLoading ? <Loader2 size={18} className="animate-spin" /> : <span>تأكيد وإنشاء الحساب</span>}
+                  </button>
                 </div>
               )}
-
-              {/* Action Buttons */}
-              <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
-                <button
-                  type="button"
-                  onClick={() => { setShowAuthModal(false); resetAuthForm(); }}
-                  className="btn-secondary"
-                  style={{ flex: 1, padding: '12px', fontFamily: 'var(--font-arabic)', borderRadius: 'var(--radius-sm)' }}
-                >
-                  إلغاء
-                </button>
-                <button
-                  type="submit"
-                  disabled={authLoading || (authTab === 'register' && !otpStep && !termsAccepted)}
-                  className="btn-primary"
-                  style={{ flex: 2, padding: '12px', fontFamily: 'var(--font-arabic)', borderRadius: 'var(--radius-sm)' }}
-                >
-                  {authLoading ? (
-                    <Loader2 size={16} className="animate-spin" />
-                  ) : (
-                    <span>{otpStep ? 'تأكيد والدخول للمنصة' : (authTab === 'login' ? 'تسجيل الدخول' : 'إنشاء حساب ومتابعة')}</span>
-                  )}
-                </button>
-              </div>
-
             </form>
-          </div>
+          </section>
         </div>
       )}
 
-      {/* SEQUENTIAL ONBOARDING MODAL (Step 1: Stage, Step 2: Name) */}
-      {showOnboardingModal && !isTourOpen && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh',
-          background: 'rgba(13, 27, 42, 0.85)', backdropFilter: 'blur(16px)',
-          zIndex: 100, display: 'flex', flexDirection: 'column',
-          alignItems: 'center', justifyContent: 'flex-start', overflowY: 'auto',
-          padding: '24px 12px'
-        }}>
-          <div className="glass-strong animate-scale-in" style={{
-            background: 'var(--card-bg)', width: '100%', maxWidth: '520px',
-            borderRadius: 'var(--radius-lg)', overflow: 'hidden',
-            boxShadow: 'var(--shadow-xl)', border: '1px solid rgba(0, 180, 216, 0.3)',
-            margin: isMobile ? '16px auto' : '40px auto', flexShrink: 0
-          }}>
-            
-            {/* Progress Header */}
-            <div style={{
-              padding: '20px 24px 16px',
-              borderBottom: '1px solid var(--border-color)',
-              background: 'rgba(0, 180, 216, 0.04)'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div className="brand-logo-frame" style={{ width: '32px', height: '32px', borderRadius: '10px' }}>
-                    <img src="/logo.png" alt="EGS AI Logo" style={{ width: '85%', height: '85%', objectFit: 'contain' }} />
+      {showOnboardingModal && !isTourOpen && (() => {
+        const obPath = { stageId: onboardingGrade, trackId: onboardingTrack, electiveSubject: onboardingElective || null };
+        const obSubjects = pathSubjects(educationCatalog, curriculums, activeCurriculumIds, obPath);
+        const obStage = findStage(educationCatalog, onboardingGrade);
+        const obSystem = obStage ? findSystem(educationCatalog, obStage.systemId) : null;
+        const obTrack = onboardingTrack ? trackName(educationCatalog, onboardingTrack) : '';
+        const pathReady = isPathComplete(educationCatalog, { stageId: onboardingGrade, trackId: onboardingTrack });
+        const isStageStep = onboardingStep === 'stage';
+        const subjectChip = (c: any) => (
+          <span key={c.id} className={`ob-subject-chip ${c.is_placeholder ? 'soon' : ''} ${c.is_elective ? 'elective' : ''}`}>
+            {c.subject_name}{c.is_placeholder ? ' · قيد الإعداد' : c.is_elective ? ' · اختياري' : ''}
+          </span>
+        );
+        return (
+          <div className="onboard-screen animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="onboard-title">
+            <header className="onboard-top">
+              {isMobile ? (
+                <>
+                  <div className="onboard-top-row">
+                    {isStageStep ? (
+                      <span className="onboard-step-label">الخطوة 1 من 2 · مسارك وموادك</span>
+                    ) : (
+                      <button type="button" className="page-back-link" onClick={() => setOnboardingStep('stage')} disabled={onboardingLoading}>
+                        <ArrowRight size={16} /> رجوع
+                      </button>
+                    )}
+                    {isStageStep ? <BrandWordmark size="1.1rem" /> : <span className="onboard-step-label">الخطوة 2 من 2 · اسمك</span>}
                   </div>
-                  <span style={{ fontWeight: 800, fontSize: '0.95rem', color: 'var(--text-main)' }}>إعداد حسابك في EGS AI</span>
-                </div>
-                <span style={{
-                  fontSize: '0.78rem', fontWeight: 700,
-                  padding: '3px 10px', borderRadius: '20px',
-                  background: onboardingStep === 'stage' ? 'rgba(0, 180, 216, 0.15)' : 'rgba(255, 183, 3, 0.15)',
-                  color: onboardingStep === 'stage' ? 'var(--primary-color)' : '#FFB703',
-                  border: `1px solid ${onboardingStep === 'stage' ? 'rgba(0, 180, 216, 0.3)' : 'rgba(255, 183, 3, 0.3)'}`
-                }}>
-                  {onboardingStep === 'stage' ? 'الخطوة 1 من 2' : 'الخطوة 2 من 2'}
-                </span>
-              </div>
-
-              {/* Visual Progress Bar */}
-              <div style={{ width: '100%', height: '6px', background: 'var(--border-color)', borderRadius: '3px', overflow: 'hidden' }}>
-                <div style={{
-                  width: onboardingStep === 'stage' ? '50%' : '100%',
-                  height: '100%',
-                  background: 'linear-gradient(90deg, #00B4D8, #FFB703)',
-                  transition: 'width 0.35s ease',
-                  borderRadius: '3px'
-                }}></div>
-              </div>
-            </div>
+                  <div className="onboard-progress">
+                    <span className={isStageStep ? 'current' : 'done'} />
+                    <span className={isStageStep ? '' : 'current'} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="auth-brand">
+                    <BrandMark size={44} />
+                    <BrandWordmark size="1.35rem" />
+                  </div>
+                  <ol className="stepper">
+                    <li className={isStageStep ? 'current' : 'done'}>
+                      <span className="stepper-dot">{isStageStep ? '1' : <Check size={14} strokeWidth={3} />}</span>
+                      مسارك وموادك
+                    </li>
+                    <li className={`stepper-line ${isStageStep ? '' : 'done'}`} aria-hidden="true" />
+                    <li className={isStageStep ? '' : 'current'}>
+                      <span className="stepper-dot">2</span>
+                      اسمك
+                    </li>
+                  </ol>
+                  <span className="onboard-top-spacer" />
+                </>
+              )}
+            </header>
 
             {onboardingError && (
-              <div style={{ margin: '16px 24px 0' }} className="alert alert-danger">
-                <AlertCircle size={14} />
+              <div className="alert alert-danger onboard-alert">
+                <AlertCircle size={15} />
                 <span>{onboardingError}</span>
               </div>
             )}
 
-            {/* SCREEN 1: First - Stage (المرحلة الدراسية) */}
-            {onboardingStep === 'stage' && (
-              <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    width: '50px', height: '50px', borderRadius: '16px',
-                    background: 'rgba(0, 180, 216, 0.12)', border: '1px solid #00B4D8',
-                    marginBottom: '12px'
-                  }}>
-                    <GraduationCap size={26} style={{ color: '#00B4D8' }} />
-                  </div>
-                  <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                    نوّرت EGS AI! أنت في سنة كام؟
-                  </h2>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.5' }}>
-                    اختر مرحلتك الدراسية عشان نجهّزلك المناهج والذكاء الاصطناعي على مقاس دراستك بالظبط.
-                  </p>
+            {isStageStep ? (
+              <div className="onboard-body stage">
+                <div className="onboard-main">
+                  <h1 id="onboard-title">{isMobile ? 'إنت في سنة كام؟' : <>أهلاً بيك في EGS&nbsp;AI! إنت في سنة كام؟</>}</h1>
+                  <p className="onboard-sub">{isMobile ? 'هنجهّز لك مواد منهجك بالظبط.' : 'اختار نظامك وصفّك، وهنجهّز لك مواد منهجك بالظبط. تقدر تغيّرها بعدين من ملفك الشخصي.'}</p>
+                  <StudyPathPicker
+                    catalog={educationCatalog}
+                    curricula={curriculums}
+                    activeCurriculumIds={activeCurriculumIds}
+                    value={obPath}
+                    showSubjects={false}
+                    onChange={(path) => {
+                      setOnboardingGrade(path.stageId);
+                      setOnboardingTrack(path.trackId || null);
+                      setOnboardingElective(path.electiveSubject || '');
+                      setOnboardingError('');
+                    }}
+                  />
                 </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  {Object.entries(GRADE_NAMES)
-                    .filter(([key]) => key !== 'unselected' && (activeGradeLevels.length === 0 || activeGradeLevels.includes(key)))
-                    .map(([key, label]) => {
-                      const isSelected = onboardingGrade === key;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          onClick={() => {
-                            setOnboardingGrade(key);
-                            setOnboardingError('');
-                          }}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            padding: '14px 16px',
-                            borderRadius: 'var(--radius-md)',
-                            border: isSelected ? '2px solid var(--primary-color)' : '1px solid var(--border-color)',
-                            background: isSelected ? 'rgba(0, 180, 216, 0.1)' : 'var(--alpha-white-1)',
-                            cursor: 'pointer',
-                            transition: 'all 0.2s ease',
-                            textAlign: 'right',
-                            fontFamily: 'var(--font-arabic)'
-                          }}
-                        >
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                            <div style={{
-                              width: '32px', height: '32px', borderRadius: '10px',
-                              background: isSelected ? 'var(--primary-color)' : 'var(--alpha-white-2)',
-                              color: isSelected ? '#fff' : 'var(--text-muted)',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center'
-                            }}>
-                              <BookOpen size={16} />
-                            </div>
-                            <span style={{ fontWeight: isSelected ? 800 : 600, fontSize: '0.92rem', color: isSelected ? 'var(--text-main)' : 'var(--text-secondary)' }}>
-                              {label}
-                            </span>
+                <aside className="onboard-side">
+                  <div className="onboard-side-head">
+                    <strong>موادك الدراسية</strong>
+                    <span className="tag cyan">{obSubjects.length} {obSubjects.length > 2 && obSubjects.length <= 10 ? 'مواد' : 'مادة'}</span>
+                  </div>
+                  {!isMobile && obStage && (
+                    <span className="onboard-side-path">{[obSystem?.name, obStage.name, obTrack].filter(Boolean).join(' · ')}</span>
+                  )}
+                  {obSubjects.length > 0 ? (
+                    isMobile ? (
+                      <div className="ob-subject-row custom-scrollbar">{obSubjects.map(subjectChip)}</div>
+                    ) : (
+                      <div className="ob-subject-list custom-scrollbar">
+                        {obSubjects.map((c: any) => (
+                          <div key={c.id} className="ob-subject-item">
+                            <span className="ob-subject-icon"><BookOpen size={15} /></span>
+                            <span className="ob-subject-name">{c.subject_name}</span>
+                            {c.is_placeholder && <span className="soon-badge">قيد الإعداد</span>}
+                            {!c.is_placeholder && c.is_elective && <span className="tag violet">اختياري</span>}
                           </div>
-                          {isSelected && (
-                            <div style={{
-                              width: '22px', height: '22px', borderRadius: '50%',
-                              background: 'var(--primary-color)', color: '#fff',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center'
-                            }}>
-                              <Check size={14} />
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })
-                  }
-                </div>
-
-                {/* Baccalaureate Tracks & Electives if 2_high */}
-                {onboardingGrade === '2_high' && (
-                  <div style={{
-                    background: 'var(--alpha-white-1)',
-                    border: '1px solid var(--border-color)',
-                    borderRadius: 'var(--radius-md)',
-                    padding: '16px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '12px'
-                  }}>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                      <label className="form-label" style={{ fontWeight: 700, fontSize: '0.85rem' }}>
-                        اختر شعبتك / مسارك الدراسي:
-                      </label>
-                      <select
-                        value={onboardingTrack}
-                        onChange={(e) => {
-                          const newTrack = e.target.value;
-                          setOnboardingTrack(newTrack);
-                          const electives = getElectiveSubjectsForTrack(newTrack);
-                          setOnboardingElective(electives.length > 0 ? electives[0] : '');
-                        }}
-                        className="form-input"
-                        style={{ cursor: 'pointer', width: '100%' }}
-                      >
-                        {Object.values(BACCALAUREATE_TRACKS)
-                          .filter(t => activeTracks.length === 0 || activeTracks.includes(t.id))
-                          .map((track) => (
-                            <option key={track.id} value={track.id} style={{ background: 'var(--card-bg)' }}>
-                              {track.name}
-                            </option>
-                          ))
-                        }
-                      </select>
-                    </div>
-
-                    {(() => {
-                      const electives = getElectiveSubjectsForTrack(onboardingTrack);
-                      if (electives.length === 0) return null;
-                      return (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                          <label className="form-label" style={{ fontWeight: 700, fontSize: '0.85rem' }}>
-                            المادة الاختيارية للشعبة:
-                          </label>
-                          <select
-                            value={onboardingElective || electives[0]}
-                            onChange={(e) => setOnboardingElective(e.target.value)}
-                            className="form-input"
-                            style={{ cursor: 'pointer', width: '100%' }}
-                          >
-                            {electives.map((subj) => (
-                              <option key={subj} value={subj} style={{ background: 'var(--card-bg)' }}>
-                                {subj}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      );
-                    })()}
-                  </div>
-                )}
-
-                {/* Action Button: Next */}
-                <div style={{ display: 'flex', marginTop: '6px' }}>
+                        ))}
+                      </div>
+                    )
+                  ) : (
+                    <p className="onboard-side-empty">{obStage ? 'اختار مسارك عشان نعرض موادك.' : 'اختار صفّك الدراسي عشان نعرض موادك.'}</p>
+                  )}
                   <button
                     type="button"
-                    onClick={() => {
-                      setOnboardingError('');
-                      setOnboardingStep('name');
-                    }}
-                    className="btn-primary"
-                    style={{
-                      width: '100%',
-                      padding: '13px',
-                      fontFamily: 'var(--font-arabic)',
-                      borderRadius: 'var(--radius-sm)',
-                      fontWeight: 700,
-                      fontSize: '0.95rem',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px'
-                    }}
+                    disabled={!pathReady}
+                    onClick={() => { setOnboardingError(''); setOnboardingStep('name'); }}
+                    className="btn-primary onboard-cta"
                   >
-                    <span>تمام، كمّل للخطوة الجاية</span>
-                    <ArrowLeft size={16} />
+                    <span>التالي: اسمك</span>
+                    <ArrowLeft size={18} />
                   </button>
-                </div>
+                </aside>
               </div>
-            )}
-
-            {/* SCREEN 2: Second - Name (الاسم) */}
-            {onboardingStep === 'name' && (
-              <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    width: '50px', height: '50px', borderRadius: '16px',
-                    background: 'rgba(255, 183, 3, 0.12)', border: '1px solid #FFB703',
-                    marginBottom: '12px'
-                  }}>
-                    <User size={26} style={{ color: '#FFB703' }} />
-                  </div>
-                  <h2 style={{ fontSize: '1.25rem', fontWeight: 800, color: 'var(--text-main)' }}>
-                    اسمك الكريم إيه؟
-                  </h2>
-                  <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', marginTop: '6px', lineHeight: '1.5' }}>
-                    عشان نعرف نناديك باسمك ونسجل درجاتك وإنجازاتك في لوحة الشرف باسمك الحلو.
-                  </p>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <label className="form-label" style={{ fontWeight: 700 }}>الاسم بالكامل:</label>
+            ) : (
+              <div className="onboard-body name">
+                <h1 id="onboard-title">اسمك الكريم إيه؟</h1>
+                <p className="onboard-sub">هنناديك بيه في المحادثة، وهيظهر في لوحة المتصدرين لما تتفوق.</p>
+                <div className="auth-field">
+                  <label className="form-label" htmlFor="onboard-name">الاسم بالكامل</label>
                   <input
+                    id="onboard-name"
                     type="text"
                     autoFocus
+                    autoComplete="name"
                     value={onboardingName}
-                    onChange={(e) => {
-                      setOnboardingName(e.target.value);
-                      setOnboardingError('');
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        handleCompleteOnboarding();
-                      }
-                    }}
-                    placeholder="اكتب اسمك هنا (مثلاً: أحمد محمود)"
-                    className="form-input"
-                    style={{ padding: '13px 16px', fontSize: '1.02rem' }}
+                    onChange={(e) => { setOnboardingName(e.target.value); setOnboardingError(''); }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleCompleteOnboarding(); } }}
+                    placeholder="مثلاً: أحمد محمود"
+                    className="form-input onboard-name-input"
                   />
-                  <span style={{ fontSize: '0.76rem', color: 'var(--text-muted)' }}>
-                    الاسم ده هو اللي هيظهر لك في لوحة الشرف وتقارير المذاكرة وتقدر تغيره في أي وقت من الإعدادات.
-                  </span>
                 </div>
 
-                {/* Action Buttons: Back & Complete */}
-                <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
-                  <button
-                    type="button"
-                    disabled={onboardingLoading}
-                    onClick={() => {
-                      setOnboardingError('');
-                      setOnboardingStep('stage');
-                    }}
-                    className="btn-secondary"
-                    style={{
-                      flex: 1,
-                      padding: '13px',
-                      fontFamily: 'var(--font-arabic)',
-                      borderRadius: 'var(--radius-sm)',
-                      fontWeight: 700,
-                      fontSize: '0.92rem',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '6px'
-                    }}
-                  >
-                    <ArrowRight size={16} />
-                    <span>رجوع للمرحلة</span>
-                  </button>
+                <div className="panel-card onboard-summary">
+                  <div className="onboard-summary-head">
+                    <strong>مسارك الدراسي</strong>
+                    <button type="button" className="link-btn" onClick={() => setOnboardingStep('stage')}>
+                      <Edit2 size={14} /> تعديل
+                    </button>
+                  </div>
+                  <div className="ob-subject-row wrap">
+                    {[obSystem?.name, obStage?.name, obTrack].filter(Boolean).map(label => (
+                      <span key={label} className="ob-path-chip">{label}</span>
+                    ))}
+                  </div>
+                  {obSubjects.length > 0 && <div className="ob-subject-row wrap">{obSubjects.map(subjectChip)}</div>}
+                </div>
 
+                <div className="gift-card">
+                  <span className="gift-icon"><Gift size={22} /></span>
+                  <div>
+                    <strong>هدية الترحيب: <span className="num">20</span> نقطة ذكاء في محفظتك</strong>
+                    <span>وكمان 5 نقاط مجانية بتتجدد كل يوم الساعة 12 بالليل</span>
+                  </div>
+                </div>
+
+                <div className="onboard-actions">
                   <button
                     type="button"
                     disabled={onboardingLoading || !onboardingName.trim()}
                     onClick={handleCompleteOnboarding}
-                    className="btn-primary"
-                    style={{
-                      flex: 2,
-                      padding: '13px',
-                      fontFamily: 'var(--font-arabic)',
-                      borderRadius: 'var(--radius-sm)',
-                      fontWeight: 800,
-                      fontSize: '0.95rem',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px'
-                    }}
+                    className="btn-primary onboard-cta"
                   >
-                    {onboardingLoading ? (
-                      <Loader2 size={16} className="animate-spin" />
-                    ) : (
-                      <>
-                        <span>يلا بينا نبدأ المذاكرة!</span>
-                        <Sparkles size={16} />
-                      </>
-                    )}
+                    {onboardingLoading ? <Loader2 size={18} className="animate-spin" /> : <><span>يلا نبدأ المذاكرة</span><ArrowLeft size={18} /></>}
                   </button>
+                  {!isMobile && (
+                    <button type="button" className="btn-secondary onboard-back" disabled={onboardingLoading} onClick={() => { setOnboardingError(''); setOnboardingStep('stage'); }}>
+                      <ArrowRight size={17} />
+                      <span>رجوع</span>
+                    </button>
+                  )}
                 </div>
+                <p className="onboard-foot">بعدها جولة سريعة من 3 خطوات تعرّفك على المنصة.</p>
               </div>
             )}
-
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MODAL 3: Edit Curriculum Markdown Content */}
       {editCurriculumId && (
@@ -21839,7 +19483,7 @@ export default function App() {
                     onChange={(e) => setEditGrade(e.target.value)}
                     style={{ padding: '10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', outline: 'none', background: 'var(--sidebar-bg)', color: 'var(--text-main)' }}
                   >
-                    {Object.entries(GRADE_NAMES).map(([key, name]) => (
+                    {stageEntries.map(([key, name]) => (
                       <option key={key} value={key} style={{ background: 'var(--card-bg)' }}>{name}</option>
                     ))}
                   </select>
@@ -21934,7 +19578,7 @@ export default function App() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     <h3 style={{ fontWeight: 800, fontSize: '1.15rem', margin: 0 }}>فهرس الوحدات والدروس اليدوي</h3>
                     <span style={{ background: 'rgba(255,255,255,0.25)', fontSize: '0.75rem', padding: '2px 8px', borderRadius: '6px', fontWeight: 700 }}>
-                      {GRADE_NAMES[unitsModalCurr.grade_level] || unitsModalCurr.grade_level}
+                      {gradeName(unitsModalCurr.grade_level)}
                     </span>
                   </div>
                   <p style={{ fontSize: '0.8rem', opacity: 0.9, marginTop: '4px', margin: 0 }}>
@@ -22467,7 +20111,7 @@ export default function App() {
             </div>
 
             <p style={{ fontSize: '0.84rem', color: 'var(--text-secondary)', lineHeight: '1.6', marginBottom: '18px' }}>
-              اختر ملف المنهج بصيغة Markdown (.md) للمادة <strong>{attachCurriculumModal.subject_name}</strong> ({GRADE_NAMES[attachCurriculumModal.grade_level]}). سيقوم النظام فوراً بتجزئة المحتوى وتوليد التضمينات الشعاعية (Vector Embeddings) وتفعيل المادة لجميع الطلاب.
+              اختر ملف المنهج بصيغة Markdown (.md) للمادة <strong>{attachCurriculumModal.subject_name}</strong> ({gradeName(attachCurriculumModal.grade_level)}). سيقوم النظام فوراً بتجزئة المحتوى وتوليد التضمينات الشعاعية (Vector Embeddings) وتفعيل المادة لجميع الطلاب.
             </p>
 
             <form onSubmit={handleAttachFileToPlaceholder} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -22849,22 +20493,22 @@ export default function App() {
                   onChange={(e) => setCsEditGrade(e.target.value)}
                   style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
                 >
-                  {Object.entries(GRADE_NAMES).map(([val, label]) => (
+                  {stageEntries.map(([val, label]) => (
                     <option key={val} value={val}>{label}</option>
                   ))}
                 </select>
               </div>
 
-              {csEditGrade === '2_high' && (
+              {tracksOfStage(educationCatalog, csEditGrade).length > 0 && (
                 <div>
-                  <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>مسار البكالوريا:</label>
+                  <label style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--text-main)', display: 'block', marginBottom: '4px' }}>المسار أو الشعبة:</label>
                   <select
                     value={csEditTrack}
                     onChange={(e) => setCsEditTrack(e.target.value)}
                     style={{ width: '100%', padding: '10px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--sidebar-bg)', color: 'var(--text-main)', fontSize: '0.85rem' }}
                   >
                     <option value="">بدون مسار محدد</option>
-                    {Object.values(BACCALAUREATE_TRACKS).map((t) => (
+                    {tracksOfStage(educationCatalog, csEditGrade).map((t) => (
                       <option key={t.id} value={t.id}>{t.name}</option>
                     ))}
                   </select>

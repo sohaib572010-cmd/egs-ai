@@ -1,7 +1,6 @@
 /**
- * Advanced Okapi BM25 Lexical Retrieval Engine with Arabic Morphological Analyzer
- * Designed specifically for the Egyptian Educational Curriculum.
- * Fully compatible with Next.js Edge Runtime and Node.js (pure TypeScript, zero native dependencies).
+ * Okapi BM25 lexical retrieval with an Arabic light stemmer (Light10) for the Egyptian curriculum.
+ * Pure TypeScript, no native dependencies.
  */
 
 export interface BM25Document {
@@ -10,7 +9,6 @@ export interface BM25Document {
   content: string;
   parent_id?: string | null;
   position_index?: number;
-  metadata?: Record<string, any>;
 }
 
 export interface BM25SearchResult {
@@ -20,39 +18,12 @@ export interface BM25SearchResult {
   matchedTerms: string[];
 }
 
-// ─── Arabic Linguistic Normalization & Tokenization ──────────────────────────
-
-const ARABIC_DIACRITICS_REGEX = /[\u064B-\u065F\u0670]/g;
-const ARABIC_TATWEEL_REGEX = /\u0640/g;
-const PUNCTUATION_REGEX = /[،؛؟?!.,:;()[\]{}<>"'`~#$%\^&*+=_\\/|\-]/g;
-
-// Common Egyptian Arabic educational stop words that dilute search relevance
-const ARABIC_EDUCATIONAL_STOP_WORDS = new Set([
-  'في', 'من', 'إلى', 'الى', 'على', 'عن', 'مع', 'هذا', 'هذه', 'هؤلاء', 'ذلك', 'تلك',
-  'الذي', 'التي', 'الذين', 'اللاتي', 'اللواتي', 'هو', 'هي', 'هم', 'هن', 'أنا', 'نحن',
-  'أنت', 'انتم', 'أنتم', 'كان', 'كانت', 'يكون', 'تكون', 'أصبح', 'أمسى', 'صار', 'ليس',
-  'ما', 'ماذا', 'لماذا', 'كيف', 'متى', 'أين', 'اين', 'كم', 'أي', 'اي', 'هل', 'لو',
-  'إن', 'ان', 'أن', 'إذا', 'اذا', 'ثم', 'أو', 'او', 'بل', 'لكن', 'حتى', 'كل', 'بعض',
-  'غير', 'سوى', 'فقط', 'جدا', 'أيضا', 'ايضا', 'يا', 'بطل', 'دكتور', 'مهندس', 'عايز',
-  'اعرف', 'قولي', 'ايه', 'إيه', 'ده', 'دي', 'ممكن', 'حل', 'مسألة', 'سؤال', 'اشرح',
-  'وضح', 'عرف', 'قارن', 'ما معنى', 'مفهوم'
-]);
-
-// Common prefixes to peel during morphological analysis
-const ARABIC_PREFIX_CLITICS = [
-  'كال', 'فال', 'وال', 'بال', 'لل',
-  'ال', 'وا', 'فا',
-  'و', 'ف', 'ب', 'ك', 'ل', 'س'
-];
-
-// Common suffixes to peel during morphological analysis
-const ARABIC_SUFFIX_CLITICS = [
-  'هما', 'كما', 'هم', 'هن', 'ها', 'نا', 'كم',
-  'ات', 'ين', 'ون', 'ية', 'يه', 'ة', 'ه', 'ي'
-];
+const ARABIC_DIACRITICS_REGEX = /[ً-ٰٟ]/g;
+const ARABIC_TATWEEL_REGEX = /ـ/g;
 
 /**
- * Standardizes Arabic characters, strips diacritics and tatweel.
+ * Character normalization shared with the knowledge graph (entity `normalized_name` values in the
+ * database were produced by this exact function, so it must not change).
  */
 export function normalizeArabic(text: string): string {
   if (!text) return '';
@@ -66,261 +37,179 @@ export function normalizeArabic(text: string): string {
     .trim();
 }
 
-/**
- * Strips leading clitics (e.g. "والقوة" -> "قوة", "بالسرعة" -> "سرعة").
- */
-export function peelArabicPrefix(word: string): string {
-  for (const prefix of ARABIC_PREFIX_CLITICS) {
-    if (word.startsWith(prefix) && word.length - prefix.length >= 3) {
-      return word.slice(prefix.length);
+const STOP_WORDS = new Set([
+  'في', 'من', 'الى', 'على', 'علي', 'عن', 'مع', 'هذا', 'هذه', 'هذان', 'هاتان', 'هؤلاء', 'ذلك', 'تلك', 'اولءك',
+  'الذي', 'التي', 'الذين', 'اللذان', 'اللتان', 'اللاتي', 'اللواتي', 'هو', 'هي', 'هم', 'هن', 'هما', 'انا', 'نحن',
+  'انت', 'انتم', 'كان', 'كانت', 'يكون', 'تكون', 'اصبح', 'صار', 'ليس', 'ما', 'ماذا', 'لماذا', 'كيف', 'متي',
+  'اين', 'كم', 'اي', 'هل', 'لو', 'ان', 'اذا', 'ثم', 'او', 'ام', 'بل', 'لكن', 'حتي', 'كل', 'بعض', 'غير', 'سوي',
+  'فقط', 'جدا', 'ايضا', 'يا', 'قد', 'لقد', 'لم', 'لن', 'لا', 'نعم', 'عند', 'عندما', 'بين', 'بعد', 'قبل', 'حيث',
+  'التي', 'منها', 'منه', 'فيه', 'فيها', 'عليه', 'عليها', 'به', 'بها', 'له', 'لها', 'الا', 'اما', 'كما', 'لان',
+  'ده', 'دي', 'دا', 'دول', 'ايه', 'ازاي', 'ليه', 'مين', 'امتي', 'فين', 'عايز', 'عاوز', 'عايزه', 'ممكن', 'يعني',
+  'بتاع', 'بتاعه', 'بس', 'طب', 'طيب', 'كده', 'اللي', 'مش', 'لسه', 'قولي', 'اعرف', 'اشرح', 'اشرحلي', 'وضح',
+  'وضحلي', 'فهمني', 'سمحت', 'فضلك', 'بطل', 'مستر', 'استاذ', 'دكتور',
+  'the', 'a', 'an', 'of', 'to', 'in', 'on', 'is', 'are', 'was', 'were', 'and', 'or', 'for', 'with', 'what', 'why',
+  'how', 'when', 'which', 'who', 'does', 'do', 'did', 'be', 'it', 'this', 'that', 'by', 'as', 'at', 'from'
+]);
+
+const DEFINITE_PREFIXES = ['وال', 'بال', 'كال', 'فال', 'ال', 'لل'];
+const LIGHT_SUFFIXES = ['ها', 'ان', 'ات', 'ون', 'ين', 'يه', 'ه', 'ي'];
+const EASTERN_DIGITS = /[٠-٩]/g;
+
+/** Light10 Arabic stemmer (Larkey et al.): strips the conjunction, definite-article clitics and common suffixes. */
+export function stemArabicWord(word: string): string {
+  let w = word;
+  if (w.length >= 4 && w.startsWith('و')) w = w.slice(1);
+  for (const p of DEFINITE_PREFIXES) {
+    if (w.startsWith(p) && w.length - p.length >= 2) {
+      w = w.slice(p.length);
+      break;
     }
   }
+  if (w.length > 3) {
+    for (const s of LIGHT_SUFFIXES) {
+      if (w.length - s.length >= 2 && w.endsWith(s)) w = w.slice(0, -s.length);
+    }
+  }
+  return w;
+}
+
+function stemLatinWord(word: string): string {
+  if (word.length > 4 && word.endsWith('ies')) return `${word.slice(0, -3)}y`;
+  if (word.length > 4 && word.endsWith('es')) return word.slice(0, -2);
+  if (word.length > 3 && word.endsWith('s') && !word.endsWith('ss')) return word.slice(0, -1);
   return word;
 }
 
-/**
- * Strips trailing clitics (e.g. "حركتها" -> "حركت" / "حركة", "معادلاتهم" -> "معادلات").
- */
-export function peelArabicSuffix(word: string): string {
-  for (const suffix of ARABIC_SUFFIX_CLITICS) {
-    if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
-      return word.slice(0, word.length - suffix.length);
-    }
-  }
-  return word;
-}
-
-/**
- * Tokenizes Arabic and Latin text into normalized stems and terms.
- * Returns an array of clean, non-stopword tokens and morphological variants.
- */
-export function tokenizeArabic(text: string): string[] {
+/** Analyzed token stream (with repeats, in order) used for indexing and querying. */
+export function analyzeText(text: string): string[] {
   if (!text) return [];
-  const normalized = normalizeArabic(text.toLowerCase());
-  const rawWords = normalized
-    .replace(PUNCTUATION_REGEX, ' ')
-    .split(/\s+/)
-    .map(w => w.trim())
-    .filter(w => w.length > 1 && !ARABIC_EDUCATIONAL_STOP_WORDS.has(w));
-
+  const normalized = normalizeArabic(text.toLowerCase())
+    .replace(EASTERN_DIGITS, d => String(d.charCodeAt(0) - 0x0660));
   const tokens: string[] = [];
-  const seen = new Set<string>();
-
-  for (const word of rawWords) {
-    if (!seen.has(word)) {
-      tokens.push(word);
-      seen.add(word);
-    }
-
-    // Morphological stem extraction
-    const peeledPrefix = peelArabicPrefix(word);
-    if (peeledPrefix !== word && peeledPrefix.length >= 2 && !seen.has(peeledPrefix)) {
-      tokens.push(peeledPrefix);
-      seen.add(peeledPrefix);
-    }
-
-    const peeledSuffix = peelArabicSuffix(peeledPrefix);
-    if (peeledSuffix !== peeledPrefix && peeledSuffix.length >= 2 && !seen.has(peeledSuffix)) {
-      tokens.push(peeledSuffix);
-      seen.add(peeledSuffix);
-    }
+  for (const raw of normalized.split(/[^ء-يa-z0-9]+/)) {
+    if (raw.length < 2 || STOP_WORDS.has(raw) || (raw[0] === 'و' && STOP_WORDS.has(raw.slice(1)))) continue;
+    const stem = /^[a-z]/.test(raw) ? stemLatinWord(raw) : /^[0-9]/.test(raw) ? raw : stemArabicWord(raw);
+    if (stem.length >= 2 && !STOP_WORDS.has(stem)) tokens.push(stem);
   }
-
   return tokens;
 }
 
-// ─── Okapi BM25 Index & Scorer ───────────────────────────────────────────────
-
-export interface BM25Options {
-  k1?: number;           // Term frequency saturation parameter (default: 1.2)
-  b?: number;            // Document length normalization parameter (default: 0.75)
-  headingBoost?: number; // Multiplier for heading token matches (default: 3.0)
-  phraseBoost?: number;  // Multiplier for exact multi-token phrase match (default: 1.25)
+/** Unique analyzed terms of a text. */
+export function tokenizeArabic(text: string): string[] {
+  return [...new Set(analyzeText(text))];
 }
 
+export interface BM25Options {
+  k1?: number;
+  b?: number;
+  headingWeight?: number;
+  bigramBoost?: number;
+}
+
+/**
+ * In-memory BM25 index over a whole curriculum. Scores use real term frequencies, a lightly weighted
+ * breadcrumb heading, and a proximity bonus when two consecutive query terms appear consecutively
+ * in the document (multi-word terms such as "فرق الجهد" or "الشحنة الكهربية").
+ */
 export class BM25Index {
-  private k1: number;
-  private b: number;
-  private headingBoost: number;
-  private phraseBoost: number;
-
-  private docs: BM25Document[] = [];
-  private docLengths: number[] = [];
-  private avgDocLength: number = 0;
-  private totalDocs: number = 0;
-
-  // Inverted index: term -> Map<docIndex, termFrequencyInDoc>
-  private invertedIndex: Map<string, Map<number, number>> = new Map();
-  // Inverted index for headings: term -> Map<docIndex, headingTermFrequency>
-  private headingIndex: Map<string, Map<number, number>> = new Map();
-  // Precomputed document frequencies: term -> count of docs containing term
-  private docFreqs: Map<string, number> = new Map();
+  private readonly k1: number;
+  private readonly b: number;
+  private readonly headingWeight: number;
+  private readonly bigramBoost: number;
+  private readonly docs: BM25Document[];
+  private readonly docLengths: Float64Array;
+  private readonly postings = new Map<string, Map<number, number>>();
+  private readonly bigrams: Set<string>[];
+  private readonly avgDocLength: number;
 
   constructor(docs: BM25Document[], options: BM25Options = {}) {
     this.k1 = options.k1 ?? 1.2;
     this.b = options.b ?? 0.75;
-    this.headingBoost = options.headingBoost ?? 3.0;
-    this.phraseBoost = options.phraseBoost ?? 1.25;
-
-    this.buildIndex(docs);
-  }
-
-  private buildIndex(docs: BM25Document[]): void {
+    this.headingWeight = options.headingWeight ?? 0.5;
+    this.bigramBoost = options.bigramBoost ?? 0.6;
     this.docs = docs;
-    this.totalDocs = docs.length;
-    this.docLengths = new Array(this.totalDocs);
-    this.invertedIndex.clear();
-    this.headingIndex.clear();
-    this.docFreqs.clear();
+    this.docLengths = new Float64Array(docs.length);
+    this.bigrams = new Array(docs.length);
 
-    if (this.totalDocs === 0) {
-      this.avgDocLength = 0;
-      return;
-    }
-
-    let totalTokens = 0;
-
-    for (let i = 0; i < this.totalDocs; i++) {
-      const doc = docs[i];
-      const contentTokens = tokenizeArabic(doc.content || '');
-      const headingTokens = tokenizeArabic(doc.heading || '');
-
-      // Effective doc length considers content plus weighted heading
-      const effectiveLength = contentTokens.length + (headingTokens.length * 2);
-      this.docLengths[i] = effectiveLength;
-      totalTokens += effectiveLength;
-
-      // Index content
-      const contentFreqMap = new Map<string, number>();
-      for (const token of contentTokens) {
-        contentFreqMap.set(token, (contentFreqMap.get(token) || 0) + 1);
+    let total = 0;
+    const headingCache = new Map<string, string[]>();
+    docs.forEach((doc, i) => {
+      const body = analyzeText(doc.content);
+      let heading = headingCache.get(doc.heading);
+      if (!heading) {
+        heading = analyzeText(doc.heading);
+        headingCache.set(doc.heading, heading);
       }
-
-      for (const [token, freq] of contentFreqMap.entries()) {
-        if (!this.invertedIndex.has(token)) {
-          this.invertedIndex.set(token, new Map());
-        }
-        this.invertedIndex.get(token)!.set(i, freq);
+      const tf = new Map<string, number>();
+      for (const t of body) tf.set(t, (tf.get(t) || 0) + 1);
+      for (const t of heading) tf.set(t, (tf.get(t) || 0) + this.headingWeight);
+      for (const [term, freq] of tf) {
+        let posting = this.postings.get(term);
+        if (!posting) this.postings.set(term, (posting = new Map()));
+        posting.set(i, freq);
       }
-
-      // Index heading
-      const headingFreqMap = new Map<string, number>();
-      for (const token of headingTokens) {
-        headingFreqMap.set(token, (headingFreqMap.get(token) || 0) + 1);
-      }
-
-      for (const [token, freq] of headingFreqMap.entries()) {
-        if (!this.headingIndex.has(token)) {
-          this.headingIndex.set(token, new Map());
-        }
-        this.headingIndex.get(token)!.set(i, freq);
-      }
-
-      // Track document frequencies (union of heading & content terms)
-      const allDocTokens = new Set([...contentFreqMap.keys(), ...headingFreqMap.keys()]);
-      for (const token of allDocTokens) {
-        this.docFreqs.set(token, (this.docFreqs.get(token) || 0) + 1);
-      }
-    }
-
-    this.avgDocLength = totalTokens / this.totalDocs;
-  }
-
-  /**
-   * Calculates Robertson-Spärck Jones IDF with Robertson smoothing:
-   * IDF(t) = ln(1 + (N - n(t) + 0.5) / (n(t) + 0.5))
-   */
-  public getIDF(term: string): number {
-    const n = this.docFreqs.get(term) || 0;
-    if (n === 0) return 0;
-    return Math.log(1 + (this.totalDocs - n + 0.5) / (n + 0.5));
-  }
-
-  /**
-   * Searches the indexed documents using Okapi BM25 with heading and phrase boosts.
-   */
-  public search(query: string, topK: number = 8): BM25SearchResult[] {
-    if (this.totalDocs === 0 || !query.trim()) return [];
-
-    const queryTokens = tokenizeArabic(query);
-    if (queryTokens.length === 0) return [];
-
-    const normQuery = normalizeArabic(query);
-    const docScores = new Float64Array(this.totalDocs);
-    const docMatchedTerms = new Array<Set<string>>(this.totalDocs);
-
-    for (const term of queryTokens) {
-      const idf = this.getIDF(term);
-      if (idf <= 0) continue;
-
-      const contentPosting = this.invertedIndex.get(term);
-      const headingPosting = this.headingIndex.get(term);
-
-      const candidateDocs = new Set<number>();
-      if (contentPosting) {
-        for (const docIdx of contentPosting.keys()) candidateDocs.add(docIdx);
-      }
-      if (headingPosting) {
-        for (const docIdx of headingPosting.keys()) candidateDocs.add(docIdx);
-      }
-
-      for (const docIdx of candidateDocs) {
-        const tfContent = contentPosting?.get(docIdx) || 0;
-        const tfHeading = headingPosting?.get(docIdx) || 0;
-
-        // Effective term frequency with heading boost
-        const effectiveTF = tfContent + (tfHeading * this.headingBoost);
-        const docLen = this.docLengths[docIdx];
-        const lenNorm = 1 - this.b + (this.b * (docLen / (this.avgDocLength || 1)));
-
-        // Okapi BM25 core term score
-        const termScore = idf * ((effectiveTF * (this.k1 + 1)) / (effectiveTF + (this.k1 * lenNorm)));
-
-        docScores[docIdx] += termScore;
-
-        if (!docMatchedTerms[docIdx]) {
-          docMatchedTerms[docIdx] = new Set();
-        }
-        docMatchedTerms[docIdx].add(term);
-      }
-    }
-
-    // Exact phrase match bonus
-    if (queryTokens.length > 1 && normQuery.length > 4) {
-      for (let i = 0; i < this.totalDocs; i++) {
-        if (docScores[i] === 0) continue;
-        const doc = this.docs[i];
-        const normDocHeading = normalizeArabic(doc.heading || '');
-        const normDocContent = normalizeArabic(doc.content || '');
-
-        if (normDocHeading.includes(normQuery)) {
-          docScores[i] *= (this.phraseBoost * 1.5); // Major boost for exact match in heading
-        } else if (normDocContent.includes(normQuery)) {
-          docScores[i] *= this.phraseBoost;
-        }
-      }
-    }
-
-    const results: BM25SearchResult[] = [];
-    for (let i = 0; i < this.totalDocs; i++) {
-      if (docScores[i] > 0) {
-        results.push({
-          doc: this.docs[i],
-          score: docScores[i],
-          rank: 0,
-          matchedTerms: Array.from(docMatchedTerms[i] || [])
-        });
-      }
-    }
-
-    // Sort descending by score
-    results.sort((a, b) => b.score - a.score);
-
-    // Assign 1-indexed ranks
-    results.forEach((res, index) => {
-      res.rank = index + 1;
+      const pairs = new Set<string>();
+      for (let j = 1; j < body.length; j++) pairs.add(`${body[j - 1]} ${body[j]}`);
+      this.bigrams[i] = pairs;
+      this.docLengths[i] = body.length + heading.length * this.headingWeight;
+      total += this.docLengths[i];
     });
+    this.avgDocLength = docs.length ? total / docs.length : 0;
+  }
 
-    return results.slice(0, topK);
+  get size(): number {
+    return this.docs.length;
+  }
+
+  idf(term: string): number {
+    const n = this.postings.get(term)?.size || 0;
+    return n === 0 ? 0 : Math.log(1 + (this.docs.length - n + 0.5) / (n + 0.5));
+  }
+
+  search(query: string, topK = 8): BM25SearchResult[] {
+    if (this.docs.length === 0) return [];
+    const queryTerms = analyzeText(query);
+    const unique = [...new Set(queryTerms)];
+    if (unique.length === 0) return [];
+
+    const scores = new Map<number, number>();
+    const matched = new Map<number, Set<string>>();
+    for (const term of unique) {
+      const idf = this.idf(term);
+      const posting = this.postings.get(term);
+      if (!posting || idf <= 0) continue;
+      for (const [docIdx, tf] of posting) {
+        const norm = 1 - this.b + this.b * (this.docLengths[docIdx] / (this.avgDocLength || 1));
+        scores.set(docIdx, (scores.get(docIdx) || 0) + idf * ((tf * (this.k1 + 1)) / (tf + this.k1 * norm)));
+        let m = matched.get(docIdx);
+        if (!m) matched.set(docIdx, (m = new Set()));
+        m.add(term);
+      }
+    }
+
+    const queryBigrams: { key: string; weight: number }[] = [];
+    for (let j = 1; j < queryTerms.length; j++) {
+      queryBigrams.push({
+        key: `${queryTerms[j - 1]} ${queryTerms[j]}`,
+        weight: Math.min(this.idf(queryTerms[j - 1]), this.idf(queryTerms[j]))
+      });
+    }
+    if (queryBigrams.length) {
+      for (const [docIdx, score] of scores) {
+        let bonus = 0;
+        for (const { key, weight } of queryBigrams) if (this.bigrams[docIdx].has(key)) bonus += weight;
+        if (bonus) scores.set(docIdx, score + this.bigramBoost * bonus);
+      }
+    }
+
+    return [...scores.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, topK)
+      .map(([docIdx, score], i) => ({
+        doc: this.docs[docIdx],
+        score,
+        rank: i + 1,
+        matchedTerms: [...(matched.get(docIdx) || [])]
+      }));
   }
 }

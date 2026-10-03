@@ -5,31 +5,51 @@ const ALIBABA_API_BASE = process.env.ALIBABA_API_BASE || 'https://dashscope-intl
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+/**
+ * How a question relates to the student's curriculum:
+ * - curriculum: taught in the textbook.
+ * - curriculum_reasoning: not stated verbatim but answered by reasoning from textbook concepts
+ *   (applications, inference, "what if", real-life phenomena, multi-lesson problems). In scope.
+ * - beyond_curriculum: an academic point of this subject that the textbook does not teach and the student
+ *   could mistake for exam material (a later-grade law, rule, method or detail).
+ * - general_education: general knowledge, curiosity, study skills or learning advice not tied to the book.
+ * - casual: greetings, thanks, small talk, feelings about studying.
+ * - non_academic: requests unrelated to learning.
+ */
+export type QueryScope =
+  | 'curriculum'
+  | 'curriculum_reasoning'
+  | 'beyond_curriculum'
+  | 'general_education'
+  | 'casual'
+  | 'non_academic';
+
+export const QUERY_SCOPES: QueryScope[] = [
+  'curriculum', 'curriculum_reasoning', 'beyond_curriculum', 'general_education', 'casual', 'non_academic'
+];
+
 export interface QueryIntelligence {
   queryType: 'direct' | 'inferential' | 'overview' | 'problem_solving';
-  arabicKeywords: string[];   // for Arabic FTS (tsvector 'simple')
-  englishKeywords: string[];  // for English FTS (tsvector 'english')
-  hydePassage: string;        // hypothetical passage for vector embedding
-  searchAnnouncement: string; // Arabic UI text: "سأبحث الآن عن..."
+  scope?: QueryScope;
+  arabicKeywords: string[];
+  englishKeywords: string[];
+  hydePassage: string;          // hypothetical textbook passage for dense retrieval
+  standaloneQuery?: string;     // follow-up rewritten as a self-contained textbook question
+  searchQueries: string[];      // textbook-phrased sub-queries covering every concept the answer needs
+  searchAnnouncement: string;
   isLessonExplanation?: boolean;
   lessonTitle?: string;
   isDifferentSubject?: boolean;
   isDifferentGrade?: boolean;
+  curriculumLesson?: string;    // exact map title of the lesson that teaches the asked concept
+  relatedLesson?: string;       // closest map lesson for a question outside the curriculum
   detectedSubject?: string;
   detectedGrade?: string;
-  metadata?: {
-    gradeLevel?: string;
-    subject?: string;
-    unit?: string;
-    chapter?: string;
-  };
 }
 
-export interface ContextGapAssessment {
-  sufficient: boolean;
-  confidence: number;         // 0 to 1
-  missingTopics: string[];
-  followUpAnnouncement: string; // Arabic UI text for follow-up step
+export interface LessonMapEntry {
+  title: string;
+  subtopics?: string[];
 }
 
 // ─── Core AI Model Callers ────────────────────────────────────────────────────
@@ -185,14 +205,13 @@ export async function callTextIntelligence(
 
 // ─── Embeddings ───────────────────────────────────────────────────────────────
 
+export const EMBEDDING_MODEL = 'text-embedding-v4';
+
 /**
  * Generates a 768-dimensional embedding vector using Alibaba Cloud text-embedding-v4.
  * Employs Matryoshka Representation Learning (dimensions: 768) matching the Supabase pgvector schema.
  */
-export async function callAlibabaEmbedding(
-  text: string,
-  model: string = 'text-embedding-v4'
-): Promise<number[]> {
+export async function callAlibabaEmbedding(text: string): Promise<number[]> {
   const apiKey = process.env.ALIBABA_API_KEY || process.env.DASHSCOPE_API_KEY || '';
   if (!apiKey || !text || !text.trim()) return [];
 
@@ -206,16 +225,14 @@ export async function callAlibabaEmbedding(
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model,
+        model: EMBEDDING_MODEL,
         input: text.slice(0, 8000),
         dimensions: 768
-      })
+      }),
+      signal: AbortSignal.timeout(10000)
     });
 
     if (!res.ok) {
-      if (model === 'text-embedding-v4') {
-        return callAlibabaEmbedding(text, 'text-embedding-v3');
-      }
       const errText = await res.text();
       console.error(`Alibaba embedding error (${res.status}):`, errText.slice(0, 200));
       return [];
@@ -233,10 +250,7 @@ export async function callAlibabaEmbedding(
  * Batches text embeddings using Alibaba Cloud text-embedding-v4 (10 items per batch limit).
  * Returns array of 768-dimensional vectors matching input order.
  */
-export async function callAlibabaEmbeddingBatch(
-  texts: string[],
-  model: string = 'text-embedding-v4'
-): Promise<number[][]> {
+export async function callAlibabaEmbeddingBatch(texts: string[]): Promise<number[][]> {
   const apiKey = process.env.ALIBABA_API_KEY || process.env.DASHSCOPE_API_KEY || '';
   if (!apiKey || texts.length === 0) return texts.map(() => []);
 
@@ -268,7 +282,7 @@ export async function callAlibabaEmbeddingBatch(
               'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify({
-              model,
+              model: EMBEDDING_MODEL,
               input: batch.texts,
               dimensions: 768
             }),
@@ -300,229 +314,195 @@ export async function callAlibabaEmbeddingBatch(
 }
 
 /**
- * Generates a single embedding vector (768 dimensions).
- * Primary: Alibaba Cloud text-embedding-v4
- * Fallback: Google text-embedding-004 via EdenAI
+ * Query and chunk vectors must come from the same model, otherwise pgvector similarity is meaningless.
+ * There is deliberately no cross-model fallback: on failure the caller gets [] and retrieval
+ * degrades to lexical search, while unembedded chunks stay pending for the admin embed route.
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
-  // 1. Primary: Alibaba Cloud text-embedding-v4
-  if (ALIBABA_API_KEY) {
-    const alibabaVec = await callAlibabaEmbedding(text);
-    if (alibabaVec && alibabaVec.length === 768) {
-      return alibabaVec;
-    }
-  }
-
-  // 2. Fallback: EdenAI Google text-embedding-004
-  if (!EDENAI_API_KEY) return [];
-
-  const response = await fetch(`${EDENAI_BASE}/text/embeddings`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${EDENAI_API_KEY}`
-    },
-    body: JSON.stringify({
-      providers: 'google',
-      texts: [text.slice(0, 8000)],
-      model: 'text-embedding-004'
-    })
-  });
-
-  if (!response.ok) {
-    console.error('EdenAI embedding error:', response.status);
-    return [];
-  }
-
-  const data = await response.json();
-  const googleKey = Object.keys(data).find(k => k.startsWith('google'));
-  return googleKey ? (data[googleKey]?.items?.[0]?.embedding ?? []) : [];
+  if (!ALIBABA_API_KEY) return [];
+  const vec = await callAlibabaEmbedding(text);
+  return vec.length === 768 ? vec : [];
 }
+
+export async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0 || !ALIBABA_API_KEY) return texts.map(() => []);
+  const vectors = await callAlibabaEmbeddingBatch(texts);
+  return vectors.map(v => (v && v.length === 768 ? v : []));
+}
+
+
+// ─── Reranking ────────────────────────────────────────────────────────────────
+
+const RERANK_MODEL = process.env.RERANK_MODEL || 'qwen3-rerank';
+const RERANK_INSTRUCT = 'Given an Egyptian school student\'s question, retrieve the textbook passages that contain the facts, definitions, laws, worked examples or principles needed to answer it, including passages needed to reason toward an answer that is not stated directly.';
 
 /**
- * Batch-embeds texts into 768-dimensional vectors.
- * Primary: Alibaba Cloud text-embedding-v4 (batched in groups of 10)
- * Fallback: Google text-embedding-004 via EdenAI (batched in groups of 20)
+ * Cross-encoder relevance scores (0..1, same order as `documents`) from Alibaba Cloud qwen3-rerank.
+ * Returns null on any failure so callers keep their fusion order.
  */
-export async function generateEmbeddingBatch(texts: string[]): Promise<number[][]> {
-  if (texts.length === 0) return [];
-
-  // 1. Primary: Alibaba Cloud text-embedding-v4
-  if (ALIBABA_API_KEY) {
-    const alibabaBatch = await callAlibabaEmbeddingBatch(texts);
-    const validCount = alibabaBatch.filter(v => v && v.length === 768).length;
-    if (validCount === texts.length) {
-      return alibabaBatch;
+export async function rerankDocuments(query: string, documents: string[]): Promise<number[] | null> {
+  if (!ALIBABA_API_KEY || !query.trim() || documents.length === 0) return null;
+  try {
+    const res = await fetch(`${new URL(ALIBABA_API_BASE).origin}/api/v1/services/rerank/text-rerank/text-rerank`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${ALIBABA_API_KEY}` },
+      body: JSON.stringify({
+        model: RERANK_MODEL,
+        input: { query: query.slice(0, 1500), documents: documents.map(d => d.slice(0, 2400)) },
+        parameters: { top_n: documents.length, return_documents: false, instruct: RERANK_INSTRUCT }
+      }),
+      signal: AbortSignal.timeout(6000)
+    });
+    if (!res.ok) {
+      console.error(`Rerank error (${res.status}):`, (await res.text()).slice(0, 200));
+      return null;
     }
-    console.warn(`Alibaba batch returned ${validCount}/${texts.length} embeddings, falling back to EdenAI for missing`);
-  }
-
-  // 2. Fallback: EdenAI Google text-embedding-004
-  if (!EDENAI_API_KEY) return texts.map(() => []);
-
-  const BATCH_SIZE = 20;
-  const batches: string[][] = [];
-  for (let i = 0; i < texts.length; i += BATCH_SIZE) {
-    batches.push(texts.slice(i, i + BATCH_SIZE).map(t => t.slice(0, 8000)));
-  }
-
-  const promises = batches.map(async (batch, index) => {
-    try {
-      const response = await fetch(`${EDENAI_BASE}/text/embeddings`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${EDENAI_API_KEY}`
-        },
-        body: JSON.stringify({
-          providers: 'google',
-          texts: batch,
-          model: 'text-embedding-004'
-        })
-      });
-
-      if (!response.ok) {
-        console.error(`Batch embedding error for batch ${index}: ${response.status}`);
-        return batch.map(() => []);
-      }
-
-      const data = await response.json();
-      const googleKey = Object.keys(data).find(k => k.startsWith('google'));
-      const items: { embedding: number[] }[] = googleKey ? (data[googleKey]?.items ?? []) : [];
-      
-      const batchResults: number[][] = [];
-      for (let j = 0; j < batch.length; j++) {
-        batchResults.push(items[j]?.embedding ?? []);
-      }
-      return batchResults;
-    } catch (err) {
-      console.error(`Batch embedding exception for batch ${index}:`, err);
-      return batch.map(() => []);
+    const data = await res.json();
+    const scores = new Array<number>(documents.length).fill(0);
+    for (const r of data?.output?.results || []) {
+      if (typeof r?.index === 'number' && typeof r?.relevance_score === 'number') scores[r.index] = r.relevance_score;
     }
-  });
-
-  const resolvedBatches = await Promise.all(promises);
-  return resolvedBatches.flat();
+    return scores;
+  } catch (err) {
+    console.error('Rerank exception:', err);
+    return null;
+  }
 }
-
 
 // ─── Query Intelligence ───────────────────────────────────────────────────────
 
 /**
- * Single-call query intelligence:
- * 1. Categorizes query type
- * 2. Extracts Arabic & English search keywords
- * 3. Generates a hypothetical textbook passage (HyDE)
- * 4. Produces a polite user-facing search announcement in Egyptian educational Arabic
- * 5. Detects full lesson explanation requests and lesson titles
+ * True when the student asks about one concept, law, term, or problem (even if a lesson is named
+ * for context), as opposed to requesting a whole-lesson explanation.
  */
+export function isSinglePointQuestion(text: string): boolean {
+  return /(?:مش فاهم|مش مستوعب|مش واضحة|وضحلي|اشرحلي نقطة|نقطة|جزئية|مفهوم|معنى|يعني ايه|يعني إيه|ما هو|ما هي|ماهو|ماهي|ما المقصود|ليه|لماذا|علل|ازاي|إزاي|كيف|ما الفرق|الفرق بين|قارن|سؤال|مسألة|مسأله|احسب|أوجد|اوجد|حل المعادلة|عرف|تعريف|قانون|قوانين|نظرية|متى|أين|هل)/i.test(text) &&
+    !/(?:شرح كامل|شرح شامل|الدرس كامل|كل نقاط الدرس|اشرح لي الدرس من البداية|ذاكر معايا الدرس|بالتفصيل|شرح مفصل|كامل)/i.test(text);
+}
+
+const QUERY_INTELLIGENCE_INSTRUCTIONS = `You are the query-understanding engine of an AI tutor for the Egyptian national curriculum.
+Read the LESSON MAP of the student's textbook, the recent conversation and the student's message, then return ONE JSON object.
+
+FIELDS:
+- scope: how the message relates to THIS textbook. Decide from the lesson map (titles and subtopics) and your knowledge of what these lessons teach:
+  * "curriculum": the asked concept, rule, law, event, text, example or problem type is taught in one of the mapped lessons.
+  * "curriculum_reasoning": the answer is not written verbatim in the book but follows by reasoning from concepts the book teaches: applying a law to a new situation, explaining an everyday phenomenon with a lesson's principle, "what happens if", "why", comparisons, multi-lesson problems, exam-style inference questions. This IS the curriculum; prefer it over "beyond_curriculum" whenever the mapped lessons contain the principles needed.
+  * "beyond_curriculum": an academic point of THIS subject's discipline that the mapped lessons do not teach and that the student could mistake for exam material (a law, formula, rule, method, event or detail from a later grade or a different branch). Choose it only when you are confident no mapped lesson covers it.
+  * "general_education": general knowledge or curiosity the student would not assume is in their syllabus, study skills, exam strategy, learning advice, careers, how the platform works, or a concept from outside this subject asked out of interest.
+  * "casual": greetings, thanks, small talk, jokes, feelings or motivation about studying.
+  * "non_academic": requests unrelated to learning (recipes, games, celebrities, shopping).
+- queryType: "direct" (fact/definition), "inferential" (needs reasoning), "problem_solving" (calculation or exercise), "overview" (whole curriculum or unit).
+- isLessonExplanation: true ONLY when the student asks to explain or study a WHOLE lesson ("اشرح درس ...", "عايز شرح الدرس الأول"). A question about one concept, law, term or problem is false even if it names a lesson.
+- lessonTitle: the lesson the student wants explained in full (copy the map title when you can), otherwise null.
+- curriculumLesson: for scope "curriculum" or "curriculum_reasoning", the EXACT map title of the lesson that teaches the concept or principle the answer relies on (a voltage/current calculation belongs to the Ohm's law lesson). Judge by topic, not by the lesson the student names. Otherwise null.
+- relatedLesson: for scope "beyond_curriculum" or "general_education", the EXACT map title of the closest genuinely related lesson, or null when none is truly related.
+- isDifferentSubject: true ONLY when the question clearly belongs to an UNRELATED school subject (Arabic grammar in a Science chat, a chemistry calculation in a History chat). Neighboring disciplines are one family: physics, chemistry, biology and earth science; history, geography, civics, the constitution, politics, economics, philosophy and sociology. Casual, general and platform questions are false. When unsure, false.
+- detectedSubject: Arabic name of the school subject the question belongs to, or null.
+- isDifferentGrade: true ONLY when the student explicitly says they study in another grade or asks for another grade's curriculum. A merely advanced topic is false.
+- detectedGrade: the grade the student referred to, or null.
+- standaloneQuery: the message rewritten as ONE self-contained question in textbook Arabic (English for English-language subjects). Resolve follow-ups ("طب ليه؟", "وضح أكتر", "حل واحدة زيها", "والنوع التاني؟") from the conversation.
+- searchQueries: 1-3 short textbook-phrased search queries that together retrieve EVERYTHING needed to answer: the asked concept itself, plus, for inference or application questions, the underlying laws, definitions or mechanisms the reasoning needs. Distinct from each other and from standaloneQuery. Empty for casual and non_academic.
+- arabicKeywords: 3-6 core terms exactly as an Egyptian textbook writes them (not dialect), most specific first.
+- englishKeywords: matching English terms for STEM or English subjects, else empty.
+- hydePassage: 2-3 sentences written as the textbook passage that would answer the standalone question (textbook terminology and notation).
+- searchAnnouncement: short Arabic status line, e.g. "أبحث في المنهج عن: ...".
+
+Return JSON only:
+{"scope":"","queryType":"","isLessonExplanation":false,"lessonTitle":null,"curriculumLesson":null,"relatedLesson":null,"isDifferentSubject":false,"detectedSubject":null,"isDifferentGrade":false,"detectedGrade":null,"standaloneQuery":"","searchQueries":[],"arabicKeywords":[],"englishKeywords":[],"hydePassage":"","searchAnnouncement":""}`;
+
+function formatLessonMapForClassifier(lessonMap: LessonMapEntry[]): string {
+  return lessonMap
+    .map(l => {
+      const subs = (l.subtopics || []).slice(0, 8).join('، ');
+      return `- ${l.title}${subs ? ` | ${subs}` : ''}`.slice(0, 260);
+    })
+    .join('\n');
+}
+
+function cleanString(value: unknown, max = 500): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, max) : undefined;
+}
+
+function cleanStringList(value: unknown, limit: number, max = 200): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(v => cleanString(v, max)).filter((v): v is string => !!v))].slice(0, limit);
+}
+
 export async function analyzeQueryIntelligence(
   query: string,
   subject: string,
-  grade: string
+  grade: string,
+  lessonMap: LessonMapEntry[] = [],
+  conversation = ''
 ): Promise<QueryIntelligence> {
-  // Check if query is asking a specific question, definition, calculation, or concept doubt
-  const isSinglePointDoubt = /(?:مش فاهم|مش مستوعب|مش واضحة|وضحلي|اشرحلي نقطة|نقطة|جزئية|مفهوم|معنى|ما هو|ما هي|ماهو|ماهي|ما المقصود|ليه|لماذا|علل|ازاي|كيف|ما الفرق|قارن|سؤال|مسألة|احسب|عرف|متى|أين|هل)/i.test(query) &&
-    !/(?:شرح كامل|شرح شامل|الدرس كامل|كل نقاط الدرس|اشرح لي الدرس من البداية|ذاكر معايا الدرس)/i.test(query);
+  const isSinglePointDoubt = isSinglePointQuestion(query);
 
-  // Check explicit full lesson request with clean title stripping
   const cleanedQueryForLesson = query
-    .replace(/(?:بالتفصيل|كاملاً|كامل|شامل|من البداية|لو سمحت|من فضلك|يا مستر|في التاريخ|تاريخ اولى ثانوي|تاريخ اولي ثانوي|تاريخ الصف الاول الثانوي)/gi, '')
+    .replace(/(?:بالتفصيل|كاملاً|كامل|شامل|من البداية|لو سمحت|من فضلك|يا مستر)/gi, '')
     .trim();
-
   const fullLessonRegex = /(?:اشرح|شرح|ذاكر|راجع|مراجعة|ابدأ|عايز شرح|عاوز شرح|ممكن شرح|ممكن تشرح|فهمني)\s+(?:لي\s+)?(?:معايا\s+)?(?:الدرس|درس|اول درس|أول درس|للدرس|فدرس)\s*([^؟?!.\n]*)/i;
   const revFullLessonRegex = /(?:الدرس|درس|اول درس|أول درس)\s+([^؟?!.\n]+?)\s+(?:شرح كامل|كامل|بالكامل|شامل|من البداية|شرح)/i;
   const explicitFullLessonMatch = !isSinglePointDoubt && (cleanedQueryForLesson.match(fullLessonRegex) || cleanedQueryForLesson.match(revFullLessonRegex));
-  let heuristicLessonTitle = explicitFullLessonMatch ? explicitFullLessonMatch[1]?.trim() : undefined;
-  if ((!heuristicLessonTitle || heuristicLessonTitle.length === 0) && /(?:الدرس الأول|الدرس الاول|اول درس|أول درس)/i.test(query)) {
+  let heuristicLessonTitle = explicitFullLessonMatch ? explicitFullLessonMatch[1]?.trim() || undefined : undefined;
+  if (!heuristicLessonTitle && /(?:الدرس الأول|الدرس الاول|اول درس|أول درس)/i.test(query)) {
     heuristicLessonTitle = 'الدرس الأول';
   }
   const heuristicIsLesson = !isSinglePointDoubt && (!!heuristicLessonTitle || /(?:شرح كامل|الدرس كامل|كل نقاط الدرس|شرح شامل|شرح الدرس|اشرح الدرس)/i.test(query));
 
-  const prompt = `You are an expert Query Intelligence and Curriculum Search Engine for the Egyptian National Curriculum.
-Analyze the student's question against the active curriculum subject ("${subject}") and grade level ("${grade}").
-Extract precise textbook keywords, search terms, whether the student is requesting a full lesson explanation, and whether the question is about a different subject or grade level.
-NOTE: General inquiries about platform capabilities, sending camera photos, uploading images, voice messages, study methods, or conversational greetings are NOT a different subject or grade (set isDifferentSubject: false, isDifferentGrade: false).
-Return a valid JSON object ONLY:
-{
-  "queryType": "direct|inferential|overview|problem_solving",
-  "isLessonExplanation": ${heuristicIsLesson ? 'true' : 'true|false'},
-  "lessonTitle": ${heuristicLessonTitle ? `"${heuristicLessonTitle}"` : 'string or null'},
-  "isDifferentSubject": true|false,
-  "isDifferentGrade": true|false,
-  "detectedSubject": "string or null",
-  "detectedGrade": "string or null",
-  "arabicKeywords": ["3-6 core academic or historical keywords from the Egyptian textbook"],
-  "englishKeywords": ["corresponding terms in English if STEM/English subject, or empty"],
-  "hydePassage": "1-2 sentence concise textbook statement directly addressing the query",
-  "searchAnnouncement": "سأبحث الآن عن: [الموضوع]",
-  "metadata": {
-    "gradeLevel": "${grade}",
-    "subject": "${subject}"
-  }
-}
+  // Stable per-curriculum prefix first (instructions, subject, map) so the provider's prompt cache is reused
+  const prompt = `${QUERY_INTELLIGENCE_INSTRUCTIONS}
 
-Active Subject: "${subject}", Grade: "${grade}", Query: "${query}"`;
+SUBJECT: "${subject}" | GRADE: "${grade}"
+${lessonMap.length ? `LESSON MAP (title | subtopics):\n${formatLessonMapForClassifier(lessonMap)}` : 'LESSON MAP: not available; judge scope from the subject and grade.'}
+
+${conversation ? `RECENT CONVERSATION (oldest first):\n${conversation}\n\n` : ''}STUDENT MESSAGE: "${query.slice(0, 3000)}"`;
+
+  const titles = lessonMap.map(l => l.title.trim());
+  const pickTitle = (value: unknown) => {
+    const t = cleanString(value);
+    return t ? lessonMap.find(l => l.title.trim() === t)?.title : undefined;
+  };
 
   try {
-    const raw = await callTextIntelligence(prompt, 350, 0.1, true);
+    const raw = await callTextIntelligence(prompt, 900, 0.1, true);
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('No JSON in text intelligence response');
-
     const parsed = JSON.parse(jsonMatch[0]);
 
-    // Accept lesson explanation if heuristic confirms or model confirms without single-point doubt
     const isLesson = !isSinglePointDoubt && (heuristicIsLesson || parsed.isLessonExplanation === true);
-    const resolvedLessonTitle = (typeof parsed.lessonTitle === 'string' && parsed.lessonTitle.trim())
-      ? parsed.lessonTitle.trim()
-      : heuristicLessonTitle;
-
-    const isDifferentSubject = parsed.isDifferentSubject === true;
-    const isDifferentGrade = parsed.isDifferentGrade === true;
-    const detectedSubject = typeof parsed.detectedSubject === 'string' && parsed.detectedSubject.trim() ? parsed.detectedSubject.trim() : undefined;
-    const detectedGrade = typeof parsed.detectedGrade === 'string' && parsed.detectedGrade.trim() ? parsed.detectedGrade.trim() : undefined;
+    const modelLessonTitle = cleanString(parsed.lessonTitle);
+    const resolvedLessonTitle = (modelLessonTitle && titles.includes(modelLessonTitle) ? modelLessonTitle : undefined)
+      || heuristicLessonTitle || modelLessonTitle;
+    const scope = QUERY_SCOPES.includes(parsed.scope) ? parsed.scope as QueryScope : undefined;
+    const curriculumLesson = pickTitle(parsed.curriculumLesson);
+    const standaloneQuery = cleanString(parsed.standaloneQuery);
+    const searchQueries = cleanStringList(parsed.searchQueries, 3).filter(q => q !== standaloneQuery);
 
     return {
       queryType: ['direct', 'inferential', 'overview', 'problem_solving'].includes(parsed.queryType)
         ? parsed.queryType
         : (isLesson ? 'overview' : 'direct'),
+      scope: curriculumLesson && (scope === 'beyond_curriculum' || !scope) ? 'curriculum_reasoning' : scope,
       isLessonExplanation: isLesson,
       lessonTitle: resolvedLessonTitle,
-      isDifferentSubject,
-      isDifferentGrade,
-      detectedSubject,
-      detectedGrade,
-      arabicKeywords: Array.isArray(parsed.arabicKeywords) ? parsed.arabicKeywords.slice(0, 8) : [],
-      englishKeywords: Array.isArray(parsed.englishKeywords) ? parsed.englishKeywords.slice(0, 5) : [],
-      hydePassage: typeof parsed.hydePassage === 'string' && parsed.hydePassage.length > 10
-        ? parsed.hydePassage
-        : query,
-      searchAnnouncement: typeof parsed.searchAnnouncement === 'string'
-        ? parsed.searchAnnouncement
-        : (isLesson && resolvedLessonTitle
-            ? `سأجمع الآن جميع عناصر وتفاصيل درس "${resolvedLessonTitle}" من المنهج...`
-            : `سأبحث الآن في منهج ${subject}...`),
-      metadata: parsed.metadata ? {
-        gradeLevel: typeof parsed.metadata.gradeLevel === 'string' && parsed.metadata.gradeLevel.trim() ? parsed.metadata.gradeLevel.trim() : undefined,
-        subject: typeof parsed.metadata.subject === 'string' && parsed.metadata.subject.trim() ? parsed.metadata.subject.trim() : undefined,
-        unit: typeof parsed.metadata.unit === 'string' && parsed.metadata.unit.trim() ? parsed.metadata.unit.trim() : undefined,
-        chapter: typeof parsed.metadata.chapter === 'string' && parsed.metadata.chapter.trim() ? parsed.metadata.chapter.trim() : undefined,
-      } : undefined
+      // A topic that sits in this curriculum's own lesson map is never a different subject
+      isDifferentSubject: parsed.isDifferentSubject === true && !curriculumLesson,
+      isDifferentGrade: parsed.isDifferentGrade === true,
+      curriculumLesson,
+      relatedLesson: pickTitle(parsed.relatedLesson),
+      detectedSubject: cleanString(parsed.detectedSubject, 80),
+      detectedGrade: cleanString(parsed.detectedGrade, 80),
+      arabicKeywords: cleanStringList(parsed.arabicKeywords, 8, 80),
+      englishKeywords: cleanStringList(parsed.englishKeywords, 5, 80),
+      hydePassage: cleanString(parsed.hydePassage, 1200) || standaloneQuery || query,
+      standaloneQuery,
+      searchQueries,
+      searchAnnouncement: cleanString(parsed.searchAnnouncement, 160)
+        || (isLesson && resolvedLessonTitle ? `أجمع عناصر درس "${resolvedLessonTitle}" من المنهج...` : `أبحث في منهج ${subject}...`)
     };
   } catch (err) {
     console.error('analyzeQueryIntelligence failed, using fallback:', err);
-    const STOP_WORDS = new Set([
-      'ما', 'ماذا', 'هو', 'هي', 'هم', 'هن', 'كيف', 'لماذا', 'علل', 'بما', 'تفسر',
-      'اشرح', 'وضح', 'معنى', 'مفهوم', 'عرف', 'قارن', 'ممكن', 'السؤال', 'في', 'من',
-      'على', 'عن', 'مع', 'هل', 'يا', 'ده', 'دي', 'عايز', 'اعرف', 'قولي', 'ايه',
-      'لو', 'سمحت', 'اريد', 'حل', 'مسألة', 'سؤال'
-    ]);
-    const words = query
-      .replace(/[؟?!.،,;:]/g, ' ')
-      .split(/\s+/)
-      .map(w => w.trim())
-      .filter(w => w.length > 1 && !STOP_WORDS.has(w));
-
+    const words = [...new Set(tokenizeQueryWords(query))];
     return {
       queryType: heuristicIsLesson ? 'overview' : 'direct',
       isLessonExplanation: heuristicIsLesson,
@@ -530,62 +510,52 @@ Active Subject: "${subject}", Grade: "${grade}", Query: "${query}"`;
       arabicKeywords: words.length > 0 ? words.slice(0, 7) : [query.slice(0, 30)],
       englishKeywords: [],
       hydePassage: query,
+      searchQueries: [],
       searchAnnouncement: heuristicIsLesson && heuristicLessonTitle
-        ? `سأجمع الآن جميع عناصر وتفاصيل درس "${heuristicLessonTitle}" من المنهج...`
-        : `سأبحث الآن في منهج ${subject}...`
+        ? `أجمع عناصر درس "${heuristicLessonTitle}" من المنهج...`
+        : `أبحث في منهج ${subject}...`
     };
   }
 }
 
-// ─── Context Gap Analysis ─────────────────────────────────────────────────────
+export type AnswerScope = 'curriculum' | 'beyond' | 'general' | 'casual' | 'non_academic';
+
+/** Cross-encoder relevance at which the textbook clearly covers the question, whatever the classifier said. */
+export const STRONG_TEXTBOOK_RELEVANCE = 0.72;
 
 /**
- * Assesses whether the retrieved context is sufficient to answer the query.
- * Only called for 'inferential' or 'problem_solving' queries when chunk count < 3.
+ * Final scope of an answer. The classifier sees the whole lesson map, but a "beyond the curriculum" verdict is
+ * only accepted when the textbook evidence agrees (the core term is absent from the book and no retrieved
+ * section is strongly relevant), because a false out-of-curriculum remark is worse than a missing one.
  */
-export async function assessContextGap(
-  query: string,
-  context: string
-): Promise<ContextGapAssessment> {
-  const prompt = `You are a RAG Context Sufficiency Evaluator for the Egyptian National Curriculum.
-Assess whether the retrieved curriculum context contains enough facts to answer the student's question.
-
-Student Query:
-"${query.slice(0, 500)}"
-
-Retrieved Context:
-"""
-${context.slice(0, 2000)}
-"""
-
-Return strict JSON ONLY:
-{
-  "sufficient": true|false,
-  "confidence": 0.0-1.0,
-  "missingTopics": ["specific missing topic in Arabic (max 2)"],
-  "followUpAnnouncement": "سأبحث أيضاً عن: [الموضوع الناقص]"
+export function resolveAnswerScope(
+  intelligence: Pick<QueryIntelligence, 'scope' | 'curriculumLesson'>,
+  evidence: { termInTextbook: boolean; topRelevance: number | null }
+): AnswerScope {
+  const strong = (evidence.topRelevance ?? 0) >= STRONG_TEXTBOOK_RELEVANCE;
+  switch (intelligence.scope) {
+    case 'casual': return 'casual';
+    case 'non_academic': return 'non_academic';
+    case 'curriculum':
+    case 'curriculum_reasoning': return 'curriculum';
+    case 'general_education': return intelligence.curriculumLesson ? 'curriculum' : 'general';
+    case 'beyond_curriculum': return intelligence.curriculumLesson || evidence.termInTextbook || strong ? 'curriculum' : 'beyond';
+    default: return intelligence.curriculumLesson || evidence.termInTextbook || strong ? 'curriculum' : 'general';
+  }
 }
 
-Rule: If the context contains relevant information to address the query even partially, set sufficient to true.`;
+const FALLBACK_STOP_WORDS = new Set([
+  'ما', 'ماذا', 'هو', 'هي', 'هم', 'كيف', 'لماذا', 'علل', 'بما', 'تفسر', 'اشرح', 'وضح', 'معنى', 'مفهوم', 'عرف',
+  'قارن', 'ممكن', 'السؤال', 'في', 'من', 'على', 'عن', 'مع', 'هل', 'يا', 'ده', 'دي', 'عايز', 'اعرف', 'قولي',
+  'ايه', 'إيه', 'ليه', 'ازاي', 'لو', 'سمحت', 'اريد', 'حل', 'مسألة', 'سؤال'
+]);
 
-  try {
-    const raw = await callTextIntelligence(prompt, 250, 0.1);
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No JSON in gap analysis response');
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    return {
-      sufficient: !!parsed.sufficient,
-      confidence: typeof parsed.confidence === 'number' ? Math.min(1, Math.max(0, parsed.confidence)) : 0.5,
-      missingTopics: Array.isArray(parsed.missingTopics) ? parsed.missingTopics.slice(0, 2) : [],
-      followUpAnnouncement: typeof parsed.followUpAnnouncement === 'string'
-        ? parsed.followUpAnnouncement
-        : 'سأبحث عن معلومات إضافية...'
-    };
-  } catch (err) {
-    console.error('assessContextGap failed:', err);
-    return { sufficient: true, confidence: 0.5, missingTopics: [], followUpAnnouncement: '' };
-  }
+function tokenizeQueryWords(query: string): string[] {
+  return query
+    .replace(/[؟?!.،,;:]/g, ' ')
+    .split(/\s+/)
+    .map(w => w.trim())
+    .filter(w => w.length > 1 && !FALLBACK_STOP_WORDS.has(w));
 }
 
 // ─── Curriculum Summary Generator ─────────────────────────────────────────────

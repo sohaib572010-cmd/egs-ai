@@ -13,7 +13,7 @@ Do not use emojis anywhere in the UI (labels, buttons, headers, empty states, no
 
 All web pages/views must be fully usable on mobile phones, tablets, and desktops — every screen size — with **no missing, cut-off, or overlapping elements**.
 - Use the existing breakpoints in `web/src/app/globals.css` (768px / 480px / 360px, `hover:none`, `prefers-reduced-motion`) and the `isMobile` (<768px) JS flag.
-- Any new multi-column grid MUST collapse to one column on small screens (known offenders to fix when touched: admin dashboard fixed grids, exams `1.2fr 0.8fr` grid).
+- Any new multi-column grid MUST collapse to one column on small screens (known offender to fix when touched: admin dashboard fixed grids).
 - Never rely on hover as the only way to reach an action (touch devices can't hover).
 - Respect safe-area insets and RTL layout in everything you add.
 - Test (or reason through) 360px, 768px, and 1280px widths before considering a UI change done.
@@ -54,7 +54,7 @@ Code must always be free of critical vulnerabilities and secure against attacks:
 When adding, changing, or removing a feature that is linked to another page, screen, API route, or layer — and the change requires modifying that other place for the feature to appear and function correctly — **you must update that other place too**, even if it was not explicitly requested or noticed, unless explicitly told not to.
 
 Concretely for this project (full map in PRD section 22):
-- Change a chat protocol tag → update backend prompt (`deepseek.ts`) AND web parser (`page.tsx`) AND mobile parser (`main.dart`).
+- Change a chat protocol tag → update backend prompts (`tutor_prompts.ts`) AND web parser (`page.tsx`) AND mobile parser (`main.dart`).
 - Change an API route → update web fetch calls AND mobile HTTP calls.
 - Change the DB schema → write a migration AND update `db.ts` AND mobile direct queries AND the local `db_data.json` shape.
 - Change a color/token → update web `globals.css` AND mobile `EgsTheme` so the platforms stay consistent.

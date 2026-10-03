@@ -1,4 +1,3 @@
-export const runtime = 'edge';
 export const revalidate = 180;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';

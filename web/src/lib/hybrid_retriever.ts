@@ -1,298 +1,221 @@
 /**
- * Hybrid Tri-Fusion Retrieval Engine (Vector Search + Okapi BM25 + GraphRAG)
- * Implements Weighted Reciprocal Rank Fusion (W-RRF), Parent Chunk Expansion,
- * and Knowledge Subgraph Context Injection for the Egyptian Curriculum AI Tutor.
+ * Curriculum retrieval engine: multi-query dense search (pgvector) + Arabic BM25 over the whole book +
+ * knowledge-graph links, fused with weighted Reciprocal Rank Fusion at the section (parent) level, then
+ * reranked by a cross-encoder and expanded with adjacent parts of split sections.
  */
 
-import { CurriculumChunk, db } from './db';
-import { BM25Index, BM25SearchResult } from './bm25';
-import { KnowledgeGraphEngine, KnowledgeSubgraph } from './graph_rag';
+import { CurriculumChunk, db, getCurriculumCorpus, type CurriculumCorpus } from './db';
+import { BM25Index } from './bm25';
+import { generateEmbeddingBatch, rerankDocuments } from './gemini';
 
-export interface HybridRetrievalOptions {
-  topK?: number;
-  rrfK?: number;
-  weightVector?: number;
-  weightBM25?: number;
-  weightGraph?: number;
+export interface RetrievalRequest {
+  curriculumId: string;
+  /** Self-contained question used for reranking. */
+  question: string;
+  /** Search phrasings (standalone question, sub-queries, the raw message). */
+  queries: string[];
+  hydePassage: string;
+  keywords: string[];
+  units: unknown;
 }
 
-export interface HybridRetrievalResult {
-  parentChunks: CurriculumChunk[];
-  childChunks: CurriculumChunk[];
-  subgraph: KnowledgeSubgraph;
+export interface RetrievedSection {
+  chunk: CurriculumChunk;
+  fusion: number;
+  relevance: number | null;
+}
+
+export interface RetrievalResult {
+  sections: RetrievedSection[];
   formattedContext: string;
-  metrics: {
-    vectorCandidateCount: number;
-    bm25CandidateCount: number;
-    graphEntityCount: number;
-    fusedCandidateCount: number;
-  };
+  /** Best cross-encoder relevance (0..1), or null when reranking was unavailable. */
+  topRelevance: number | null;
+  entityCount: number;
 }
 
+const RRF_K = 60;
+const CANDIDATES_TO_RERANK = 20;
+const MAX_SECTIONS = 8;
+const MIN_SECTIONS = 3;
+const CONTEXT_CHAR_BUDGET = 18000;
+const RELATIVE_CUTOFF = 0.22;
+const ABSOLUTE_FLOOR = 0.3;
+
 /**
- * Weighted Reciprocal Rank Fusion (W-RRF) across Vector, BM25, and Graph signals.
+ * Renders the unit/lesson map. The tutor uses it to decide whether a topic is part of the student's
+ * curriculum and which lesson teaches it.
  */
-export function fuseRRF(
-  vectorResults: CurriculumChunk[],
-  bm25Results: BM25SearchResult[],
-  graphChunkIds: string[],
-  allCandidateChunksMap: Map<string, CurriculumChunk>,
-  options: HybridRetrievalOptions = {}
-): { chunk: CurriculumChunk; score: number }[] {
-  const k = options.rrfK ?? 60;
-  const wVec = options.weightVector ?? 1.0;
-  const wBM25 = options.weightBM25 ?? 1.0;
-  const wGraph = options.weightGraph ?? 0.85;
+type MapUnit = { title?: string; groupTitle?: string; lessons?: { title?: string }[] };
 
-  const scoreMap = new Map<string, { chunk: CurriculumChunk; score: number }>();
-
-  // 1. Vector Search ranks
-  vectorResults.forEach((chunk, index) => {
-    const rank = index + 1;
-    const addedScore = wVec * (1.0 / (k + rank));
-    scoreMap.set(chunk.id, { chunk, score: addedScore });
-    allCandidateChunksMap.set(chunk.id, chunk);
-  });
-
-  // 2. BM25 Search ranks
-  bm25Results.forEach((res) => {
-    const rank = res.rank;
-    const addedScore = wBM25 * (1.0 / (k + rank));
-    const existing = scoreMap.get(res.doc.id);
-    if (existing) {
-      existing.score += addedScore;
-    } else {
-      const chunk = allCandidateChunksMap.get(res.doc.id) || (res.doc as unknown as CurriculumChunk);
-      scoreMap.set(res.doc.id, { chunk, score: addedScore });
-    }
-  });
-
-  // 3. GraphRAG Traversal chunk ranks
-  graphChunkIds.forEach((chunkId, index) => {
-    const rank = index + 1;
-    const addedScore = wGraph * (1.0 / (k + rank));
-    const existing = scoreMap.get(chunkId);
-    if (existing) {
-      existing.score += addedScore;
-    } else {
-      const chunk = allCandidateChunksMap.get(chunkId);
-      if (chunk) {
-        scoreMap.set(chunkId, { chunk, score: addedScore });
-      }
-    }
-  });
-
-  const sorted = Array.from(scoreMap.values()).sort((a, b) => b.score - a.score);
-  return sorted;
+export function formatCurriculumMap(units: unknown): string {
+  if (!Array.isArray(units) || units.length === 0) return '';
+  const unitMap = (units as MapUnit[]).map((u, uIdx) => {
+    const lessons = Array.isArray(u.lessons) ? u.lessons : [];
+    const lessonTitles = lessons.map((l, lIdx) => `      - ${l.title || `الدرس ${lIdx + 1}`}`).join('\n');
+    const title = u.title || `الوحدة ${uIdx + 1}`;
+    return `  * ${u.groupTitle ? `${u.groupTitle} > ${title}` : title}:\n${lessonTitles}`;
+  }).join('\n');
+  return `خريطة وحدات ودروس المنهج الدراسي:\n${unitMap}`;
 }
 
-/**
- * Executes the complete Hybrid Tri-Fusion Retrieval Pipeline:
- * Vector Search + Okapi BM25 + GraphRAG Traversal + Parent Breadcrumb Expansion.
- */
-export async function runHybridTriFusionRetrieval(
-  gradeLevel: string,
-  subjectName: string,
-  query: string,
-  queryEmbedding: number[],
-  keywords: string[],
-  options: HybridRetrievalOptions = {},
-  hydePassage?: string
-): Promise<HybridRetrievalResult> {
-  const cleanGrade = gradeLevel.trim();
-  const cleanSubject = subjectName.trim();
-  const topK = options.topK ?? 8;
+type RankedList = { ids: string[]; weight: number };
 
-  // 1. Retrieve curriculum record & graph data for this curriculum
-  const [curriculumRecord, graphData] = await Promise.all([
-    db.getCurriculumRecord(cleanGrade, cleanSubject).catch(err => {
-      console.warn('getCurriculumRecord notice:', err);
+/** Weighted RRF over ranked lists of section ids; each list counts a section once, at its best rank. */
+function fuseSections(lists: RankedList[]): Map<string, number> {
+  const scores = new Map<string, number>();
+  for (const { ids, weight } of lists) {
+    const seen = new Set<string>();
+    let rank = 0;
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      rank++;
+      scores.set(id, (scores.get(id) || 0) + weight / (RRF_K + rank));
+    }
+  }
+  return scores;
+}
+
+const baseHeading = (heading: string) => heading.replace(/\s*\(\d+\)$/, '');
+
+function sectionOf(corpus: CurriculumCorpus, chunk: { id: string; parent_id?: string | null }): string | null {
+  if (corpus.parents.has(chunk.id)) return chunk.id;
+  const parentId = corpus.children.get(chunk.id)?.parent_id ?? chunk.parent_id;
+  return parentId && corpus.parents.has(parentId) ? parentId : null;
+}
+
+/** Split sections ("heading (1)", "heading (2)") are retrieved with their adjacent parts. */
+function adjacentParts(corpus: CurriculumCorpus, section: CurriculumChunk): CurriculumChunk[] {
+  const list = corpus.parentsByPosition;
+  const idx = list.findIndex(p => p.id === section.id);
+  if (idx < 0) return [];
+  const base = baseHeading(section.heading);
+  const isSplit = base !== section.heading;
+  return [list[idx - 1], list[idx + 1]].filter((p): p is CurriculumChunk =>
+    !!p && (isSplit || baseHeading(p.heading) !== p.heading) && baseHeading(p.heading) === base
+  );
+}
+
+async function markdownFallback(curriculumId: string, request: RetrievalRequest): Promise<CurriculumChunk[]> {
+  const detail = await db.getCurriculumDetail(curriculumId).catch(() => null);
+  if (!detail?.content) return [];
+  const sections = detail.content.split(/\n(?=#{1,4}\s)/).map((text, i) => ({
+    id: `md_${i}`,
+    heading: (text.split('\n')[0] || '').replace(/^#+\s*/, '').trim() || 'قسم دراسي',
+    content: text.trim(),
+    position_index: i
+  })).filter(s => s.content.length > 30);
+  const index = new BM25Index(sections);
+  const hits = new Map<string, number>();
+  for (const q of [request.keywords.join(' '), ...request.queries]) {
+    index.search(q, 6).forEach(h => hits.set(h.doc.id, (hits.get(h.doc.id) || 0) + 1 / (RRF_K + h.rank)));
+  }
+  return [...hits.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([id]) => {
+      const s = sections.find(x => x.id === id)!;
+      return { ...s, curriculum_id: curriculumId, chunk_level: 'parent' as const };
+    });
+}
+
+export function formatSections(sections: CurriculumChunk[]): string {
+  if (sections.length === 0) return '';
+  const body = sections.map((s, i) => `--- مقتطف ${i + 1}: [${s.heading}] ---\n${s.content.trim()}`).join('\n\n');
+  return `=== مقتطفات الكتاب المدرسي ذات الصلة بالسؤال (الأعلى صلة أولاً) ===\n${body}`;
+}
+
+export async function retrieveCurriculumContext(request: RetrievalRequest): Promise<RetrievalResult> {
+  const { curriculumId } = request;
+  const queries = [...new Set(request.queries.map(q => q.trim()).filter(q => q.length > 2))].slice(0, 4);
+  const keywordQuery = request.keywords.map(k => k.trim()).filter(Boolean).join(' ');
+  const denseTexts = [...new Set([request.hydePassage, ...queries].map(t => t.trim()).filter(Boolean))].slice(0, 4);
+
+  const [corpus, embeddings] = await Promise.all([
+    getCurriculumCorpus(curriculumId).catch(err => {
+      console.error('Curriculum corpus load failed:', err);
       return null;
     }),
-    db.getCurriculumGraph(cleanGrade, cleanSubject).catch(err => {
-      console.warn('getCurriculumGraph notice:', err);
-      return { entities: [], relations: [] };
-    })
+    generateEmbeddingBatch(denseTexts).catch(() => denseTexts.map(() => [] as number[]))
   ]);
 
-  const candidateChunksMap = new Map<string, CurriculumChunk>();
+  const mapText = formatCurriculumMap(request.units);
+  if (!corpus || corpus.parents.size === 0) {
+    const fallback = await markdownFallback(curriculumId, request);
+    return {
+      sections: fallback.map(chunk => ({ chunk, fusion: 0, relevance: null })),
+      formattedContext: [mapText, formatSections(fallback)].filter(Boolean).join('\n\n'),
+      topRelevance: null,
+      entityCount: 0
+    };
+  }
 
-  // 2. Parallel Channel Execution: Vector + BM25 (via database RPC) + GraphRAG
-  const vectorPromise = (async () => {
-    if (!queryEmbedding || queryEmbedding.length === 0) return [];
-    try {
-      const vecChunks = await db.vectorSearchCurriculum(cleanGrade, cleanSubject, queryEmbedding);
-      vecChunks.forEach(c => candidateChunksMap.set(c.id, c));
-      return vecChunks;
-    } catch (err) {
-      console.warn('Vector search notice (falling back):', err);
-      return [];
-    }
-  })();
+  const denseResults = await Promise.all(
+    embeddings.map(vec => vec.length ? db.vectorSearchChunks(curriculumId, vec, 30) : Promise.resolve([]))
+  );
+  const lists: RankedList[] = [];
+  const toSections = (chunks: { id: string; parent_id?: string | null }[]) =>
+    chunks.map(c => sectionOf(corpus, c)).filter((id): id is string => !!id);
 
-  const bm25Promise = (async () => {
-    try {
-      const searchKeywords = (keywords && keywords.length > 0)
-        ? keywords
-        : query.replace(/[؟?!.،,;:]/g, ' ').split(/\s+/).filter(w => w.length > 2);
-      
-      const bm25Chunks = await db.hybridSearchCurriculum(
-        cleanGrade,
-        cleanSubject,
-        queryEmbedding || [],
-        searchKeywords,
-        []
-      );
-      bm25Chunks.forEach(c => candidateChunksMap.set(c.id, c));
-      return bm25Chunks.map((c, idx) => ({ doc: c, rank: idx + 1, score: 1.0 / (idx + 1) }));
-    } catch (err) {
-      console.warn('BM25 hybrid RPC notice (falling back):', err);
-      return [];
-    }
-  })();
+  denseResults.forEach((chunks, i) => lists.push({ ids: toSections(chunks), weight: i === 0 ? 1.0 : 0.9 }));
+  if (keywordQuery) lists.push({ ids: toSections(corpus.index.search(keywordQuery, 30).map(h => h.doc)), weight: 1.0 });
+  for (const q of queries) {
+    lists.push({ ids: toSections(corpus.index.search(q, 30).map(h => h.doc)), weight: 0.8 });
+  }
+  const subgraph = corpus.graph.retrieveKnowledgeGraph(request.question, request.keywords);
+  lists.push({ ids: subgraph.connectedChunkIds.filter(id => corpus.parents.has(id)).slice(0, 20), weight: 0.5 });
 
-  const graphPromise = (async () => {
-    try {
-      if (!graphData || graphData.entities.length === 0) {
-        return {
-          entities: [],
-          relations: [],
-          connectedChunkIds: [],
-          relevanceScore: 0,
-          synthesizedContext: ''
-        } as KnowledgeSubgraph;
-      }
+  const fused = [...fuseSections(lists).entries()].sort((a, b) => b[1] - a[1]).slice(0, CANDIDATES_TO_RERANK);
+  if (fused.length === 0) {
+    const fallback = await markdownFallback(curriculumId, request);
+    return {
+      sections: fallback.map(chunk => ({ chunk, fusion: 0, relevance: null })),
+      formattedContext: [mapText, formatSections(fallback)].filter(Boolean).join('\n\n'),
+      topRelevance: null,
+      entityCount: subgraph.entities.length
+    };
+  }
 
-      const engine = new KnowledgeGraphEngine(graphData.entities, graphData.relations);
-      return engine.retrieveKnowledgeGraph(query, keywords);
-    } catch (err) {
-      console.warn('Graph traversal notice (falling back):', err);
-      return {
-        entities: [],
-        relations: [],
-        connectedChunkIds: [],
-        relevanceScore: 0,
-        synthesizedContext: ''
-      } as KnowledgeSubgraph;
-    }
-  })();
-
-  const [vectorCandidates, bm25Candidates, subgraph] = await Promise.all([
-    vectorPromise,
-    bm25Promise,
-    graphPromise
-  ]);
-
-  // 3. Weighted Reciprocal Rank Fusion over candidate pools
-  const fusedScores = fuseRRF(
-    vectorCandidates,
-    bm25Candidates as any,
-    subgraph.connectedChunkIds,
-    candidateChunksMap,
-    options
+  const candidates = fused.map(([id, fusion]) => ({ chunk: corpus.parents.get(id)!, fusion }));
+  const relevance = await rerankDocuments(
+    request.question,
+    candidates.map(c => `${c.chunk.heading}\n${c.chunk.content}`)
   );
 
-  const topChildChunks = fusedScores.slice(0, topK).map(s => s.chunk);
-
-  // 4. Parent Expansion with Hierarchical Breadcrumbs
-  const parentIds = [...new Set(
-    topChildChunks
-      .map(c => c.parent_id)
-      .filter((id): id is string => !!id)
-  )];
-
-  let parentChunks: CurriculumChunk[] = [];
-  if (parentIds.length > 0) {
-    parentChunks = await db.getParentChunks(parentIds).catch(err => {
-      console.warn('getParentChunks notice:', err);
-      return [] as CurriculumChunk[];
-    });
+  let ranked: RetrievedSection[];
+  let selected: RetrievedSection[];
+  if (relevance) {
+    const maxFusion = candidates[0].fusion || 1;
+    ranked = candidates
+      .map((c, i) => ({ ...c, relevance: relevance[i] }))
+      .sort((a, b) => (b.relevance + 0.03 * b.fusion / maxFusion) - (a.relevance + 0.03 * a.fusion / maxFusion));
+    const top = ranked[0].relevance ?? 0;
+    const cutoff = Math.max(ABSOLUTE_FLOOR, top - RELATIVE_CUTOFF);
+    selected = ranked.filter((s, i) => i < MIN_SECTIONS || (s.relevance ?? 0) >= cutoff).slice(0, MAX_SECTIONS);
+  } else {
+    ranked = candidates.map(c => ({ ...c, relevance: null }));
+    selected = ranked.slice(0, MAX_SECTIONS - 1);
   }
 
-  // Fallback if no parents or child chunks are already parent sections
-  if (parentChunks.length === 0 && topChildChunks.length > 0) {
-    parentChunks = topChildChunks;
-  }
-
-  // Resilient fallback: If Tri-Fusion yields 0 parent chunks, directly extract from raw markdown content
-  if (parentChunks.length === 0 && curriculumRecord) {
-    try {
-      const detail = await db.getCurriculumDetail(curriculumRecord.id);
-      if (detail && detail.content) {
-        const queryTerms = [...new Set([
-          ...query.replace(/[؟?!.،,;:\-_\/]/g, ' ').split(/\s+/).filter(w => w.length > 2),
-          ...(keywords || [])
-        ])].filter(w => w.length > 2);
-
-        const rawSections = detail.content.split(/\n(?=#{1,3}\s)/);
-        const scored = rawSections.map((sec, idx) => {
-          const firstLine = (sec.split('\n')[0] || '').toLowerCase();
-          const body = sec.toLowerCase();
-          let score = 0;
-          for (const t of queryTerms) {
-            const term = t.toLowerCase();
-            if (firstLine.includes(term)) score += 15;
-            else if (body.includes(term)) score += 3;
-          }
-          return { sec, score, idx };
-        }).filter(s => s.score > 0).sort((a, b) => b.score - a.score);
-
-        if (scored.length > 0) {
-          parentChunks = scored.slice(0, 4).map(s => ({
-            id: `fallback_${s.idx}`,
-            curriculum_id: curriculumRecord.id,
-            heading: s.sec.split('\n')[0]?.replace(/^#+\s*/, '') || 'قسم دراسي',
-            content: s.sec,
-            chunk_level: 'parent' as const,
-            position_index: s.idx
-          }));
-        }
-      }
-    } catch (fallbackErr) {
-      console.warn('Raw markdown section fallback notice in hybrid_retriever:', fallbackErr);
-    }
-  }
-
-  // 5. Build Formatted Context Block
-  let contextParts: string[] = [];
-
-  // A. Syllabus Outline if present
-  if (curriculumRecord?.units && Array.isArray(curriculumRecord.units) && curriculumRecord.units.length > 0) {
-    const unitMap = curriculumRecord.units.map((u: any, uIdx: number) => {
-      const lessons = Array.isArray(u.lessons) ? u.lessons : [];
-      const lessonTitles = lessons.map((l: any, lIdx: number) => `      - ${l.title || `الدرس ${lIdx + 1}`}`).join('\n');
-      return `  * ${u.title || `الوحدة ${uIdx + 1}`}:\n${lessonTitles}`;
-    }).join('\n');
-    contextParts.push(`خريطة وحدات ودروس المنهج الدراسي:\n${unitMap}`);
-  }
-
-  // B. Knowledge Graph Subgraph Block
-  if (subgraph.synthesizedContext) {
-    contextParts.push(subgraph.synthesizedContext);
-  }
-
-  // C. Textbook Parent Sections
-  if (parentChunks.length > 0) {
-    const textbookText = parentChunks.map((parent, index) => {
-      return `--- القسم ${index + 1}: [${parent.heading}] ---\n` +
-             `محتوى الدرس المقرر:\n${parent.content}\n` +
-             `-----------------------------------------`;
-    }).join('\n\n');
-    contextParts.push(textbookText);
-  }
-
-  const formattedContext = contextParts.join('\n\n');
+  const ordered: CurriculumChunk[] = [];
+  const included = new Set<string>();
+  let used = 0;
+  const add = (chunk: CurriculumChunk) => {
+    if (included.has(chunk.id) || used + chunk.content.length > CONTEXT_CHAR_BUDGET) return false;
+    included.add(chunk.id);
+    ordered.push(chunk);
+    used += chunk.content.length;
+    return true;
+  };
+  selected.forEach((s, i) => {
+    const group = i < 3 ? [s.chunk, ...adjacentParts(corpus, s.chunk)] : [s.chunk];
+    group.sort((a, b) => (a.position_index ?? 0) - (b.position_index ?? 0)).forEach(add);
+  });
 
   return {
-    parentChunks,
-    childChunks: topChildChunks,
-    subgraph,
-    formattedContext,
-    metrics: {
-      vectorCandidateCount: vectorCandidates.length,
-      bm25CandidateCount: bm25Candidates.length,
-      graphEntityCount: subgraph.entities.length,
-      fusedCandidateCount: fusedScores.length
-    }
+    sections: selected,
+    formattedContext: [mapText, formatSections(ordered)].filter(Boolean).join('\n\n'),
+    topRelevance: relevance ? (ranked[0].relevance ?? 0) : null,
+    entityCount: subgraph.entities.length
   };
 }

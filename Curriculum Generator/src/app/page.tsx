@@ -30,7 +30,8 @@ import {
 } from "lucide-react";
 import {
   GradeLevel,
-  GRADE_NAMES_AR,
+  KNOWN_STAGES,
+  stageLabel,
   FileQueueItem,
   ProcessingLog,
   ProcessingSettings,
@@ -42,6 +43,7 @@ export default function Dashboard() {
   const [logs, setLogs] = useState<ProcessingLog[]>([]);
   const [selectedGrade, setSelectedGrade] = useState<GradeLevel>("1_middle");
   const [subjectName, setSubjectName] = useState<string>("");
+  const [outlineText, setOutlineText] = useState<string>("");
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [showSettings, setShowSettings] = useState<boolean>(false);
   const [logFilter, setLogFilter] = useState<"all" | "info" | "warn" | "error" | "success">("all");
@@ -52,15 +54,16 @@ export default function Dashboard() {
   const [previewMarkdown, setPreviewMarkdown] = useState<string>("");
   const [isLoadingPreview, setIsLoadingPreview] = useState<boolean>(false);
   const [copied, setCopied] = useState<boolean>(false);
+  const [previewOutline, setPreviewOutline] = useState<string>("");
+  const [outlineStatus, setOutlineStatus] = useState<string>("");
+  const [isSavingOutline, setIsSavingOutline] = useState<boolean>(false);
 
   const [settings, setSettings] = useState<ProcessingSettings>({
-    geminiApiKey: "",
-    edenAiApiKey: "",
     deepSeekApiKey: "",
-    batchSize: 3,
+    batchSize: 8,
     maxConcurrentFiles: 2,
-    maxRetries: 6,
-    delayBetweenBatchesMs: 300,
+    maxRetries: 4,
+    delayBetweenBatchesMs: 0,
     autoResumeOnStartup: true,
   });
 
@@ -121,6 +124,7 @@ export default function Dashboard() {
       }
       formData.append("gradeLevel", selectedGrade);
       formData.append("subjectName", subjectName);
+      formData.append("outlineText", outlineText);
 
       const uploadRes = await fetch("/api/upload", {
         method: "POST",
@@ -142,6 +146,7 @@ export default function Dashboard() {
 
         fetchStatus();
         setSubjectName("");
+        setOutlineText("");
         if (fileInputRef.current) fileInputRef.current.value = "";
       }
     } catch (error) {
@@ -185,11 +190,38 @@ export default function Dashboard() {
     }
   };
 
+  const handleSaveOutline = async () => {
+    if (!previewFile) return;
+    setIsSavingOutline(true);
+    setOutlineStatus("");
+    try {
+      const res = await fetch("/api/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set_outline", fileId: previewFile.id, outlineText: previewOutline }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.markdown) setPreviewMarkdown(data.markdown);
+        setOutlineStatus(previewOutline.trim() ? `تم حفظ الفهرس (${data.lessons} درس) وإعادة تصدير المنهج.` : "تم حذف الفهرس المخصص.");
+        fetchStatus();
+      } else {
+        setOutlineStatus(data.error || "تعذر حفظ الفهرس.");
+      }
+    } catch {
+      setOutlineStatus("تعذر الاتصال بالخادم.");
+    } finally {
+      setIsSavingOutline(false);
+    }
+  };
+
   const handleOpenPreview = async (file: FileQueueItem) => {
     setPreviewFile(file);
     setPreviewModalOpen(true);
     setIsLoadingPreview(true);
     setCopied(false);
+    setPreviewOutline(file.outlineText || "");
+    setOutlineStatus("");
 
     try {
       const res = await fetch("/api/process", {
@@ -545,46 +577,6 @@ export default function Dashboard() {
 
             <div>
               <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
-                مفتاح Google Gemini API Key (احتياطي اختياري)
-              </label>
-              <input
-                type="password"
-                value={settings.geminiApiKey || ""}
-                onChange={(e) => setSettings({ ...settings, geminiApiKey: e.target.value })}
-                placeholder="مفتاح Google Gemini (اختياري)"
-                style={{
-                  width: "100%",
-                  padding: "10px 14px",
-                  backgroundColor: "var(--bg-main)",
-                  border: "1px solid var(--border-color)",
-                  borderRadius: "8px",
-                  color: "var(--text-main)",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
-                مفتاح EdenAI API Key (احتياطي اختياري)
-              </label>
-              <input
-                type="password"
-                value={settings.edenAiApiKey}
-                onChange={(e) => setSettings({ ...settings, edenAiApiKey: e.target.value })}
-                placeholder="مفتاح EdenAI (اختياري)"
-                style={{
-                  width: "100%",
-                  padding: "10px 14px",
-                  backgroundColor: "var(--bg-main)",
-                  border: "1px solid var(--border-color)",
-                  borderRadius: "8px",
-                  color: "var(--text-main)",
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
                 عدد الكتب المعالجة بالتوازي (Simultaneous Books): {settings.maxConcurrentFiles}
               </label>
               <input
@@ -690,9 +682,12 @@ export default function Dashboard() {
                 <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
                   المرحلة والصف الدراسي
                 </label>
-                <select
+                <input
+                  list="known-stages"
                   value={selectedGrade}
                   onChange={(e) => setSelectedGrade(e.target.value as GradeLevel)}
+                  placeholder="معرف المرحلة كما في لوحة التحكم (مثال: 2_secondary_general)"
+                  dir="ltr"
                   style={{
                     width: "100%",
                     padding: "12px",
@@ -702,13 +697,17 @@ export default function Dashboard() {
                     color: "var(--text-main)",
                     outline: "none",
                   }}
-                >
-                  {Object.entries(GRADE_NAMES_AR).map(([key, name]) => (
+                />
+                <datalist id="known-stages">
+                  {Object.entries(KNOWN_STAGES).map(([key, name]) => (
                     <option key={key} value={key}>
                       {name}
                     </option>
                   ))}
-                </select>
+                </datalist>
+                <span style={{ fontSize: "12px", color: "var(--text-muted)", display: "block", marginTop: "4px" }}>
+                  {stageLabel(selectedGrade)}
+                </span>
               </div>
 
               <div>
@@ -731,6 +730,29 @@ export default function Dashboard() {
                   }}
                 />
               </div>
+            </div>
+
+            <div style={{ marginBottom: "18px" }}>
+              <label style={{ fontSize: "13px", color: "var(--text-muted)", display: "block", marginBottom: "6px" }}>
+                فهرس الكتاب (اختياري عند رفع ملف مفرد، ويُقرأ تلقائياً من صفحة الفهرس إن تُرك فارغاً)
+              </label>
+              <textarea
+                value={outlineText}
+                onChange={(e) => setOutlineText(e.target.value)}
+                rows={4}
+                placeholder={"الوحدة 1: ...\nالفصل 1: ...\nالدرس 1: ...\nمقدمة: ... (للأقسام التمهيدية قبل الوحدة الأولى)"}
+                style={{
+                  width: "100%",
+                  padding: "12px",
+                  backgroundColor: "var(--bg-card)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "10px",
+                  color: "var(--text-main)",
+                  outline: "none",
+                  resize: "vertical",
+                  fontFamily: "inherit",
+                }}
+              />
             </div>
 
             {/* Drop Zone */}
@@ -976,7 +998,7 @@ export default function Dashboard() {
                                 fontWeight: "600",
                               }}
                             >
-                              {GRADE_NAMES_AR[item.gradeLevel]}
+                              {stageLabel(item.gradeLevel)}
                             </span>
                           </div>
                           <div
@@ -1458,7 +1480,7 @@ export default function Dashboard() {
                   معاينة المنهج المهيكل: {previewFile.subjectName}
                 </h3>
                 <p style={{ fontSize: "13px", color: "var(--text-muted)", marginTop: "2px" }}>
-                  {GRADE_NAMES_AR[previewFile.gradeLevel]} - تم استخراج {previewFile.processedPages} صفحة
+                  {stageLabel(previewFile.gradeLevel)} - تم استخراج {previewFile.processedPages} صفحة
                 </p>
               </div>
 
@@ -1529,6 +1551,56 @@ export default function Dashboard() {
                 backgroundColor: "var(--bg-main)",
               }}
             >
+              <details
+                style={{
+                  marginBottom: "16px",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "10px",
+                  backgroundColor: "var(--bg-card)",
+                  padding: "12px 14px",
+                }}
+              >
+                <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <Layers size={16} color="var(--brand-primary)" />
+                  فهرس الكتاب المعتمد لضبط الوحدات والدروس
+                </summary>
+                <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: "10px 0" }}>
+                  سطر لكل عنصر: &quot;الوحدة 1: ...&quot; أو &quot;الفصل 2: ...&quot; أو &quot;الدرس 1: ...&quot; أو &quot;مقدمة: ...&quot;. عند الحفظ يُعاد بناء المنهج فوراً دون أي استهلاك لواجهات الذكاء الاصطناعي.
+                </p>
+                <textarea
+                  value={previewOutline}
+                  onChange={(e) => setPreviewOutline(e.target.value)}
+                  rows={8}
+                  style={{
+                    width: "100%",
+                    padding: "10px",
+                    backgroundColor: "var(--bg-main)",
+                    border: "1px solid var(--border-color)",
+                    borderRadius: "8px",
+                    color: "var(--text-main)",
+                    fontFamily: "inherit",
+                    resize: "vertical",
+                  }}
+                />
+                <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap", marginTop: "10px" }}>
+                  <button
+                    onClick={handleSaveOutline}
+                    disabled={isSavingOutline}
+                    style={{
+                      padding: "8px 16px",
+                      backgroundColor: "var(--brand-primary)",
+                      color: "#0D1B2A",
+                      border: "none",
+                      borderRadius: "8px",
+                      fontWeight: 700,
+                      cursor: isSavingOutline ? "wait" : "pointer",
+                    }}
+                  >
+                    {isSavingOutline ? "جاري الحفظ..." : "حفظ الفهرس وإعادة التصدير"}
+                  </button>
+                  {outlineStatus && <span style={{ fontSize: "13px", color: "var(--text-muted)" }}>{outlineStatus}</span>}
+                </div>
+              </details>
               {isLoadingPreview ? (
                 <div style={{ textAlign: "center", padding: "40px", color: "var(--text-muted)" }}>
                   جاري تجهيز المعاينة...

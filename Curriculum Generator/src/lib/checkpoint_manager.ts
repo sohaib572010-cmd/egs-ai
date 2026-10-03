@@ -1,12 +1,6 @@
 import fs from "fs";
 import path from "path";
-import {
-  JobCheckpoint,
-  PageExtractionResult,
-  FileQueueItem,
-  ProcessingSettings,
-  QueueStateData,
-} from "./types";
+import type { JobCheckpoint, PageExtractionResult, FileQueueItem, ProcessingSettings, QueueStateData } from "./types";
 
 const CHECKPOINT_DIR = path.join(process.cwd(), "checkpoints");
 const QUEUE_STATE_PATH = path.join(CHECKPOINT_DIR, "queue_state.json");
@@ -75,7 +69,7 @@ export function saveCheckpoint(checkpoint: JobCheckpoint): void {
     checkpoint.lastUpdated = new Date().toISOString();
     const filePath = getCheckpointPath(checkpoint.fileId);
     const tempPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
-    fs.writeFileSync(tempPath, JSON.stringify(checkpoint, null, 2), "utf-8");
+    fs.writeFileSync(tempPath, JSON.stringify(checkpoint), "utf-8");
     try {
       fs.renameSync(tempPath, filePath);
     } catch {

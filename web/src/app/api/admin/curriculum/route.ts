@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { db, invalidateCurriculumsCache } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { processCurriculumChunks } from '@/lib/curriculum_processor';
+import { parseCurriculumOutline } from '@/lib/curriculum_structure';
+import { findStage, tracksOfStage } from '@/lib/education_catalog';
 
 // ─── Helper: Authorize admin ──────────────────────────────────────────────────
 async function authorizeAdmin(req: NextRequest): Promise<string | NextResponse> {
@@ -27,6 +29,13 @@ async function authorizeAdmin(req: NextRequest): Promise<string | NextResponse> 
 }
 
 // GET list all curriculums (Admin only)
+async function validatePlacement(gradeLevel?: string | null, trackId?: string | null): Promise<string | null> {
+  const catalog = await db.getEducationCatalog();
+  if (!gradeLevel || !findStage(catalog, gradeLevel)) return 'المرحلة الدراسية المحددة غير موجودة في الأنظمة التعليمية.';
+  if (trackId && !tracksOfStage(catalog, gradeLevel).some(t => t.id === trackId)) return 'المسار المحدد لا يتبع هذه المرحلة الدراسية.';
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   try {
     const authResult = await authorizeAdmin(req);
@@ -63,6 +72,8 @@ export async function POST(req: NextRequest) {
 
       const cleanGrade = grade_level.trim();
       const cleanSubject = subject_name.trim();
+      const placementError = await validatePlacement(cleanGrade, track_id || null);
+      if (placementError) return NextResponse.json({ error: placementError }, { status: 400 });
 
       const curriculum = await db.createPlaceholderCurriculum(cleanGrade, cleanSubject, track_id || null, !!is_elective);
       return NextResponse.json({
@@ -86,6 +97,8 @@ export async function POST(req: NextRequest) {
       if (!gradeLevel || !subjectName) {
         return NextResponse.json({ error: 'السنة الدراسية واسم المادة مطلوبان' }, { status: 400 });
       }
+      const placementError = await validatePlacement(gradeLevel, trackId);
+      if (placementError) return NextResponse.json({ error: placementError }, { status: 400 });
       const curriculum = await db.createPlaceholderCurriculum(gradeLevel, subjectName, trackId, isElective);
       return NextResponse.json({
         success: true,
@@ -121,7 +134,7 @@ export async function POST(req: NextRequest) {
     let curriculum;
     if (curriculumId) {
       // Attach file to existing placeholder curriculum
-      curriculum = await db.attachFileToCurriculum(curriculumId, file.name, allChunks, [], fileContent);
+      curriculum = await db.attachFileToCurriculum(curriculumId, file.name, allChunks, parseCurriculumOutline(fileContent), fileContent);
       if (!curriculum) {
         return NextResponse.json({ error: 'لم يتم العثور على المنهج المطلوب لتحديثه' }, { status: 404 });
       }
@@ -129,8 +142,9 @@ export async function POST(req: NextRequest) {
       if (!gradeLevel || !subjectName) {
         return NextResponse.json({ error: 'السنة الدراسية واسم المادة مطلوبان' }, { status: 400 });
       }
-      // Save new full curriculum
-      curriculum = await db.createCurriculum(gradeLevel, subjectName, file.name, allChunks, [], trackId, isElective, fileContent);
+      const placementError = await validatePlacement(gradeLevel, trackId);
+      if (placementError) return NextResponse.json({ error: placementError }, { status: 400 });
+      curriculum = await db.createCurriculum(gradeLevel, subjectName, file.name, allChunks, parseCurriculumOutline(fileContent), trackId, isElective, fileContent);
     }
 
     if (curriculum && curriculum.id && entities.length > 0) {
@@ -171,7 +185,19 @@ export async function PATCH(req: NextRequest) {
     const authResult = await authorizeAdmin(req);
     if (authResult instanceof NextResponse) return authResult;
 
-    const { id, subject_name, file_name } = await req.json();
+    const { id, subject_name, file_name, track_id, is_elective, is_placeholder } = await req.json();
+    if (id && (track_id !== undefined || is_elective !== undefined || is_placeholder !== undefined) && subject_name === undefined) {
+      const current = (await db.getCurriculums()).find(c => c.id === id);
+      if (!current) return NextResponse.json({ error: 'لم يتم العثور على المنهج' }, { status: 404 });
+      const nextTrack = track_id !== undefined ? (track_id || null) : current.track_id || null;
+      const nextElective = is_elective !== undefined ? !!is_elective : !!current.is_elective;
+      const nextPlaceholder = is_placeholder !== undefined ? !!is_placeholder : !!current.is_placeholder;
+      const placementError = await validatePlacement(current.grade_level, nextTrack);
+      if (placementError) return NextResponse.json({ error: placementError }, { status: 400 });
+      const updated = await db.updateCurriculumPlacement(id, nextTrack, nextElective, nextPlaceholder);
+      if (!updated) return NextResponse.json({ error: 'فشل تحديث حالة وبيانات المادة' }, { status: 400 });
+      return NextResponse.json({ success: true, message: 'تم تحديث حالة وبيانات المادة بنجاح', curriculum: updated });
+    }
     if (!id || !subject_name || !subject_name.trim()) {
       return NextResponse.json({ error: 'معرف المنهج واسم المادة الجديد مطلوبان' }, { status: 400 });
     }

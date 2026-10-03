@@ -3,6 +3,7 @@
 import React, { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
+import { buildPricingSnapshot, type PricingSnapshot } from '@/lib/points_pricing';
 import {
   Sparkles,
   CheckCircle2,
@@ -20,30 +21,13 @@ import {
   HelpCircle
 } from 'lucide-react';
 
-const GRADE_NAMES: Record<string, string> = {
-  '1_middle': 'الصف الأول الإعدادي',
-  '2_middle': 'الصف الثاني الإعدادي',
-  '3_middle': 'الصف الثالث الإعدادي',
-  '1_high': 'الصف الأول الثانوي',
-  '2_high': 'الصف الثاني الثانوي',
-  '3_high': 'الصف الثالث الثانوي (الثانوية العامة)',
-  'unselected': 'مرحلة دراسية عامة'
-};
-
-const TRACK_NAMES: Record<string, string> = {
-  'medicine_life_sciences': 'مسار الطب وعلوم الحياة',
-  'engineering_technology': 'مسار الهندسة والتكنولوجيا',
-  'business_management': 'مسار إدارة الأعمال والتجارة',
-  'arts_humanities': 'مسار الآداب والعلوم الإنسانية',
-  'scientific': 'شعبة علمي',
-  'literary': 'شعبة أدبي'
-};
-
 interface StudentInfo {
   id: string;
   name: string;
   grade_level: string;
   track_id: string | null;
+  grade_name?: string;
+  track_name?: string | null;
   elective_subject: string | null;
   study_streak: number;
   points: number;
@@ -97,6 +81,14 @@ function SponsorContent() {
   const [paymentError, setPaymentError] = useState<string | null>(null);
   const [payerName, setPayerName] = useState('');
   const [payerPhone, setPayerPhone] = useState('');
+  const [pricing, setPricing] = useState<PricingSnapshot>(() => buildPricingSnapshot());
+
+  useEffect(() => {
+    fetch('/api/pricing')
+      .then(res => (res.ok ? res.json() : null))
+      .then(data => { if (data?.pricing) setPricing(data.pricing); })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!studentId) {
@@ -189,8 +181,8 @@ function SponsorContent() {
   }
 
   const activePlanObj = PLANS.find(p => p.id === selectedPlan) || PLANS[0];
-  const gradeLabel = GRADE_NAMES[student.grade_level] || student.grade_level || 'المرحلة الدراسية';
-  const trackLabel = student.track_id ? TRACK_NAMES[student.track_id] || student.track_id : null;
+  const gradeLabel = student.grade_name || 'المرحلة الدراسية';
+  const trackLabel = student.track_name || null;
 
   return (
     <div style={{ maxWidth: '880px', margin: '0 auto', padding: '24px 16px 100px', direction: 'rtl' }}>
@@ -390,6 +382,11 @@ function SponsorContent() {
 
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', borderTop: '1px solid var(--border-color)', paddingTop: '10px' }}>
                 {plan.dailyCoins} تتجدد كل 24 ساعة.
+                {pricing.plans[plan.id] && (
+                  <div style={{ marginTop: '4px', fontWeight: 700 }}>
+                    {`تكفي لنحو ${pricing.plans[plan.id].chatsPerDay.offPeak} سؤال يومياً، أو ${pricing.plans[plan.id].thinkingPerDay.offPeak} سؤال بالتفكير العميق.`}
+                  </div>
+                )}
               </div>
             </div>
           );

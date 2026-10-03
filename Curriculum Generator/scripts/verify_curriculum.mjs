@@ -1,177 +1,102 @@
 #!/usr/bin/env node
 /**
- * Automated Curriculum Markdown Quality & Integrity Validator
- * Enforces zero emojis, sequential lesson numbering, unit hierarchy,
- * balanced LaTeX and brackets, and flags known OCR errors.
+ * Validates a curriculum Markdown file against the EGS AI canonical format:
+ *   # منهج <subject>
+ *   # الوحدة N: ...        (group heading: directly followed by its chapters)
+ *   # الفصل N: ...         (teaching block: holds at least one lesson)
+ *   ## الدرس N: ...        (lessons numbered 1..n inside each block)
+ *   ### / ####             (sections inside a lesson)
+ * An optional "# مقدمات أساسية" block holds unnumbered "## <title>" introductory sections.
  */
-
 import fs from 'fs';
 import path from 'path';
 
-function validateCurriculum(filePath) {
-  console.log(`\n🔍 Validating Curriculum: ${filePath}`);
+const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}\u{2B55}]/gu;
+
+function validate(filePath) {
   if (!fs.existsSync(filePath)) {
-    console.error(`❌ File not found: ${filePath}`);
+    console.error(`File not found: ${filePath}`);
     process.exit(1);
   }
-
   const content = fs.readFileSync(filePath, 'utf8');
   const lines = content.split('\n');
   const errors = [];
   const warnings = [];
 
-  // 1. File Size Check
-  if (content.length < 5000) {
-    errors.push(`File is suspiciously small (${content.length} bytes).`);
+  const headings = [];
+  lines.forEach((line, i) => {
+    const m = line.match(/^(#{1,6})\s+(.*)$/);
+    if (m) headings.push({ level: m[1].length, text: m[2].trim(), line: i + 1 });
+  });
+
+  if (!headings[0] || headings[0].level !== 1 || !headings[0].text.startsWith('منهج')) {
+    errors.push('L1: the file must start with "# منهج <subject>".');
   }
 
-  // 2. Unit (#) and Lesson (##) Structure
-  const units = [];
-  const lessonsByUnit = new Map();
-  let currentUnit = null;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    const lineNum = i + 1;
-
-    // Check Unit header
-    if (line.startsWith('# ') && !line.startsWith('# منهج')) {
-      const uMatch = line.match(/^#\s+(?:(الوحدة|الفصل|Unit|Chapter)\s+([^\s:]+))(?:\s*[:\-]\s*(.*))?$/i);
-      if (uMatch) {
-        currentUnit = {
-          lineNum,
-          type: uMatch[1],
-          numStr: uMatch[2],
-          title: uMatch[3] || '',
-          raw: line
-        };
-        units.push(currentUnit);
-        lessonsByUnit.set(currentUnit, []);
-      } else if (!line.startsWith('# قسم') && !line.startsWith('# القصة')) {
-        warnings.push(`L${lineNum}: Non-standard top-level heading: "${line}"`);
+  const blocks = [];
+  for (let i = 1; i < headings.length; i++) {
+    const h = headings[i];
+    if (!h.text) errors.push(`L${h.line}: empty heading.`);
+    if (h.level === 1) {
+      const next = headings[i + 1];
+      const between = next ? lines.slice(h.line, next.line - 1).join('').trim() : 'x';
+      const isGroup = !!next && next.level === 1 && between === '';
+      blocks.push({ ...h, isGroup, isIntro: h.text === 'مقدمات أساسية', lessons: [] });
+    } else if (h.level === 2) {
+      const block = blocks[blocks.length - 1];
+      if (!block) {
+        errors.push(`L${h.line}: lesson before any unit or chapter: "${h.text}"`);
+        continue;
       }
-    }
-
-    // Check Lesson header
-    if (line.startsWith('## ')) {
-      const lMatch = line.match(/^##\s+(?:(الدرس|الموضوع|Lesson)\s+(\d{1,2}))(?:\s*[:\-]\s*(.*))?$/i);
-      if (lMatch) {
-        const lesson = {
-          lineNum,
-          lessonNum: parseInt(lMatch[2], 10),
-          title: lMatch[3] || '',
-          raw: line
-        };
-        if (!currentUnit) {
-          errors.push(`L${lineNum}: Lesson declared before any Unit header: "${line}"`);
-        } else {
-          lessonsByUnit.get(currentUnit).push(lesson);
-        }
-      } else {
-        warnings.push(`L${lineNum}: Level 2 heading does not follow "## الدرس [رقم]: [عنوان]": "${line}"`);
-      }
+      const m = h.text.match(/^(?:الدرس|Lesson)\s+(\d{1,2})\s*:\s*(.+)$/i);
+      if (!m && !block.isIntro) errors.push(`L${h.line}: level-2 heading must be "## الدرس N: title": "${h.text}"`);
+      block.lessons.push({ number: m ? Number(m[1]) : null, line: h.line, text: h.text });
     }
   }
 
-  if (units.length === 0) {
-    errors.push('No Unit (# الوحدة / # الفصل) headers found in document.');
+  for (const b of blocks) {
+    if (b.isGroup) continue;
+    if (b.lessons.length === 0) errors.push(`L${b.line}: "${b.text}" has no lessons.`);
+    if (b.isIntro) continue;
+    b.lessons.forEach((l, i) => {
+      if (l.number !== i + 1) errors.push(`L${l.line}: expected lesson ${i + 1} in "${b.text}", found "${l.text}"`);
+    });
   }
 
-  // Verify sequential lesson numbering in each unit
-  let totalLessons = 0;
-  for (const [unit, lessons] of lessonsByUnit.entries()) {
-    totalLessons += lessons.length;
-    if (lessons.length === 0) {
-      warnings.push(`L${unit.lineNum}: Unit "${unit.raw}" contains 0 lessons.`);
-      continue;
-    }
+  const comments = (content.match(/<!--/g) || []).length;
+  if (comments > 0) warnings.push(`${comments} HTML comment(s) left in the content (page markers should be removed).`);
+  const emojis = content.match(EMOJI) || [];
+  if (emojis.length > 0) errors.push(`${emojis.length} emoji(s) found.`);
+  const displayMath = (content.match(/\$\$/g) || []).length;
+  if (displayMath % 2 !== 0) errors.push(`Unbalanced display math: ${displayMath} "$$" delimiters.`);
+  lines.forEach((line, i) => {
+    const singles = line.replace(/\$\$/g, '').replace(/\\\$/g, '').match(/\$/g) || [];
+    if (singles.length % 2 !== 0) warnings.push(`L${i + 1}: odd number of inline "$" delimiters.`);
+  });
+  if (content.length < 5000) warnings.push(`Suspiciously small file (${content.length} chars).`);
 
-    for (let j = 0; j < lessons.length; j++) {
-      const expectedNum = j + 1;
-      const actualNum = lessons[j].lessonNum;
-      if (actualNum !== expectedNum) {
-        errors.push(
-          `L${lessons[j].lineNum}: Lesson numbering sequence broken in ${unit.raw}. Expected lesson ${expectedNum}, found ${actualNum} ("${lessons[j].raw}")`
-        );
-      }
-    }
+  const teaching = blocks.filter((b) => !b.isGroup);
+  console.log(`File: ${filePath}`);
+  console.log(`Groups: ${blocks.filter((b) => b.isGroup).length}, blocks: ${teaching.length}, lessons: ${teaching.reduce((n, b) => n + b.lessons.length, 0)}`);
+  for (const b of blocks) {
+    console.log(`${b.isGroup ? '' : '  '}${b.text}`);
+    for (const l of b.lessons) console.log(`      ${l.text}`);
   }
-
-  // 3. Emojis Check (CODING_GUIDELINES Rule 1 & 4)
-  const emojiRegex = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1FA70}-\u{1FAFF}⚠️⭐💡🤔🔎👆®™©]/gu;
-  const emojiMatches = content.match(emojiRegex) || [];
-  if (emojiMatches.length > 0) {
-    errors.push(`Found ${emojiMatches.length} prohibited emoji(s) in content: [${emojiMatches.slice(0, 5).join(', ')}${emojiMatches.length > 5 ? '...' : ''}]`);
+  if (warnings.length) {
+    console.log(`\nWarnings (${warnings.length}):`);
+    warnings.slice(0, 15).forEach((w) => console.log(`  - ${w}`));
   }
-
-  // 4. Bracket Balance Check
-  const openBrackets = (content.match(/\[/g) || []).length;
-  const closeBrackets = (content.match(/\]/g) || []).length;
-  if (openBrackets !== closeBrackets) {
-    errors.push(`Mismatched markdown brackets: ${openBrackets} '[' vs ${closeBrackets} ']'.`);
-  }
-
-  // 5. LaTeX Syntax Balance
-  const inlineOpen = (content.match(/\\\(/g) || []).length;
-  const inlineClose = (content.match(/\\\)/g) || []).length;
-  if (inlineOpen !== inlineClose) {
-    errors.push(`Mismatched inline LaTeX math tags: ${inlineOpen} '\\(' vs ${inlineClose} '\\)'.`);
-  }
-
-  const blockOpen = (content.match(/\\\[/g) || []).length;
-  const blockClose = (content.match(/\\\]/g) || []).length;
-  if (blockOpen !== blockClose) {
-    errors.push(`Mismatched block LaTeX math tags: ${blockOpen} '\\[' vs ${blockClose} '\\]'.`);
-  }
-
-  // 6. Known OCR Typo Patterns
-  const typoPatterns = [
-    { regex: /دقيقة أساسية/g, label: 'دقيقة أساسية (should be حقيقة أساسية)' },
-    { regex: /حقيبة أساسية/g, label: 'حقيبة أساسية (should be حقيقة أساسية)' },
-    { regex: /منطقة الحل/g, label: 'منطقة الحل (should be منطقية الحل)' },
-    { regex: /كنتب البيانات/g, label: 'كنتب البيانات (should be كتيب البيانات)' },
-    { regex: /طبعة العلم/g, label: 'طبعة العلم (should be طبيعة العلم)' },
-    { regex: /طبيعة العالم:\s*النماذج/g, label: 'طبيعة العالم: النماذج (should be طبيعة العلم)' },
-    { regex: /عيّارة/g, label: 'عيّارة (should be عبّارة)' },
-    { regex: /مطارين العرب/g, label: 'مطارين العرب (should be مطار برج العرب)' }
-  ];
-
-  for (const t of typoPatterns) {
-    const matches = content.match(t.regex);
-    if (matches) {
-      errors.push(`Found ${matches.length} occurrence(s) of OCR typo: ${t.label}`);
-    }
-  }
-
-  // Summary Report
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-  console.log(`📊 Validation Report:`);
-  console.log(`   • Units Found:    ${units.length}`);
-  console.log(`   • Total Lessons:  ${totalLessons}`);
-  console.log(`   • Emojis Count:   ${emojiMatches.length}`);
-  console.log(`   • LaTeX Blocks:   ${blockOpen} block, ${inlineOpen} inline`);
-  console.log(`   • Warnings:       ${warnings.length}`);
-  console.log(`   • Errors:         ${errors.length}`);
-  console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-
-  if (warnings.length > 0) {
-    console.log(`\n⚠️  Warnings (${warnings.length}):`);
-    warnings.slice(0, 10).forEach(w => console.log(`   ${w}`));
-  }
-
-  if (errors.length > 0) {
-    console.error(`\n❌ Validation Failed with ${errors.length} error(s):`);
-    errors.forEach(e => console.error(`   - ${e}`));
+  if (errors.length) {
+    console.error(`\nFailed with ${errors.length} error(s):`);
+    errors.forEach((e) => console.error(`  - ${e}`));
     process.exit(1);
   }
-
-  console.log(`\n✅ Curriculum Passed All Integrity & Formatting Checks!`);
+  console.log('\nPassed.');
 }
 
-const defaultTarget = fs.existsSync('output/2_high/الفيزياء.md')
-  ? 'output/2_high/الفيزياء.md'
-  : (fs.existsSync('Curriculum Generator/output/2_high/الفيزياء.md')
-    ? 'Curriculum Generator/output/2_high/الفيزياء.md'
-    : path.join(process.cwd(), 'output/2_high/الفيزياء.md'));
-const targetFile = process.argv[2] || defaultTarget;
-validateCurriculum(path.resolve(targetFile));
+const target = process.argv[2];
+if (!target) {
+  console.error('Usage: npm run verify -- <path/to/curriculum.md>');
+  process.exit(1);
+}
+validate(path.resolve(target));

@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { verifySessionToken } from '@/lib/auth_helpers';
 import { db } from '@/lib/db';
 import { transcribeAudioWithAlibaba } from '@/lib/alibaba_asr';
-
-export const runtime = 'edge';
+import { chargeForUsage, isMeteringExempt } from '@/lib/metering';
+import { TRANSCRIPT_REFINE_USAGE } from '@/lib/points_pricing';
 
 export async function POST(req: NextRequest) {
   try {
@@ -20,9 +20,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'حساب المستخدم غير موجود.', code: 'user_not_found' }, { status: 401 });
     }
 
-    // Check coins balance (allow if subscriber or has > 0 coins)
-    const isSubscribed = profile.plan_type !== 'free' && profile.subscription_status === 'active';
-    if (!profile.unlimited_credit && profile.role !== 'admin' && !isSubscribed && (profile.coins ?? 0) <= 0) {
+    if (!isMeteringExempt(profile) && (profile.coins ?? 0) <= 0) {
       return NextResponse.json({
         error: 'رصيد عملاتك اليومي انتهى. يمكنك الترقية إلى باقة Pro أو الانتظار حتى منتصف الليل للتجديد.',
         code: 'limit_reached'
@@ -48,21 +46,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.error || 'فشل تحويل الصوت إلى نص.' }, { status: 500 });
     }
 
-    // Deduct nominal fee (0.15 coin) for free users; 0 coins for subscribers/admins
-    let coinsCost = 0;
-    if (!profile.unlimited_credit && profile.role !== 'admin' && !isSubscribed) {
-      coinsCost = 0.15;
-      const deviceId = req.headers.get('x-device-id') || null;
-      await db.deductCoins(userId, deviceId, coinsCost);
-    }
+    // Only the DeepSeek transcript refinement is metered; Alibaba speech recognition is not charged to students.
+    const charge = await chargeForUsage(profile, [TRANSCRIPT_REFINE_USAGE]);
 
     return NextResponse.json({
       success: true,
       transcript: result.transcript,
-      coins_used: coinsCost,
+      coins_used: charge.points,
+      remaining_coins: charge.remaining,
       duration: durationSeconds
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('ASR route error:', error);
     return NextResponse.json({ error: 'حدث خطأ في معالجة الصوت.' }, { status: 500 });
   }

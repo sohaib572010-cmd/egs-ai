@@ -116,14 +116,14 @@ function chunkMarkdownHierarchical(markdownText) {
 
   const children = [];
 
-  for (const parent of parents) {
+  for (const [parentIndex, parent] of parents.entries()) {
     const childChunks = createSlidingWindowChunks(
       parent.content,
       parent.heading,
       CHILD_MAX_TOKENS,
       CHILD_OVERLAP_TOKENS
     );
-    children.push(...childChunks);
+    children.push(...childChunks.map(c => ({ ...c, parentIndex })));
   }
 
   return { parents, children };
@@ -1231,7 +1231,7 @@ async function main() {
         embedding: null
       })),
       ...children.map((c, i) => {
-        const matchingParent = parentWithIds.find(p => p.heading === c.parentHeading);
+        const matchingParent = parentWithIds[c.parentIndex];
         return {
           id: crypto.randomUUID(),
           content: c.content,

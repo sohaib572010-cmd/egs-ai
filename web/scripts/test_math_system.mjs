@@ -192,10 +192,10 @@ runTest('General Mathematics in Arabic curriculum classified as Arabic Math nota
   assert.strictEqual(res2.mode, 'arabic');
 });
 
-runTest('Preparatory Science classified as Arabic notation', () => {
+runTest('Preparatory Science classified as English notation (textbooks write I = Q/t, 100°C)', () => {
   const res = determineMathNotationContext('العلوم', '2_middle');
-  assert.strictEqual(res.mode, 'arabic');
-  assert.strictEqual(res.digitType, 'eastern_arabic');
+  assert.strictEqual(res.mode, 'english');
+  assert.strictEqual(res.digitType, 'western_latin');
 });
 
 runTest('Language School Math classified as English notation', () => {

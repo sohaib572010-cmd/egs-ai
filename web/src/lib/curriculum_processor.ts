@@ -25,66 +25,79 @@ export interface ChildChunk {
   heading: string;
   content: string;
   parentHeading: string;
+  parentIndex: number;
 }
+
+const EXAMPLE_PARTS = /^(?:الحل|الإجابة|وسيلة مساعدة|ماذا لو|فكرة الحل|خطوات الحل)(?![\p{L}\p{N}])/u;
 
 export function chunkMarkdownHierarchical(markdownText: string): {
   parents: ParentChunk[];
   children: ChildChunk[];
 } {
-  const lines = markdownText.split('\n');
+  const lines = markdownText.split('\n').filter(l => !/^\s*<!--.*-->\s*$/.test(l));
   const rawSections: { heading: string; contentLines: string[] }[] = [];
 
+  // A "#" heading followed directly by another "#" heading is a parent unit grouping chapters
+  const isGroupHeading = (index: number) => {
+    for (let j = index + 1; j < lines.length; j++) {
+      const t = lines[j].trim();
+      if (!t) continue;
+      return /^#\s/.test(t);
+    }
+    return false;
+  };
+
+  let currentGroup = '';
   let currentUnit = '';
   let currentLesson = '';
   let currentHeading = 'مقدمة المنهج';
   let currentLines: string[] = [];
 
-  const buildBreadcrumb = (unit: string, lesson: string, heading: string) => {
-    const raw = [unit, lesson, heading].map(s => (s || '').trim()).filter(Boolean);
+  const buildBreadcrumb = () => {
+    const raw = [currentGroup, currentUnit, currentLesson, currentHeading].map(s => (s || '').trim()).filter(Boolean);
     const parts = raw.filter((v, i, a) => i === 0 || v !== a[i - 1]);
-    return parts.join(' > ') || heading || 'مقدمة المنهج';
+    return parts.join(' > ') || 'مقدمة المنهج';
+  };
+  const flush = () => {
+    if (currentLines.join('\n').trim().length > 10) {
+      rawSections.push({ heading: buildBreadcrumb(), contentLines: [...currentLines] });
+    }
+    currentLines = [];
   };
 
-  for (const line of lines) {
-    const unitMatch = line.match(/^#\s+(.+)$/);
-    const lessonMatch = line.match(/^##\s+(.+)$/);
-    const subMatch = line.match(/^###\s+(.+)$/);
-    const genericHeadingMatch = line.match(/^(#{4,6})\s+(.+)$/);
-
-    if (unitMatch) {
-      if (currentLines.join('\n').trim().length > 10) {
-        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
-      }
-      currentUnit = unitMatch[1].trim();
-      currentLesson = '';
-      currentHeading = currentUnit;
-      currentLines = [];
-    } else if (lessonMatch) {
-      if (currentLines.join('\n').trim().length > 10) {
-        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
-      }
-      currentLesson = lessonMatch[1].trim();
-      currentHeading = currentLesson;
-      currentLines = [];
-    } else if (subMatch) {
-      if (currentLines.join('\n').trim().length > 10) {
-        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
-      }
-      currentHeading = subMatch[1].trim();
-      currentLines = [];
-    } else if (genericHeadingMatch) {
-      if (currentLines.join('\n').trim().length > 10) {
-        rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: [...currentLines] });
-      }
-      currentHeading = genericHeadingMatch[2].trim();
-      currentLines = [];
-    } else {
+  lines.forEach((line, index) => {
+    const heading = line.match(/^(#{1,6})\s+(.+?)\s*$/);
+    if (!heading) {
       currentLines.push(line);
+      return;
     }
-  }
-  if (currentLines.join('\n').trim().length > 10) {
-    rawSections.push({ heading: buildBreadcrumb(currentUnit, currentLesson, currentHeading), contentLines: currentLines });
-  }
+    const level = heading[1].length;
+    const title = heading[2].trim();
+    if (level === 1 && title.startsWith('منهج')) return;
+    // A worked example's solution, hint and variation stay in the example's chunk so the question and its answer are retrieved together
+    if (level >= 3 && /^مثال/.test(currentHeading) && EXAMPLE_PARTS.test(title)) {
+      currentLines.push(`**${title}**`);
+      return;
+    }
+    flush();
+    if (level === 1) {
+      if (isGroupHeading(index)) {
+        currentGroup = title;
+        currentUnit = '';
+      } else {
+        if (/^(?:الوحدة|الباب|Unit)(?![\p{L}\p{N}])/iu.test(title)) currentGroup = '';
+        currentUnit = title;
+      }
+      currentLesson = '';
+      currentHeading = '';
+    } else if (level === 2) {
+      currentLesson = title;
+      currentHeading = '';
+    } else {
+      currentHeading = title;
+    }
+  });
+  flush();
 
   const parents: ParentChunk[] = [];
 
@@ -130,15 +143,10 @@ export function chunkMarkdownHierarchical(markdownText: string): {
 
   const children: ChildChunk[] = [];
 
-  for (const parent of parents) {
-    const childChunks = createSlidingWindowChunks(
-      parent.content,
-      parent.heading,
-      CHILD_MAX_TOKENS,
-      CHILD_OVERLAP_TOKENS
-    );
-    children.push(...childChunks);
-  }
+  parents.forEach((parent, parentIndex) => {
+    const childChunks = createSlidingWindowChunks(parent.content, parent.heading, CHILD_MAX_TOKENS, CHILD_OVERLAP_TOKENS);
+    children.push(...childChunks.map(c => ({ ...c, parentIndex })));
+  });
 
   return { parents, children };
 }
@@ -148,7 +156,7 @@ function createSlidingWindowChunks(
   parentHeading: string,
   maxTokens: number,
   overlapTokens: number
-): ChildChunk[] {
+): Omit<ChildChunk, 'parentIndex'>[] {
   const sentences = text
     .split(/(?<=[.!?؟\n])\s+|(?<=[\n])\s*/)
     .map(s => s.trim())
@@ -169,7 +177,7 @@ function createSlidingWindowChunks(
     tokens: countTokens(s)
   }));
 
-  const chunks: ChildChunk[] = [];
+  const chunks: Omit<ChildChunk, 'parentIndex'>[] = [];
   let buffer: { text: string; tokens: number }[] = [];
   let bufferTokens = 0;
 
@@ -204,6 +212,49 @@ function createSlidingWindowChunks(
     content: text.trim(),
     parentHeading
   }];
+}
+
+/**
+ * Knowledge graph of a curriculum from its parent sections. Entities with the same normalized name
+ * are merged, and relations are re-pointed to the surviving entity so none references a dropped id.
+ */
+export function buildKnowledgeGraph(
+  parents: { id: string; heading: string; content: string }[],
+  curriculumId: string
+): { entities: CurriculumEntity[]; relations: CurriculumRelation[] } {
+  const entities: CurriculumEntity[] = [];
+  const byName = new Map<string, CurriculumEntity>();
+  const remap = new Map<string, string>();
+  const rawRelations: CurriculumRelation[] = [];
+
+  for (const parent of parents) {
+    const extracted = extractEntitiesAndRelationsFromChunk(parent.content, parent.heading, parent.id, curriculumId);
+    for (const ent of extracted.entities) {
+      const existing = byName.get(ent.normalized_name);
+      if (!existing) {
+        byName.set(ent.normalized_name, ent);
+        entities.push(ent);
+        remap.set(ent.id, ent.id);
+      } else {
+        remap.set(ent.id, existing.id);
+        if (!existing.chunk_ids.includes(parent.id)) existing.chunk_ids.push(parent.id);
+      }
+    }
+    rawRelations.push(...extracted.relations);
+  }
+
+  const seen = new Set<string>();
+  const relations: CurriculumRelation[] = [];
+  for (const rel of rawRelations) {
+    const source = remap.get(rel.source_entity_id);
+    const target = remap.get(rel.target_entity_id);
+    if (!source || !target || source === target) continue;
+    const key = `${source}|${target}|${rel.relation_type}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    relations.push({ ...rel, source_entity_id: source, target_entity_id: target });
+  }
+  return { entities, relations };
 }
 
 export async function processCurriculumChunks(
@@ -264,7 +315,7 @@ export async function processCurriculumChunks(
   let childGlobalIndex = parents.length;
   for (let i = 0; i < children.length; i++) {
     const child = children[i];
-    const parentId = parentWithIds.find(p => p.heading === child.parentHeading)?.id || null;
+    const parentId = parentWithIds[child.parentIndex]?.id || null;
     allChunks.push({
       id: crypto.randomUUID(),
       content: child.content,
@@ -300,33 +351,7 @@ export async function processCurriculumChunks(
     });
   }
 
-  // Extract Knowledge Graph entities & relationships
-  const allEntities: CurriculumEntity[] = [];
-  const allRelations: CurriculumRelation[] = [];
-  const entityMap = new Map<string, CurriculumEntity>();
-
-  for (const parent of parentWithIds) {
-    const { entities, relations } = extractEntitiesAndRelationsFromChunk(
-      parent.content,
-      parent.heading,
-      parent.id,
-      curriculumId
-    );
-
-    for (const ent of entities) {
-      if (!entityMap.has(ent.normalized_name)) {
-        entityMap.set(ent.normalized_name, ent);
-        allEntities.push(ent);
-      } else {
-        const existing = entityMap.get(ent.normalized_name)!;
-        if (!existing.chunk_ids.includes(parent.id)) {
-          existing.chunk_ids.push(parent.id);
-        }
-      }
-    }
-
-    allRelations.push(...relations);
-  }
+  const { entities: allEntities, relations: allRelations } = buildKnowledgeGraph(parentWithIds, curriculumId);
 
   const embeddedCount = embeddings.filter(e => e.length > 0).length;
 

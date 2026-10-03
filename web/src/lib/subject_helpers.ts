@@ -22,7 +22,6 @@ export function determineMathNotationContext(
   queryText?: string
 ): MathNotationContext {
   const s = (subjectName || '').trim().toLowerCase();
-  const g = (gradeLevel || '').trim().toLowerCase();
   const q = (queryText || '').trim();
 
   // 1. Language school / English track subjects
@@ -41,13 +40,13 @@ export function determineMathNotationContext(
     s.includes('math') ||
     s.includes('calculus');
 
-  // Secondary Science subjects in Egyptian curriculum strictly use English/Latin notation & Western digits (0-9)
-  const isSecondaryScience =
+  // Science textbooks at every stage (including the reformed preparatory "العلوم") write symbols,
+  // formulas, and units in Latin letters with Western digits (e.g. I = Q/t, V = W/Q, 100°C)
+  const isScience =
     s.includes('فيزياء') || s.includes('physics') ||
     s.includes('كيمياء') || s.includes('chemistry') ||
-    s.includes('علوم متكاملة') || s.includes('integrated science') ||
-    s.includes('أحياء') || s.includes('biology') ||
-    (s.includes('علوم') && (g === '1_high' || g === '2_high' || g === '3_high'));
+    s.includes('علوم') || s.includes('science') ||
+    s.includes('أحياء') || s.includes('biology');
 
   // 2. Query override detection:
   if (q) {
@@ -68,7 +67,7 @@ export function determineMathNotationContext(
       return {
         mode: 'english',
         reason: 'User query explicitly provided Latin/English mathematical variables or equations',
-        isScienceSubject: isSecondaryScience,
+        isScienceSubject: isScience,
         isLanguageSchool: isLanguageSubject,
         digitType: 'western_latin',
         variableScript: 'latin',
@@ -76,7 +75,7 @@ export function determineMathNotationContext(
       };
     }
 
-    if (hasArabicMathEquation && !isSecondaryScience) {
+    if (hasArabicMathEquation && !isScience) {
       return {
         mode: 'arabic',
         reason: 'User query explicitly provided Arabic mathematical variables or equations',
@@ -90,13 +89,13 @@ export function determineMathNotationContext(
   }
 
   // 3. Subject-based determination
-  if (isExplicitEnglishMath || isLanguageSubject || isSecondaryScience) {
+  if (isExplicitEnglishMath || isLanguageSubject || isScience) {
     return {
       mode: 'english',
-      reason: isSecondaryScience
-        ? 'Secondary Physics, Chemistry, and Integrated Sciences in the Egyptian curriculum strictly use English/Latin notation and Western digits'
+      reason: isScience
+        ? 'Egyptian science textbooks (preparatory and secondary) write symbols, formulas, and units in Latin letters with Western digits'
         : 'Subject is English language or English-track STEM curriculum',
-      isScienceSubject: isSecondaryScience,
+      isScienceSubject: isScience,
       isLanguageSchool: isLanguageSubject,
       digitType: 'western_latin',
       variableScript: 'latin',
@@ -107,13 +106,45 @@ export function determineMathNotationContext(
   // 4. General Arabic Mathematics & Middle School Science
   return {
     mode: 'arabic',
-    reason: 'Official Arabic National Curriculum for General Mathematics / Preparatory Science',
-    isScienceSubject: s.includes('علوم'),
+    reason: 'Official Arabic National Curriculum for General Mathematics',
+    isScienceSubject: false,
     isLanguageSchool: false,
     digitType: 'eastern_arabic',
     variableScript: 'arabic',
     direction: 'rtl',
   };
+}
+
+// Families of neighboring disciplines. A question from a sibling discipline (civics or the constitution in a
+// History chat, physics in a Science chat) is answered with the out-of-curriculum rules, never redirected.
+const SUBJECT_FAMILIES: RegExp[] = [
+  /تاريخ|جغرافي|دراسات|وطني|مواطن|مدني|دستور|فلسف|منطق|نفس|اجتماع|اقتصاد|سياس|history|geograph|social|civic|constitution|philosoph|logic|psycholog|sociolog|econom|politic/i,
+  /علوم|فيزياء|كيمياء|أحياء|احياء|جيولوجيا|بيولوجي|ميكانيكا|استاتيكا|ديناميكا|science|physic|chemi|biolog|geolog|mechanic/i,
+  /رياض|جبر|هندس|تفاضل|تكامل|مثلثات|إحصاء|احصاء|ميكانيكا|استاتيكا|ديناميكا|math|algebra|geometr|calculus|trigonometr|statistic|mechanic/i,
+  /عربي|نحو|بلاغ|أدب|ادب|نصوص|قصة|إملاء|املاء|تعبير|arabic/i,
+  /إنجليز|انجليز|english/i,
+  /فرنس|ألمان|المان|إيطالي|ايطالي|إسبان|اسبان|french|german|italian|spanish/i,
+  /دين|إسلام|اسلام|مسيحي|قرآن|قران|فقه|religio|islam|christian/i,
+  /حاسب|حاسوب|برمج|تكنولوجيا|معلومات|computer|programming|ict/i
+];
+
+const subjectFamilies = (label: string) => SUBJECT_FAMILIES.filter(f => f.test(label));
+
+/**
+ * True only when the classifier's detected subject is recognizably a different school subject from an
+ * unrelated family. Unknown labels, the active subject itself, its integrated branches, and sibling
+ * disciplines all return false, so the fixed redirect is never served on a guess.
+ */
+export function isClearlyDifferentSubject(activeSubject: string, detectedSubject?: string): boolean {
+  if (!detectedSubject) return false;
+  const strip = (s: string) => s.trim().toLowerCase().replace(/^ال/, '').replace(/\s*-.*$/, '');
+  const a = strip(activeSubject);
+  const d = strip(detectedSubject);
+  if (!a || !d || a.includes(d) || d.includes(a)) return false;
+  const detected = subjectFamilies(detectedSubject);
+  if (!detected.length) return false;
+  const active = subjectFamilies(activeSubject);
+  return !active.some(f => detected.includes(f));
 }
 
 export function isEnglishMathSubject(subjectName?: string, gradeLevel?: string): boolean {
@@ -182,13 +213,31 @@ const ENGLISH_GRADE_NAMES: Record<string, string> = {
   '2_high': '2nd Secondary',
 };
 
+let catalogStageNames: Record<string, string> = {};
+let catalogStageLevels: Record<string, string> = {};
+
+/** Stage names and levels from the admin-managed education catalog; names take precedence over the built-in ones. */
+export function registerStageCatalog(stages: { id: string; name: string; level: string }[]) {
+  catalogStageNames = Object.fromEntries(stages.map(s => [s.id, s.name]));
+  catalogStageLevels = Object.fromEntries(stages.map(s => [s.id, s.level]));
+}
+
+export function getStageLevel(gradeLevel?: string): 'primary' | 'preparatory' | 'secondary' | 'other' {
+  const clean = (gradeLevel || '').trim();
+  const level = catalogStageLevels[clean];
+  if (level === 'primary' || level === 'preparatory' || level === 'secondary') return level;
+  if (clean.endsWith('_middle')) return 'preparatory';
+  if (clean.endsWith('_high') || clean.includes('secondary')) return 'secondary';
+  return 'other';
+}
+
 export function getGradeDisplayName(gradeLevel?: string, isEnglish: boolean = false): string {
   if (!gradeLevel) return isEnglish ? 'Unspecified Grade' : 'غير محدد';
   const clean = gradeLevel.trim();
   if (isEnglish) {
-    return ENGLISH_GRADE_NAMES[clean] || clean;
+    return ENGLISH_GRADE_NAMES[clean] || catalogStageNames[clean] || clean;
   }
-  return ARABIC_GRADE_NAMES[clean] || clean;
+  return catalogStageNames[clean] || ARABIC_GRADE_NAMES[clean] || clean;
 }
 
 export function getCurriculumDisplayName(subjectName?: string, gradeLevel?: string, isEnglish: boolean = false): string {

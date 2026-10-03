@@ -1,7 +1,7 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
+import { validateStudentPath } from '@/lib/education_catalog';
 
 export async function POST(req: NextRequest) {
   try {
@@ -17,24 +17,24 @@ export async function POST(req: NextRequest) {
     }
 
     const { grade_level, track_id, elective_subject } = await req.json();
-    const validGrades = ['1_middle', '2_middle', '3_middle', '1_high', '2_high'];
-    if (!grade_level || !validGrades.includes(grade_level)) {
-      return NextResponse.json({ error: 'السنة الدراسية المحددة غير صالحة' }, { status: 400 });
-    }
 
-    // Verify if user exists
     const profile = await db.getProfile(userId);
     if (!profile) {
       return NextResponse.json({ error: 'لم يتم العثور على حساب المستخدم أو تم حذفه.', code: 'user_not_found' }, { status: 401 });
     }
 
-    // Update profile grade level, track, and elective in DB
-    const updatedProfile = await db.updateProfileGradeLevel(
-      userId,
-      grade_level,
-      grade_level === '2_high' ? (track_id || profile.track_id) : null,
-      grade_level === '2_high' ? (elective_subject || profile.elective_subject) : null
+    const [catalog, curricula] = await Promise.all([db.getEducationCatalog(), db.getCurriculums()]);
+    const path = validateStudentPath(
+      catalog,
+      curricula,
+      { stageId: grade_level, trackId: track_id, electiveSubject: elective_subject },
+      { stageId: profile.grade_level, trackId: profile.track_id }
     );
+    if (!path.ok) {
+      return NextResponse.json({ error: path.error }, { status: 400 });
+    }
+
+    const updatedProfile = await db.updateProfileGradeLevel(userId, grade_level, path.trackId, path.electiveSubject);
     if (!updatedProfile) {
       return NextResponse.json({ error: 'فشل تحديث السنة الدراسية' }, { status: 500 });
     }

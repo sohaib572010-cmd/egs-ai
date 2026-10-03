@@ -1,6 +1,6 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { sanitizeInitialPath } from '@/lib/education_catalog';
 import { hashPasswordSecure, generateOtp, OTP_TTL_MS } from '@/lib/auth_helpers';
 import { sendOtpEmail } from '@/lib/email';
 import { checkRateLimitAsync, getClientIp } from '@/lib/rate_limiter';
@@ -54,7 +54,8 @@ export async function POST(req: NextRequest) {
     }
 
     const cleanName = typeof name === 'string' && name.trim() ? name.trim() : (cleanEmail.split('@')[0] || 'طالب جديد');
-    const cleanGradeLevel = typeof grade_level === 'string' && grade_level.trim() ? grade_level.trim() : 'unselected';
+    const initialPath = sanitizeInitialPath(await db.getEducationCatalog(), grade_level, track_id, elective_subject);
+    const cleanGradeLevel = initialPath.gradeLevel;
 
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(cleanEmail)) {
@@ -93,8 +94,8 @@ export async function POST(req: NextRequest) {
       new Date().toISOString(),
       undefined,
       expiresAt,
-      track_id || null,
-      elective_subject || null
+      initialPath.trackId,
+      initialPath.electiveSubject
     );
 
     return NextResponse.json({

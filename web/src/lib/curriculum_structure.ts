@@ -1,4 +1,5 @@
-import { db, registerCurriculumInvalidator } from './db';
+import { db, registerCurriculumInvalidator, type Curriculum } from './db';
+import { resolveCurriculum } from './education_catalog';
 
 export interface CurriculumLesson {
   id: string;
@@ -14,6 +15,8 @@ export interface CurriculumUnit {
   id: string;
   title: string;
   unitNumber: number;
+  /** Parent unit when the book nests chapters inside units (e.g. "الوحدة 2: الحركة الخطية"). */
+  groupTitle?: string;
   startPage?: number;
   lessons: CurriculumLesson[];
 }
@@ -45,6 +48,66 @@ function normalize(str: string): string {
     .toLowerCase();
 }
 
+/** The curriculum a student of a stage means by a subject name, including curricula shared into the stage. */
+export async function findCurriculumFor(gradeLevel: string, subjectName: string): Promise<Curriculum | undefined> {
+  const [catalog, curricula] = await Promise.all([db.getEducationCatalog(), db.getCurriculums()]);
+  return resolveCurriculum(catalog, curricula, gradeLevel.trim(), subjectName.trim());
+}
+
+const MAX_SUBTOPICS = 20;
+
+/**
+ * Lesson map of a curriculum Markdown file. "#" headings are units/chapters, "##" lessons and
+ * "###" subtopics. A "#" heading directly followed by another "#" heading is a parent unit that
+ * groups the chapters after it; it becomes their groupTitle instead of an empty unit.
+ */
+export function parseCurriculumOutline(markdown: string): CurriculumUnit[] {
+  const lines = (markdown || '').split('\n').map((l) => l.trim());
+  const units: CurriculumUnit[] = [];
+  let unit: CurriculumUnit | null = null;
+  let lesson: CurriculumLesson | null = null;
+  let group = '';
+
+  const nextHeading = (from: number) => {
+    for (let j = from; j < lines.length; j++) {
+      if (/^#{1,6}\s/.test(lines[j])) return lines[j];
+      if (lines[j] && !lines[j].startsWith('<!--')) return null;
+    }
+    return null;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const h1 = line.match(/^#\s+(.+)$/);
+    const h2 = line.match(/^##\s+(.+)$/);
+    const h3 = line.match(/^###\s+(.+)$/);
+    if (h1) {
+      const title = h1[1].trim();
+      if (title.startsWith('منهج') || title.startsWith('__')) continue;
+      const next = nextHeading(i + 1);
+      if (next && /^#\s/.test(next)) {
+        group = title;
+        continue;
+      }
+      unit = { id: `unit_${units.length + 1}`, title, unitNumber: units.length + 1, groupTitle: group || undefined, lessons: [] };
+      units.push(unit);
+      lesson = null;
+    } else if (h2) {
+      if (!unit) {
+        unit = { id: `unit_${units.length + 1}`, title: `الوحدة ${units.length + 1}`, unitNumber: units.length + 1, lessons: [] };
+        units.push(unit);
+      }
+      const n = unit.lessons.length + 1;
+      lesson = { id: `lesson_${unit.unitNumber}_${n}`, title: h2[1].trim(), lessonNumber: n, unitTitle: unit.title, unitId: unit.id, subtopics: [] };
+      unit.lessons.push(lesson);
+    } else if (h3 && lesson && lesson.subtopics!.length < MAX_SUBTOPICS) {
+      const sub = h3[1].trim();
+      if (!lesson.subtopics!.includes(sub)) lesson.subtopics!.push(sub);
+    }
+  }
+  return units.filter((u) => u.lessons.length > 0);
+}
+
 const structureCache = new Map<string, { result: CurriculumStructureResult; time: number }>();
 const STRUCTURE_CACHE_TTL_MS = 30000; // 30 seconds fallback
 
@@ -52,9 +115,28 @@ export function invalidateStructureCache() {
   structureCache.clear();
 }
 
+const normalizedTextCache = new Map<string, string>();
+
 registerCurriculumInvalidator(() => {
   structureCache.clear();
+  normalizedTextCache.clear();
 });
+
+/**
+ * Whether a concept phrase appears anywhere in the curriculum's textbook text. Used as a deterministic
+ * scope check when the query classifier could not place a question in any lesson.
+ */
+export async function curriculumTextContains(curriculumId: string, phrase: string): Promise<boolean> {
+  const target = normalize(phrase).replace(/^ال/, '');
+  if (target.length < 3) return true;
+  let text = normalizedTextCache.get(curriculumId);
+  if (text === undefined) {
+    const detail = await db.getCurriculumDetail(curriculumId);
+    text = normalize(detail?.content || '');
+    if (text) normalizedTextCache.set(curriculumId, text);
+  }
+  return !text || text.includes(target);
+}
 
 /**
  * Retrieves the manual curriculum structure for a given grade level and subject name
@@ -72,143 +154,32 @@ export async function getCurriculumStructure(
   }
 
   try {
-    const curriculums = await db.getCurriculums();
-    let targetCurr = curriculums.find(
-      c => c.grade_level === cleanGrade && c.subject_name === cleanSubject
-    );
-
-    // Dynamic alias fallback for 2_high History
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'التاريخ' || cleanSubject === 'تاريخ' || cleanSubject === 'التاريخ المصري')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'التاريخ المصري' || c.subject_name === 'التاريخ')
-      );
-    }
-
-    // Dynamic alias fallback for 2_high Physics
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'الفيزياء' || cleanSubject === 'فيزياء')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'الفيزياء' || c.subject_name === 'فيزياء')
-      );
-    }
-
-    // Dynamic alias fallback for 2_high Mathematics
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'الرياضيات' || cleanSubject === 'رياضيات')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'الرياضيات' || c.subject_name === 'رياضيات')
-      );
-    }
-
+    const targetCurr = await findCurriculumFor(cleanGrade, cleanSubject);
     if (!targetCurr) {
-      return {
-        hasCurriculum: false,
-        gradeLevel: cleanGrade,
-        subjectName: cleanSubject,
-        units: [],
-        totalLessons: 0
-      };
+      return { hasCurriculum: false, gradeLevel: cleanGrade, subjectName: cleanSubject, units: [], totalLessons: 0 };
     }
 
     const rawUnits = Array.isArray(targetCurr.units) ? targetCurr.units : [];
-    
-    let units: CurriculumUnit[] = [];
+    let units: CurriculumUnit[] = rawUnits.map((u, uIdx) => {
+      const unitNumber = u.unitNumber || (uIdx + 1);
+      const unitId = u.id || `unit_${unitNumber}`;
+      const unitTitle = u.title || `الوحدة ${unitNumber}`;
+      const lessons: CurriculumLesson[] = (Array.isArray(u.lessons) ? u.lessons : []).map((l, lIdx) => ({
+        id: l.id || `lesson_${unitNumber}_${l.lessonNumber || (lIdx + 1)}`,
+        title: l.title || `الدرس ${l.lessonNumber || (lIdx + 1)}`,
+        lessonNumber: l.lessonNumber || (lIdx + 1),
+        unitTitle,
+        unitId,
+        subtopics: Array.isArray(l.subtopics) ? l.subtopics : [],
+        startPage: l.startPage
+      }));
+      return { id: unitId, title: unitTitle, unitNumber, groupTitle: u.groupTitle, startPage: u.startPage, lessons };
+    });
 
-    if (rawUnits.length > 0) {
-      // Format and normalize units & lessons from rawUnits
-      units = rawUnits.map((u, uIdx) => {
-        const unitNumber = u.unitNumber || (uIdx + 1);
-        const unitId = u.id || `unit_${unitNumber}`;
-        const unitTitle = u.title || `الوحدة ${unitNumber}`;
-        const rawLessons = Array.isArray(u.lessons) ? u.lessons : [];
-
-        const lessons: CurriculumLesson[] = rawLessons.map((l, lIdx) => ({
-          id: l.id || `lesson_${unitNumber}_${l.lessonNumber || (lIdx + 1)}`,
-          title: l.title || `الدرس ${l.lessonNumber || (lIdx + 1)}`,
-          lessonNumber: l.lessonNumber || (lIdx + 1),
-          unitTitle: unitTitle,
-          unitId: unitId,
-          subtopics: Array.isArray(l.subtopics) ? l.subtopics : [],
-          startPage: l.startPage
-        }));
-
-        return {
-          id: unitId,
-          title: unitTitle,
-          unitNumber: unitNumber,
-          startPage: u.startPage,
-          lessons
-        };
-      });
-    }
-
-    // Dynamic fallback: If units array is empty, extract units and lessons from the curriculum detail markdown
-    if (units.length === 0 || units.every(u => u.lessons.length === 0)) {
-      try {
-        const detail = await db.getCurriculumDetail(targetCurr.id);
-        if (detail && detail.content) {
-          const lines = detail.content.split('\n');
-          let currentUnit: CurriculumUnit | null = null;
-          let currentLesson: CurriculumLesson | null = null;
-          let unitCounter = 0;
-          let lessonCounter = 0;
-          const parsedUnits: CurriculumUnit[] = [];
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            const unitMatch = trimmed.match(/^#\s+(.+)$/);
-            const lessonMatch = trimmed.match(/^##\s+(.+)$/);
-            const subMatch = trimmed.match(/^###\s+(.+)$/);
-
-            if (unitMatch) {
-              const title = unitMatch[1].trim();
-              if (!title.startsWith('__') && !title.startsWith('---') && !title.startsWith('منهج')) {
-                unitCounter++;
-                lessonCounter = 0;
-                currentUnit = {
-                  id: `unit_${unitCounter}`,
-                  title: title,
-                  unitNumber: unitCounter,
-                  lessons: []
-                };
-                parsedUnits.push(currentUnit);
-                currentLesson = null;
-              }
-            } else if (lessonMatch) {
-              const title = lessonMatch[1].trim();
-              if (!currentUnit) {
-                unitCounter++;
-                currentUnit = {
-                  id: `unit_${unitCounter}`,
-                  title: `الوحدة ${unitCounter}`,
-                  unitNumber: unitCounter,
-                  lessons: []
-                };
-                parsedUnits.push(currentUnit);
-              }
-              lessonCounter++;
-              currentLesson = {
-                id: `lesson_${currentUnit.unitNumber}_${lessonCounter}`,
-                title: title,
-                lessonNumber: lessonCounter,
-                unitTitle: currentUnit.title,
-                unitId: currentUnit.id,
-                subtopics: []
-              };
-              currentUnit.lessons.push(currentLesson);
-            } else if (subMatch && currentLesson) {
-              const subTitle = subMatch[1].trim();
-              if (subTitle && !currentLesson.subtopics?.includes(subTitle)) {
-                currentLesson.subtopics?.push(subTitle);
-              }
-            }
-          }
-
-          if (parsedUnits.length > 0) {
-            units = parsedUnits;
-          }
-        }
-      } catch (parseErr) {
-        console.warn('Dynamic curriculum structure parsing notice:', parseErr);
-      }
+    // Curricula without an authored lesson map use the one encoded in their Markdown headings
+    if (units.every(u => u.lessons.length === 0)) {
+      const detail = await db.getCurriculumDetail(targetCurr.id).catch(() => null);
+      units = parseCurriculumOutline(detail?.content || '');
     }
 
     const totalLessons = units.reduce((acc, u) => acc + u.lessons.length, 0);
@@ -253,18 +224,17 @@ export async function findMatchingLessonInCurriculum(
   if (!structure.hasCurriculum || structure.units.length === 0) return null;
 
   const normQuery = normalize(queryText);
-  const queryWords = normQuery.split(/\s+/).filter(w => w.length > 2);
 
   // 1. Check relative unit & lesson numbers (e.g. "الدرس الأول في الوحدة الثانية", "الدرس الثاني", "اول درس", "للدرس الاول")
-  const lessonNumMatch = normQuery.match(/(?:الدرس|للدرس|فدرس|درس|بدرس)\s+(الاول[يه]?|الثاني[ه]?|الثالث[ه]?|الرابع[ه]?|الخامس[ه]?|السادس[ه]?|السابع[ه]?|الثامن[ه]?|التاسع[ه]?|العاشر[ه]?|[0-9]+)/) ||
-    normQuery.match(/(اول|أول|ثاني|ثالث|رابع|خامس)\s+درس/);
-  const unitNumMatch = normQuery.match(/(?:الوحد[هة]|للوحد[هة]|بالوحد[هة]|وحد[هة])\s+(الاول[يه]?|الثاني[ه]?|الثالث[ه]?|الرابع[ه]?|الخامس[ه]?|السادس[ه]?|[0-9]+)/) ||
-    normQuery.match(/(اول|أول|ثاني|ثالث|رابع|خامس)\s+وحد[هة]/);
+  const lessonNumMatch = normQuery.match(/(?:الدرس|للدرس|فدرس|درس|بدرس)\s+(الاول[يه]?|الثاني[ه]?|التاني[ه]?|الثالث[ه]?|التالت[ه]?|الرابع[ه]?|الخامس[ه]?|السادس[ه]?|السابع[ه]?|الثامن[ه]?|التاسع[ه]?|العاشر[ه]?|[0-9]+)/) ||
+    normQuery.match(/(اول|أول|ثاني|تاني|ثالث|تالت|رابع|خامس)\s+درس/);
+  const unitNumMatch = normQuery.match(/(?:الوحد[هة]|للوحد[هة]|بالوحد[هة]|وحد[هة]|الفصل|الباب)\s+(الاول[يه]?|الثاني[ه]?|التاني[ه]?|الثالث[ه]?|التالت[ه]?|الرابع[ه]?|الخامس[ه]?|السادس[ه]?|[0-9]+)/) ||
+    normQuery.match(/(اول|أول|ثاني|تاني|ثالث|تالت|رابع|خامس)\s+وحد[هة]/);
 
   const numMap: Record<string, number> = {
     'الاول': 1, 'الاولى': 1, 'الاولي': 1, 'اول': 1, 'أول': 1, '1': 1, '١': 1,
-    'الثاني': 2, 'الثانيه': 2, 'ثاني': 2, '2': 2, '٢': 2,
-    'الثالث': 3, 'الثالثه': 3, 'ثالث': 3, '3': 3, '٣': 3,
+    'الثاني': 2, 'الثانيه': 2, 'ثاني': 2, 'التاني': 2, 'التانيه': 2, 'تاني': 2, '2': 2, '٢': 2,
+    'الثالث': 3, 'الثالثه': 3, 'ثالث': 3, 'التالت': 3, 'التالته': 3, 'تالت': 3, '3': 3, '٣': 3,
     'الرابع': 4, 'الرابعه': 4, 'رابع': 4, '4': 4, '٤': 4,
     'الخامس': 5, 'الخامسه': 5, 'خامس': 5, '5': 5, '٥': 5,
     'السادس': 6, 'السادسه': 6, 'سادس': 6, '6': 6, '٦': 6,
@@ -293,46 +263,107 @@ export async function findMatchingLessonInCurriculum(
     }
   }
 
-  // 2. Direct string inclusion / keyword overlap against lesson titles and subtitles
+  // 2. Title-word overlap. Only meaningful words count, so structural words such as "الدرس" or
+  // ordinals ("الثاني") cannot pull an unrelated lesson into a query like "قانون نيوتن الثاني".
+  const querySig = new Set(significantWords(queryText));
+  if (querySig.size === 0) return null;
   let bestMatch: { lesson: CurriculumLesson; unit: CurriculumUnit; score: number } | null = null;
 
   for (const unit of structure.units) {
     for (const lesson of unit.lessons) {
-      const normTitle = normalize(lesson.title);
-      const titleParts = lesson.title.split(/[:：\-]/);
-      const subtitle = titleParts.length > 1 ? normalize(titleParts.slice(1).join(' ')) : '';
-      let score = 0;
+      const subtitle = normalize(lessonSubtitle(lesson.title));
+      const titleSig = significantWords(lessonSubtitle(lesson.title));
+      const titleHits = titleSig.filter(w => querySig.has(w)).length;
+      const included = subtitle.length > 3 && normQuery.includes(subtitle);
+      const subtopicHits = [...querySig].filter(w =>
+        (lesson.subtopics || []).some(sub => significantWords(sub).includes(w))
+      ).length;
 
-      if (normQuery.includes(normTitle) || normTitle.includes(normQuery)) {
-        score += 50;
-      }
-      if (subtitle && (normQuery.includes(subtitle) || subtitle.includes(normQuery))) {
-        score += 60;
-      }
-
-      const titleWords = normTitle.split(/\s+/).filter(w => w.length > 2);
-      for (const word of queryWords) {
-        if (titleWords.includes(word)) score += 10;
-        else if (normTitle.includes(word)) score += 5;
-      }
-
-      // Check subtopics
-      if (Array.isArray(lesson.subtopics)) {
-        for (const sub of lesson.subtopics) {
-          const normSub = normalize(sub);
-          for (const word of queryWords) {
-            if (normSub.includes(word)) score += 6;
-          }
-        }
-      }
-
-      if (score > 15 && (!bestMatch || score > bestMatch.score)) {
+      if (!included && titleHits < 2 && !(titleHits === 1 && titleSig.length <= 2)) continue;
+      const score = (included ? 50 : 0) + titleHits * 10 + subtopicHits * 3 - titleSig.length;
+      if (!bestMatch || score > bestMatch.score) {
         bestMatch = { lesson, unit, score };
       }
     }
   }
 
   return bestMatch ? { lesson: bestMatch.lesson, unit: bestMatch.unit } : null;
+}
+
+const ORDINALS: Record<string, number> = {
+  'الاول': 1, 'الثاني': 2, 'الثالث': 3, 'الرابع': 4, 'الخامس': 5, 'السادس': 6,
+  'السابع': 7, 'الثامن': 8, 'التاسع': 9, 'العاشر': 10, 'الحادي عشر': 11, 'الثاني عشر': 12
+};
+const MAX_LESSON_CONTEXT_CHARS = 30000;
+
+const NON_TOPIC_WORDS = new Set([
+  'درس', 'دروس', 'وحده', 'فصل', 'باب', 'اول', 'اولي', 'ثاني', 'ثانيه', 'تاني', 'تانيه', 'ثالث', 'ثالثه',
+  'تالت', 'تالته', 'رابع', 'رابعه', 'خامس', 'سادس', 'سابع', 'ثامن', 'تاسع', 'عاشر', 'شرح', 'اشرح',
+  'اشرحلي', 'اشرحلنا', 'عايز', 'عاوز', 'ممكن', 'كامل', 'بالكامل', 'بالتفصيل', 'تفصيل', 'شامل', 'لو', 'سمحت',
+  'فضلك', 'يعني', 'ايه', 'ازاي', 'ليه', 'لماذا', 'كيف', 'ما', 'هو', 'هي', 'في', 'من', 'عن', 'علي', 'الي'
+]);
+
+function significantWords(text: string): string[] {
+  return normalize(text)
+    .split(/\s+/)
+    .map(w => w.replace(/^(?:وال|بال|فال|كال|لل|ال|و)(?=.{3,})/, ''))
+    .filter(w => w.length > 2 && !NON_TOPIC_WORDS.has(w) && !/^\d+$/.test(w));
+}
+
+function lessonSubtitle(heading: string): string {
+  const idx = heading.search(/[:：]/);
+  return idx >= 0 ? heading.slice(idx + 1) : heading.replace(/^#+\s*الدرس\s+\S+\s*/, '');
+}
+
+function parseLessonNumber(heading: string): number | undefined {
+  const m = normalize(heading).match(/الدرس\s+(\d+|الحادي عشر|الثاني عشر|[^\s]+)/);
+  if (!m) return undefined;
+  return /^\d+$/.test(m[1]) ? Number(m[1]) : ORDINALS[m[1]];
+}
+
+/**
+ * Pulls every "## " block that belongs to a lesson out of the raw textbook markdown. Generated
+ * curricula repeat a lesson heading across several blocks and do not always mark unit headings,
+ * so blocks are matched by title-word overlap first and by (unit, lesson) numbering second.
+ */
+export function extractLessonBlocks(markdown: string, lessonTitle: string, unitNumber: number, lessonNumber: number): string {
+  const lines = markdown.split('\n');
+  const blocks: { heading: string; start: number; end: number }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^#{1,2}\s/.test(lines[i])) {
+      if (blocks.length) blocks[blocks.length - 1].end = i;
+      blocks.push({ heading: lines[i], start: i, end: lines.length });
+    }
+  }
+  const lessonBlocks = blocks.filter(b => /^##\s/.test(b.heading));
+  const targetWords = new Set(significantWords(lessonSubtitle(lessonTitle)));
+
+  const scored = lessonBlocks.map(b => {
+    const words = significantWords(lessonSubtitle(b.heading.replace(/^#+\s*/, '')));
+    const hits = words.filter(w => targetWords.has(w)).length;
+    return { b, score: words.length ? hits / words.length : 0, hits };
+  });
+  const best = Math.max(0, ...scored.map(s => s.score));
+  const selected = best >= 0.6 ? scored.filter(s => s.score >= best - 1e-9 && s.hits > 0).map(s => s.b) : [];
+
+  if (selected.length === 0) {
+    let unit = 0;
+    let prev = Infinity;
+    for (const b of lessonBlocks) {
+      const n = parseLessonNumber(b.heading);
+      if (n === undefined) continue;
+      if (n <= prev) unit++;
+      prev = n;
+      const words = significantWords(lessonSubtitle(b.heading.replace(/^#+\s*/, '')));
+      const related = words.length === 0 || words.some(w => targetWords.has(w));
+      if (unit === unitNumber && n === lessonNumber && related) selected.push(b);
+    }
+  }
+
+  return selected
+    .map(b => lines.slice(b.start, b.end).join('\n').trim())
+    .join('\n\n')
+    .slice(0, MAX_LESSON_CONTEXT_CHARS);
 }
 
 /**
@@ -354,28 +385,7 @@ export async function getExhaustiveLessonContext(
   const query = lessonQuery.trim();
 
   try {
-    const curriculums = await db.getCurriculums();
-    let targetCurr = curriculums.find(
-      c => c.grade_level === cleanGrade && c.subject_name === cleanSubject
-    );
-
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'التاريخ' || cleanSubject === 'تاريخ' || cleanSubject === 'التاريخ المصري')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'التاريخ المصري' || c.subject_name === 'التاريخ')
-      );
-    }
-
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'الفيزياء' || cleanSubject === 'فيزياء')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'الفيزياء' || c.subject_name === 'فيزياء')
-      );
-    }
-
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'الرياضيات' || cleanSubject === 'رياضيات')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'الرياضيات' || c.subject_name === 'رياضيات')
-      );
-    }
+    const targetCurr = await findCurriculumFor(cleanGrade, cleanSubject);
 
     if (!targetCurr) {
       return { success: false, lessonTitle: query, unitTitle: '', subtopics: [], contextText: '' };
@@ -386,67 +396,27 @@ export async function getExhaustiveLessonContext(
     const resolvedUnitTitle = matched?.unit?.title || '';
     const subtopics = matched?.lesson?.subtopics || [];
 
-    const normTarget = normalize(resolvedLessonTitle);
-    const normTargetWords = normTarget.split(/\s+/).filter(w => w.length > 2);
+    const normTarget = normalize(lessonSubtitle(resolvedLessonTitle));
+    const normTargetWords = significantWords(lessonSubtitle(resolvedLessonTitle));
 
     let fullExtractedContent = '';
     const collectedSections: string[] = [];
 
-    // Strategy 1: Extract complete continuous markdown block from curriculum detail (from ## Lesson to next ## Lesson)
-    const detail = await db.getCurriculumDetail(targetCurr.id);
-    if (detail && detail.content) {
-      const rawContent = detail.content;
-      // Split by Level 1 or Level 2 headings: # or ##
-      const sections = rawContent.split(/\n(?=#{1,2}\s)/);
-      let foundLessonSectionIndex = -1;
-
-      for (let i = 0; i < sections.length; i++) {
-        const sec = sections[i];
-        const firstLine = normalize(sec.split('\n')[0] || '');
-        if (
-          firstLine.includes(normTarget) ||
-          normTarget.includes(firstLine) ||
-          (normTargetWords.length >= 2 && normTargetWords.filter(w => firstLine.includes(w)).length >= 2) ||
-          (matched?.lesson?.lessonNumber && (
-            firstLine.includes(`الدرس ${matched.lesson.lessonNumber}`) ||
-            firstLine.includes(`الدرس ${matched.lesson.lessonNumber === 1 ? 'الاول' : matched.lesson.lessonNumber === 2 ? 'الثاني' : matched.lesson.lessonNumber === 3 ? 'الثالث' : ''}`)
-          ))
-        ) {
-          foundLessonSectionIndex = i;
-          break;
-        }
-      }
-
-      if (foundLessonSectionIndex !== -1) {
-        // Collect this section and all subsequent sections belonging to this lesson until the next distinct lesson or unit begins
-        const lessonSections: string[] = [sections[foundLessonSectionIndex].trim()];
-        for (let j = foundLessonSectionIndex + 1; j < sections.length; j++) {
-          const nextSec = sections[j];
-          const nextFirstLine = nextSec.split('\n')[0] || '';
-          // Stop if a new unit or new distinct lesson begins
-          if (/^#\s+(?:الوحدة|منهج|باب|الفصل)/i.test(nextFirstLine) ||
-              /^##\s+(?:الدرس|الوحدة|الباب)/i.test(nextFirstLine)) {
-            break;
-          }
-          lessonSections.push(nextSec.trim());
-        }
-        fullExtractedContent = lessonSections.join('\n\n').trim();
-      }
+    // Strategy 1: Extract the lesson's own "## " blocks from the raw textbook markdown
+    const detail = matched ? await db.getCurriculumDetail(targetCurr.id) : null;
+    if (matched && detail?.content) {
+      fullExtractedContent = extractLessonBlocks(detail.content, matched.lesson.title, matched.unit.unitNumber, matched.lesson.lessonNumber);
     }
 
     // Strategy 2: Only collect parent chunks if Strategy 1 did not yield complete content
-    if (!fullExtractedContent || fullExtractedContent.length < 300) {
+    if (matched && (!fullExtractedContent || fullExtractedContent.length < 300)) {
       const allChunks = await db.getAllChunksForCurriculum(cleanGrade, cleanSubject).catch(() => []);
       const parentChunks = allChunks.filter(c => c.chunk_level === 'parent');
 
+      const targetSig = significantWords(lessonSubtitle(resolvedLessonTitle));
       const matchingParentChunks = parentChunks.filter(chunk => {
-        const normHeading = normalize(chunk.heading);
-        if (normHeading.includes(normTarget) || normTarget.includes(normHeading)) return true;
-        if (normTargetWords.length >= 2) {
-          const matchCount = normTargetWords.filter(w => normHeading.includes(w)).length;
-          if (matchCount >= 2) return true;
-        }
-        return false;
+        const headingSig = significantWords(chunk.heading);
+        return targetSig.length > 0 && targetSig.filter(w => headingSig.includes(w)).length >= Math.min(2, targetSig.length);
       });
 
       if (matchingParentChunks.length > 0) {
@@ -460,16 +430,13 @@ export async function getExhaustiveLessonContext(
     // Strategy 3: Retrieve Knowledge Graph entities & laws
     let graphContext = '';
     try {
-      const graphData = await db.getCurriculumGraph(cleanGrade, cleanSubject);
+      const graphData = matched ? await db.getCurriculumGraph(cleanGrade, cleanSubject) : null;
       if (graphData && Array.isArray(graphData.entities) && graphData.entities.length > 0) {
         const relevantEntities = graphData.entities.filter(e => {
           const normName = normalize(e.name);
           const normDesc = normalize(e.description || '');
-          return (
-            normTarget.includes(normName) ||
-            normName.includes(normTarget) ||
-            normTargetWords.some(w => normName.includes(w) || normDesc.includes(w))
-          );
+          const hits = normTargetWords.filter(w => normName.includes(w) || normDesc.includes(w)).length;
+          return normTarget.includes(normName) || normName.includes(normTarget) || hits >= Math.min(2, normTargetWords.length);
         });
 
         if (relevantEntities.length > 0) {
@@ -505,9 +472,10 @@ ${subtopics.length > 0 ? `المحاور والمفاهيم والعناصر ا�
     }
 
     const contextText = parts.join('\n\n');
+    const lessonTextLength = fullExtractedContent.length + collectedSections.join('').length;
 
     return {
-      success: contextText.length > 50,
+      success: !!matched && lessonTextLength >= 300,
       lessonTitle: resolvedLessonTitle,
       unitTitle: resolvedUnitTitle,
       subtopics,
@@ -540,28 +508,7 @@ export async function getCurriculumContextForLesson(
       return exhaustive.contextText;
     }
 
-    const curriculums = await db.getCurriculums();
-    let targetCurr = curriculums.find(
-      c => c.grade_level === cleanGrade && c.subject_name === cleanSubject
-    );
-
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'التاريخ' || cleanSubject === 'تاريخ' || cleanSubject === 'التاريخ المصري')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'التاريخ المصري' || c.subject_name === 'التاريخ')
-      );
-    }
-
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'الفيزياء' || cleanSubject === 'فيزياء')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'الفيزياء' || c.subject_name === 'فيزياء')
-      );
-    }
-
-    if (!targetCurr && cleanGrade === '2_high' && (cleanSubject === 'الرياضيات' || cleanSubject === 'رياضيات')) {
-      targetCurr = curriculums.find(
-        c => c.grade_level === '2_high' && (c.subject_name === 'الرياضيات' || c.subject_name === 'رياضيات')
-      );
-    }
+    const targetCurr = await findCurriculumFor(cleanGrade, cleanSubject);
 
     if (!targetCurr) return '';
 

@@ -8,20 +8,14 @@ declare global {
   var globalQueueProcessor: QueueProcessor | undefined;
 }
 
-const DEFAULT_EDENAI_KEY = process.env.EDENAI_API_KEY || "";
-const DEFAULT_DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || "";
-const DEFAULT_GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-
 function getProcessor(settings?: ProcessingSettings): QueueProcessor {
   if (!globalThis.globalQueueProcessor) {
     const defaultSettings: ProcessingSettings = {
-      geminiApiKey: process.env.GEMINI_API_KEY || DEFAULT_GEMINI_KEY,
-      edenAiApiKey: process.env.EDENAI_API_KEY || DEFAULT_EDENAI_KEY,
-      deepSeekApiKey: process.env.DEEPSEEK_API_KEY || DEFAULT_DEEPSEEK_KEY,
-      batchSize: 3,
+      deepSeekApiKey: process.env.DEEPSEEK_API_KEY || "",
+      batchSize: 8,
       maxConcurrentFiles: 2,
-      maxRetries: 3,
-      delayBetweenBatchesMs: 50,
+      maxRetries: 4,
+      delayBetweenBatchesMs: 0,
       autoResumeOnStartup: true,
     };
     globalThis.globalQueueProcessor = new QueueProcessor(defaultSettings);
@@ -40,11 +34,7 @@ export async function GET() {
     logs: processor.getLogs(),
     settings: {
       ...currentSettings,
-      geminiApiKey: currentSettings.geminiApiKey ? "••••••••" : "",
-      edenAiApiKey: currentSettings.edenAiApiKey ? "••••••••" : "",
       deepSeekApiKey: currentSettings.deepSeekApiKey ? "••••••••" : "",
-      hasGeminiKey: !!currentSettings.geminiApiKey || !!process.env.GEMINI_API_KEY,
-      hasEdenKey: !!currentSettings.edenAiApiKey || !!process.env.EDENAI_API_KEY,
       hasDeepSeekKey: !!currentSettings.deepSeekApiKey || !!process.env.DEEPSEEK_API_KEY,
       modelName: "DeepSeek-V4.1-Flash (deepseek-flash)",
       isMultimodal: true,
@@ -112,6 +102,12 @@ export async function POST(req: Request) {
     if (action === "reexport_all") {
       const result = processor.reexportAllFiles();
       return NextResponse.json({ success: true, count: result.count, files: result.files });
+    }
+
+    if (action === "set_outline" && fileId && typeof body.outlineText === "string") {
+      const result = processor.setOutline(fileId, body.outlineText.slice(0, 20000));
+      if (!result.ok) return NextResponse.json({ error: "الملف غير موجود في القائمة" }, { status: 404 });
+      return NextResponse.json({ success: true, lessons: result.lessons, markdown: processor.getCurriculumMarkdown(fileId) });
     }
 
     if (action === "update_settings" && settings) {

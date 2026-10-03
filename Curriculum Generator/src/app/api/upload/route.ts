@@ -20,8 +20,9 @@ export async function POST(req: Request) {
 
     const formData = await req.formData();
     const files = formData.getAll("files") as File[];
-    const gradeLevel = (formData.get("gradeLevel") as GradeLevel) || "1_middle";
+    const gradeLevel: GradeLevel = String(formData.get("gradeLevel") || "").trim().replace(/[^\w-]/g, "_").slice(0, 60) || "unassigned";
     const customSubjectName = (formData.get("subjectName") as string) || "";
+    const outlineText = String(formData.get("outlineText") || "").slice(0, 20000).trim();
 
     if (!files || files.length === 0) {
       return NextResponse.json(
@@ -74,6 +75,7 @@ export async function POST(req: Request) {
         startedAt: null,
         completedAt: null,
         currentOperation: "في قائمة الانتظار",
+        outlineText: files.length === 1 && outlineText ? outlineText : undefined,
       });
     }
 

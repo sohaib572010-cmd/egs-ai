@@ -1,4 +1,4 @@
-import { isEnglishSubject } from './subject_helpers';
+import { isEnglishSubject, getStageLevel } from './subject_helpers';
 
 export interface ExamGenerationConfig {
   gradeLevel: string;
@@ -16,10 +16,19 @@ export interface ExamGenerationConfig {
  * Returns the official cognitive distribution and pedagogical standards for the given grade level
  * based on Egyptian Ministry of Education and NCEEE specifications.
  */
+const SPEC_GRADES = ['1_middle', '2_middle', '3_middle', '1_high', '2_high'];
+
+/** Admin-created stages use the specification of the closest built-in stage of the same level. */
+function specGrade(gradeLevel: string): string {
+  if (SPEC_GRADES.includes(gradeLevel)) return gradeLevel;
+  const level = getStageLevel(gradeLevel);
+  return level === 'preparatory' || level === 'primary' ? '2_middle' : gradeLevel;
+}
+
 export function getGradePedagogicalStandard(gradeLevel: string, subjectName: string): string {
   const isEnglish = isEnglishSubject(subjectName);
 
-  switch (gradeLevel) {
+  switch (specGrade(gradeLevel)) {
     case '1_middle':
       return `[المرحلة الدراسية: الصف الأول الإعدادي - المنهج المطور الحديث]
 1. الإطار العام للمواصفات:
@@ -199,8 +208,8 @@ export function buildOfficialExamSystemPrompt(
 
   const isEnglish = isEnglishSubject(subjectName);
   const isBaccalaureate = gradeLevel === '2_high';
-  const isHighSchool = gradeLevel === '1_high' || gradeLevel === '2_high';
-  const isPreparatory = ['1_middle', '2_middle', '3_middle'].includes(gradeLevel);
+  const isHighSchool = getStageLevel(gradeLevel) === 'secondary';
+  const isPreparatory = ['preparatory', 'primary'].includes(getStageLevel(gradeLevel));
 
   const pedagogicalStandard = getGradePedagogicalStandard(gradeLevel, subjectName);
 

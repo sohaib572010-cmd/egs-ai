@@ -1,19 +1,21 @@
-export type GradeLevel =
-  | "1_middle"
-  | "2_middle"
-  | "3_middle"
-  | "1_high"
-  | "2_high"
-  | "3_high";
+import type { OutlineNode } from "./outline";
 
-export const GRADE_NAMES_AR: Record<GradeLevel, string> = {
+/** Stage ids are managed in the EGS AI admin panel; these are suggestions for the upload form. */
+export type GradeLevel = string;
+
+export const KNOWN_STAGES: Record<string, string> = {
   "1_middle": "الصف الأول الإعدادي",
   "2_middle": "الصف الثاني الإعدادي",
   "3_middle": "الصف الثالث الإعدادي",
-  "1_high": "الصف الأول الثانوي",
-  "2_high": "الصف الثاني الثانوي",
-  "3_high": "الصف الثالث الثانوي",
+  "1_high": "الصف الأول الثانوي (بكالوريا)",
+  "2_high": "السنة الثانية بكالوريا",
+  "2_secondary_general": "الصف الثاني الثانوي العام",
+  "2_secondary_azhar": "الصف الثاني الثانوي الأزهري",
 };
+
+export function stageLabel(id: string): string {
+  return KNOWN_STAGES[id] || id;
+}
 
 export type FileStatus =
   | "pending"
@@ -39,6 +41,7 @@ export interface FileQueueItem {
   completedAt: string | null;
   currentOperation?: string;
   speedPagesPerMin?: number;
+  outlineText?: string;
 }
 
 export interface PageExtractionResult {
@@ -60,16 +63,15 @@ export interface JobCheckpoint {
   subjectName: string;
   totalPages: number;
   completedPages: Record<number, PageExtractionResult>;
+  outline?: OutlineNode[] | null;
+  outlineSource?: "manual" | "toc" | null;
+  tocPages?: number[];
   lastUpdated: string;
 }
 
 export interface ProcessingSettings {
   /** Primary Multimodal Engine: DeepSeek-V4.1-Flash (deepseek-flash) for both page vision and curriculum structuring */
   deepSeekApiKey: string;
-  /** Optional legacy fallback vision key */
-  geminiApiKey?: string;
-  /** Optional legacy fallback OCR/VQA key */
-  edenAiApiKey?: string;
   batchSize: number;
   maxConcurrentFiles: number;
   maxRetries: number;

@@ -1,7 +1,7 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken, hashPasswordSecure, generateOtp, OTP_TTL_MS } from '@/lib/auth_helpers';
+import { validateStudentPath } from '@/lib/education_catalog';
 import { sendOtpEmail } from '@/lib/email';
 
 // Helper: Get user id from headers
@@ -106,26 +106,28 @@ export async function POST(req: NextRequest) {
     }
 
     if (action === 'complete-onboarding') {
-      const cleanName = (name || '').trim();
+      const cleanName = typeof name === 'string' ? name.replace(/\s+/g, ' ').trim().slice(0, 60) : '';
       const targetGrade = grade_level || profile.grade_level;
-      const targetTrack = track_id !== undefined ? track_id : profile.track_id;
-      const targetElective = elective_subject !== undefined ? elective_subject : profile.elective_subject;
-
-      const validGrades = ['1_middle', '2_middle', '3_middle', '1_high', '2_high'];
-      if (!targetGrade || !validGrades.includes(targetGrade)) {
-        return NextResponse.json({ error: 'يرجى تحديد مرحلة دراسية صالحة.' }, { status: 400 });
+      const [catalog, curricula] = await Promise.all([db.getEducationCatalog(), db.getCurriculums()]);
+      const path = validateStudentPath(
+        catalog,
+        curricula,
+        {
+          stageId: targetGrade,
+          trackId: track_id !== undefined ? track_id : profile.track_id,
+          electiveSubject: elective_subject !== undefined ? elective_subject : profile.elective_subject
+        },
+        { stageId: profile.grade_level, trackId: profile.track_id }
+      );
+      if (!path.ok) {
+        return NextResponse.json({ error: path.error }, { status: 400 });
       }
 
       if (cleanName) {
         await db.updateProfileName(userId, cleanName);
       }
 
-      const updated = await db.updateProfileGradeLevel(
-        userId,
-        targetGrade,
-        targetGrade === '2_high' ? (targetTrack || null) : null,
-        targetGrade === '2_high' ? (targetElective || null) : null
-      );
+      const updated = await db.updateProfileGradeLevel(userId, targetGrade, path.trackId, path.electiveSubject);
 
       if (!updated) {
         return NextResponse.json({ error: 'فشل حفظ إعدادات الحساب' }, { status: 500 });

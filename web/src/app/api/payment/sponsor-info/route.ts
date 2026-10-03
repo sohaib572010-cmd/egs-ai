@@ -1,6 +1,6 @@
-export const runtime = 'edge';
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { stageName, trackName } from '@/lib/education_catalog';
 
 export async function GET(req: NextRequest) {
   try {
@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // Return safe public metadata for the parent
+    const catalog = await db.getEducationCatalog();
     return NextResponse.json({
       success: true,
       student: {
@@ -30,6 +30,8 @@ export async function GET(req: NextRequest) {
         name: profile.name || 'طالب متميز',
         grade_level: profile.grade_level || 'unselected',
         track_id: profile.track_id || null,
+        grade_name: stageName(catalog, profile.grade_level),
+        track_name: trackName(catalog, profile.track_id) || null,
         elective_subject: profile.elective_subject || null,
         study_streak: profile.study_streak || 1,
         points: profile.points || 0,
