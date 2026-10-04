@@ -21,7 +21,7 @@
       "phone": "01000000000",
       "email": "test@egsaiedu.com",
       "name": "حساب اختباري (Test Account)",
-      "grade_level": "1_high",
+      "grade_level": "2_high",
       "plan_type": "max",
       "role": "admin",
       "unlimited_credit": true,
@@ -30,7 +30,15 @@
       "study_streak": 1,
       "password_hash": "pbkdf2$100000$h0SjDuidjcSD8T3EPG1nRA==$pKLZrAFUqLdoMTyheDcKFq9o02smj/kIrJu03RWzHM8=",
       "created_at": "2026-07-30T13:35:52.543Z",
-      "last_active_date": "2026-08-26"
+      "last_active_date": "2026-10-03",
+      "improve_ai_opt_in": true,
+      "subscription_start_date": "2026-07-30T13:35:52.543Z",
+      "subscription_end_date": "2026-10-28T13:35:52.543Z",
+      "subscription_plan_id": "pro_3m",
+      "subscription_status": "active",
+      "streak_shields": 1,
+      "track_id": "medicine_life_sciences",
+      "elective_subject": "فيزياء - جزئ اول"
     },
     {
       "id": "4b38f8a5-508c-45fd-b32d-02a8c5d8524f",
@@ -37817,5 +37825,62 @@
   "curriculum_relations": [],
   "user_lesson_progress": [],
   "study_notebook": [],
-  "claimed_daily_quests": []
+  "claimed_daily_quests": [],
+  "voice_usage": [
+    {
+      "user_id": "a3e0f065-9856-424d-8dc8-b4b3cf0b89cf",
+      "date": "2026-10-03",
+      "seconds_used": 37,
+      "calls": 1,
+      "active_call_id": null,
+      "call_started_at": null,
+      "call_reserved": 0,
+      "last_beat_at": null,
+      "key_slot": 0,
+      "updated_at": "2026-10-03T02:45:16.250Z"
+    }
+  ],
+  "voice_calls": [
+    {
+      "id": "04c16e64-5c54-42e8-83a0-58573a7fae23",
+      "user_id": "a3e0f065-9856-424d-8dc8-b4b3cf0b89cf",
+      "subject_name": "التاريخ  - جزئ اول",
+      "grade_level": "2_high",
+      "dialect": "egyptian",
+      "teacher": "male",
+      "started_at": "2026-10-03T02:44:40.550Z",
+      "transcript": [
+        {
+          "role": "teacher",
+          "text": "أهلاً بك يا مدير. تحب تذاكر أو نراجع إيه في منهج التاريخ جزء أول النهارده؟",
+          "at": "2026-10-03T02:44:43.122Z"
+        },
+        {
+          "role": "student",
+          "text": "الدرس الثاني في الوحدة الأولى",
+          "at": "2026-10-03T02:44:52.459Z"
+        },
+        {
+          "role": "search",
+          "text": "الدرس الثاني: الدولة المصرية القديمة ومقاومة الاحتلال",
+          "at": "2026-10-03T02:44:52.459Z",
+          "sources": [
+            "الدرس الثاني: الدولة المصرية القديمة ومقاومة الاحتلال"
+          ]
+        },
+        {
+          "role": "student",
+          "text": "الدرس الثاني في الوحدة الأولى",
+          "at": "2026-10-03T02:44:52.459Z"
+        },
+        {
+          "role": "teacher",
+          "text": "بص يا سيدي، الدرس التاني بيتكلم عن إزاي موقع مصر الجغرافي المتميز ومواردها الضخمة خلوها مركز مهم في العالم القديم، بس في نفس الوقت خلوها هدف للأطماع الخارجية. في فترة ضعف الدولة، استغل الهكسوس الاضطرابات وتسللوا من الحدود الشمالية الشرقية وسيطروا على دلتا النيل. واضحة لحد هنا؟",
+          "at": "2026-10-03T02:44:55.210Z"
+        }
+      ],
+      "ended_at": "2026-10-03T02:45:16.453Z",
+      "duration_seconds": 37
+    }
+  ]
 }

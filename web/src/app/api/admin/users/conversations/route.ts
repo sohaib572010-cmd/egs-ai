@@ -1,6 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, type VoiceCallRow } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
+
+const formatDuration = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+// Voice Tutor calls are returned as sessions (kind 'voice') whose transcript entries are messages
+function voiceCallsAsSessions(calls: VoiceCallRow[]) {
+  const sessions = calls.map(c => ({
+    id: `voice_${c.id}`,
+    kind: 'voice',
+    title: `مكالمة صوتية${c.duration_seconds ? ` · ${formatDuration(c.duration_seconds)}` : ''}`,
+    subject_name: c.subject_name,
+    grade_level: c.grade_level,
+    created_at: c.started_at,
+    duration_seconds: c.duration_seconds ?? null,
+    rating: c.rating ?? null,
+    dialect: c.dialect,
+    teacher: c.teacher
+  }));
+  const messages = calls.flatMap(c => (c.transcript || []).map((e, i) => ({
+    id: `voice_${c.id}_${i}`,
+    session_id: `voice_${c.id}`,
+    kind: e.role === 'search' ? 'search' : 'voice',
+    sender: e.role === 'student' ? 'user' : 'ai',
+    message: e.text,
+    interrupted: !!e.interrupted,
+    sources: e.sources || [],
+    created_at: e.at
+  })));
+  return { sessions, messages };
+}
 
 // Helper: Authorize admin
 async function authorizeAdmin(req: NextRequest): Promise<string | NextResponse> {
@@ -59,10 +88,15 @@ export async function GET(req: NextRequest) {
     }
 
     // Student is opted-in: fetch full conversation history and sessions
-    const [sessions, messages] = await Promise.all([
+    const [chatSessions, chatMessages, voiceCalls] = await Promise.all([
       db.getChatSessions(userId),
-      db.getChatHistory(userId)
+      db.getChatHistory(userId),
+      db.getVoiceCalls(userId).catch(() => [] as VoiceCallRow[])
     ]);
+    const voice = voiceCallsAsSessions(voiceCalls);
+    const sessions = [...(chatSessions || []), ...voice.sessions]
+      .sort((a: { created_at?: string }, b: { created_at?: string }) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+    const messages = [...(chatMessages || []), ...voice.messages];
 
     return NextResponse.json({
       success: true,
@@ -77,10 +111,11 @@ export async function GET(req: NextRequest) {
       },
       sessions: sessions || [],
       messages: messages || [],
-      totalSessions: (sessions || []).length,
-      totalMessages: (messages || []).length
+      totalSessions: sessions.length,
+      totalMessages: messages.length,
+      totalVoiceCalls: voice.sessions.length
     });
-  } catch (error: any) {
+  } catch (error) {
     console.error('Admin student conversations error:', error);
     return NextResponse.json(
       { error: 'حدث خطأ أثناء استرجاع سجل محادثات الطالب.' },

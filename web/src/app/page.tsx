@@ -123,7 +123,8 @@ import {
   Sigma,
   ArrowUp,
   Flag,
-  Mail
+  Mail,
+  AudioLines
 } from 'lucide-react';
 import AppTour, { TourScreen } from '@/components/AppTour';
 import { isEnglishSubject, isEnglishText, getGradeDisplayName, registerStageCatalog } from '@/lib/subject_helpers';
@@ -146,6 +147,8 @@ import {
 } from '@/lib/education_catalog';
 import StudyPathPicker, { isPathComplete, pathSubjects } from '@/components/StudyPathPicker';
 import EducationCatalogManager from '@/components/EducationCatalogManager';
+import VoiceTutor from '@/components/VoiceTutor';
+import { isVoiceInviteEligible } from '@/lib/voice_policy';
 import { speakEnglish, stopSpeech, isPureEnglishVocab, isEnglishSpeechEligible } from '@/lib/speech_helpers';
 import { DEFAULT_STATIC_CURRICULUMS, DEFAULT_DAILY_QUESTS, DEFAULT_DAILY_QUESTS_DATA } from '@/lib/default_curriculums';
 import { buildPricingSnapshot, peakWindowsLabel, type PricingSnapshot } from '@/lib/points_pricing';
@@ -4194,7 +4197,7 @@ const PointsUsageGuide = ({ pricing, isMobile }: { pricing: PricingSnapshot; isM
   );
 };
 
-export type AppTab = 'chat' | 'tasks' | 'admin' | 'beta' | 'subscriptions' | 'profile' | 'exams' | 'flashcards' | 'leaderboard';
+export type AppTab = 'chat' | 'voice' | 'tasks' | 'admin' | 'beta' | 'subscriptions' | 'profile' | 'exams' | 'flashcards' | 'leaderboard';
 
 export interface AppProps {
   initialTab?: AppTab;
@@ -4223,31 +4226,37 @@ export default function App({ initialTab }: AppProps = {}) {
   const [activeTab, setActiveTabRaw] = useState<AppTab>(initialTab || 'chat');
   const [tasksSubject, setTasksSubject] = useState<string>('');
 
+  const activeTabRef = useRef<AppTab>(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  // The URL is pushed outside the state updater: updaters run during render, and pushState there makes
+  // the Next.js router update while App renders.
   const setActiveTab = React.useCallback((action: React.SetStateAction<AppTab>) => {
-    setActiveTabRaw(prev => {
-      const nextTab = typeof action === 'function' ? action(prev) : action;
-      if (typeof window !== 'undefined') {
-        const pathMap: Record<AppTab, string> = {
-          chat: '/chat',
-          exams: '/exams',
-          subscriptions: '/subscriptions',
-          beta: '/subscriptions',
-          flashcards: '/flashcards',
-          leaderboard: '/leaderboard',
-          tasks: '/tasks',
-          profile: '/profile',
-          admin: '/admin',
-        };
-        const targetPath = pathMap[nextTab] || '/chat';
-        const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
-        if (currentPath !== targetPath && !(nextTab === 'chat' && currentPath === '/')) {
-          try {
-            window.history.pushState({ tab: nextTab }, '', targetPath);
-          } catch {}
-        }
-      }
-      return nextTab;
-    });
+    const nextTab = typeof action === 'function' ? action(activeTabRef.current) : action;
+    activeTabRef.current = nextTab;
+    setActiveTabRaw(nextTab);
+    if (typeof window === 'undefined') return;
+    const pathMap: Record<AppTab, string> = {
+      chat: '/chat',
+      voice: '/voice',
+      exams: '/exams',
+      subscriptions: '/subscriptions',
+      beta: '/subscriptions',
+      flashcards: '/flashcards',
+      leaderboard: '/leaderboard',
+      tasks: '/tasks',
+      profile: '/profile',
+      admin: '/admin',
+    };
+    const targetPath = pathMap[nextTab] || '/chat';
+    const currentPath = window.location.pathname.replace(/\/+$/, '') || '/';
+    if (currentPath !== targetPath && !(nextTab === 'chat' && currentPath === '/')) {
+      try {
+        window.history.pushState({ tab: nextTab }, '', targetPath);
+      } catch {}
+    }
   }, []);
 
   useEffect(() => {
@@ -4255,6 +4264,7 @@ export default function App({ initialTab }: AppProps = {}) {
     const path = window.location.pathname.toLowerCase().replace(/\/+$/, '') || '/';
     const pathToTab: Record<string, AppTab> = {
       '/chat': 'chat',
+      '/voice': 'voice',
       '/exams': 'exams',
       '/subscriptions': 'subscriptions',
       '/pricing': 'subscriptions',
@@ -5411,6 +5421,7 @@ export default function App({ initialTab }: AppProps = {}) {
   const [csSelectedSessionId, setCsSelectedSessionId] = useState<string | null>(null);
   const [csConversationSearch, setCsConversationSearch] = useState('');
   const [csConversationSubjectFilter, setCsConversationSubjectFilter] = useState('all');
+  const [csConversationKindFilter, setCsConversationKindFilter] = useState<'all' | 'chat' | 'voice'>('all');
   const [adminStudentOptInFilter, setAdminStudentOptInFilter] = useState<'all' | 'opted_in' | 'opted_out'>('all');
 
   // New Admin Features: Manual Grant, Edit Profile, Direct Notification Modals
@@ -11520,6 +11531,7 @@ export default function App({ initialTab }: AppProps = {}) {
     setCsSelectedSessionId(null);
     setCsConversationSearch('');
     setCsConversationSubjectFilter('all');
+    setCsConversationKindFilter('all');
     try {
       const res = await fetch(`/api/admin/users/conversations?userId=${studentId}`, {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -11628,6 +11640,34 @@ export default function App({ initialTab }: AppProps = {}) {
     }
   };
 
+  const voiceInviteKey = user?.id ? `egs_voice_invite_${user.id}` : '';
+  const [showVoiceInvite, setShowVoiceInvite] = useState(false);
+  const otherPopupOpen = isTourOpen || showAuthModal || showOnboardingModal || showGoogleGradeModal || showUpgradeSheet || showSubjectSheet || showTeacherConfigSheet || showNotebookModal || showRoadmapModal || showIosInstallModal;
+
+  useEffect(() => {
+    if (isInitialLoading || !voiceInviteKey || activeTab !== 'chat' || otherPopupOpen || !isVoiceInviteEligible(user?.created_at)) return;
+    try {
+      if (localStorage.getItem(voiceInviteKey)) return;
+    } catch {
+      return;
+    }
+    const t = setTimeout(() => setShowVoiceInvite(true), 1800);
+    return () => clearTimeout(t);
+  }, [isInitialLoading, voiceInviteKey, activeTab, otherPopupOpen, user?.created_at]);
+
+  const dismissVoiceInvite = (open: boolean) => {
+    try { localStorage.setItem(voiceInviteKey, '1'); } catch {}
+    setShowVoiceInvite(false);
+    if (open) setActiveTab('voice');
+  };
+
+  useEffect(() => {
+    if (!showVoiceInvite) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') dismissVoiceInvite(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   // Initial Preloader Screen (Smooth Gradual Loading & Zero Flash)
   if (isInitialLoading) {
     return (
@@ -11701,6 +11741,7 @@ export default function App({ initialTab }: AppProps = {}) {
       title: 'المذاكرة والذكاء الاصطناعي',
       items: [
         { icon: <MessageSquare size={17} />, label: 'الدردشة والمساعد', action: () => goTab('chat'), isActive: activeTab === 'chat' },
+        { icon: <AudioLines size={17} />, label: 'المعلم الصوتي', action: () => goTab('voice'), isActive: activeTab === 'voice', badge: 'تجريبي' },
         {
           icon: <ListChecks size={17} />,
           label: 'المهام والإنجاز اليومي',
@@ -11998,6 +12039,19 @@ export default function App({ initialTab }: AppProps = {}) {
             </div>
 
             <div className="header-actions">
+              {activeTab === 'chat' && (
+                <button
+                  type="button"
+                  onClick={() => goTab('voice')}
+                  className="header-call-btn"
+                  title="مكالمة صوتية مع المعلم (تجريبي)"
+                  aria-label="مكالمة صوتية مع المعلم"
+                >
+                  <Phone size={16} />
+                  {!isMobile && <span>كلّم المعلم</span>}
+                  <span className="header-call-dot" aria-hidden="true" />
+                </button>
+              )}
               {user && !isMobile && (
                 <>
                   <button
@@ -12728,6 +12782,19 @@ export default function App({ initialTab }: AppProps = {}) {
               </div>
             )}
           </div>
+        )}
+
+        {activeTab === 'voice' && (
+          <VoiceTutor
+            authToken={token}
+            subjects={getActiveSubjectsForGrade(user ? user.grade_level : chatGrade).filter(c => !c.is_placeholder).map(c => c.subject_name)}
+            initialSubject={chatSubject}
+            gradeName={gradeName(user ? user.grade_level : chatGrade)}
+            onSubjectChange={setChatSubject}
+            onUpgrade={() => setActiveTab('subscriptions')}
+            onBack={() => setActiveTab('chat')}
+            onLoginRequired={() => { setAuthTab('login'); setShowAuthModal(true); }}
+          />
         )}
 
         {/* VIEW: Dedicated Tasks and Study Progress Page */}
@@ -18475,6 +18542,27 @@ export default function App({ initialTab }: AppProps = {}) {
       {renderUpgradeSheet()}
       {renderTeacherConfigSheet()}
 
+      {showVoiceInvite && !otherPopupOpen && (
+        <div className="voice-invite-backdrop" onClick={() => dismissVoiceInvite(false)}>
+          <div className="voice-invite" role="dialog" aria-modal="true" aria-labelledby="voice-invite-title" onClick={e => e.stopPropagation()}>
+            <span className="voice-invite-icon"><Phone size={26} /></span>
+            <span className="voice-beta-chip">جديد · تجريبي</span>
+            <h2 id="voice-invite-title">كلّم معلمك بصوتك</h2>
+            <p>اسأل في أي درس واتناقش مع المعلم بالعامية المصرية أو الفصحى، وهو بيدور في كتابك المدرسي قبل ما يشرح. وتقدر تقاطعه في أي وقت.</p>
+            <ul>
+              <li><Check size={14} /> مش بتخصم أي نقاط من رصيدك</li>
+              <li><Check size={14} /> ليها حد استخدام يومي لأنها لسه تجريبية</li>
+            </ul>
+            <div className="voice-invite-actions">
+              <button type="button" className="btn-primary" onClick={() => dismissVoiceInvite(true)} autoFocus>
+                <Phone size={16} /> جرّبها دلوقتي
+              </button>
+              <button type="button" className="voice-link-btn" onClick={() => dismissVoiceInvite(false)}>بعدين</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="toast-region" role="status" aria-live="polite">
         {toasts.map(t => (
           <div key={t.id} className={`toast toast-${t.tone}`}>
@@ -20921,11 +21009,14 @@ export default function App({ initialTab }: AppProps = {}) {
                 const messages = csConversationsData?.messages || [];
 
                 // Filter subjects from sessions
-                const availableSubjects = Array.from(new Set(sessions.map((s: any) => s.subject).filter(Boolean)));
+                const sessionSubject = (s: any) => s.subject_name || s.subject || '';
+                const voiceCount = sessions.filter((s: any) => s.kind === 'voice').length;
+                const availableSubjects = Array.from(new Set(sessions.map(sessionSubject).filter(Boolean)));
 
                 // Filtered sessions
                 const filteredSessions = sessions.filter((s: any) => {
-                  if (csConversationSubjectFilter !== 'all' && s.subject !== csConversationSubjectFilter) return false;
+                  if (csConversationSubjectFilter !== 'all' && sessionSubject(s) !== csConversationSubjectFilter) return false;
+                  if (csConversationKindFilter !== 'all' && (s.kind === 'voice') !== (csConversationKindFilter === 'voice')) return false;
                   if (csConversationSearch.trim()) {
                     const query = csConversationSearch.trim().toLowerCase();
                     const titleMatch = formatSessionTitle(s.title || '').toLowerCase().includes(query);
@@ -20962,11 +21053,33 @@ export default function App({ initialTab }: AppProps = {}) {
                           <span>تحسين AI: مفعل (مصرح بالعرض)</span>
                         </span>
                         <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-                          {sessions.length} جلسة • {messages.length} رسالة مسجلة
+                          {sessions.length} جلسة{voiceCount > 0 ? ` (منها ${voiceCount} مكالمة صوتية)` : ''} • {messages.length} رسالة مسجلة
                         </span>
                       </div>
 
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        {voiceCount > 0 && (
+                          <select
+                            value={csConversationKindFilter}
+                            onChange={(e) => setCsConversationKindFilter(e.target.value as 'all' | 'chat' | 'voice')}
+                            aria-label="نوع الجلسة"
+                            style={{
+                              padding: '6px 10px',
+                              borderRadius: 'var(--radius-sm)',
+                              background: 'var(--card-bg)',
+                              border: '1px solid var(--border-color)',
+                              color: 'var(--text-main)',
+                              fontSize: '0.78rem',
+                              fontWeight: 700,
+                              outline: 'none'
+                            }}
+                          >
+                            <option value="all">كل الجلسات</option>
+                            <option value="chat">المحادثات الكتابية</option>
+                            <option value="voice">المكالمات الصوتية ({voiceCount})</option>
+                          </select>
+                        )}
+
                         {/* Subject Filter */}
                         {availableSubjects.length > 0 && (
                           <select
@@ -21061,7 +21174,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                   <span style={{ fontSize: '0.82rem', fontWeight: 800, color: isCurrent ? 'var(--primary-color)' : 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '190px' }}>
                                     {formatSessionTitle(s.title || 'محادثة عامة')}
                                   </span>
-                                  {s.subject && (
+                                  {sessionSubject(s) && (
                                     <span style={{
                                       fontSize: '0.66rem',
                                       fontWeight: 700,
@@ -21070,10 +21183,23 @@ export default function App({ initialTab }: AppProps = {}) {
                                       background: 'rgba(0, 180, 216, 0.12)',
                                       color: '#00B4D8'
                                     }}>
-                                      {s.subject}
+                                      {sessionSubject(s)}
                                     </span>
                                   )}
                                 </div>
+
+                                {s.kind === 'voice' && (
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', fontSize: '0.68rem' }}>
+                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', padding: '1px 7px', borderRadius: 'var(--radius-full)', background: 'rgba(157, 78, 221, 0.15)', color: '#C084FC', fontWeight: 700 }}>
+                                      <Phone size={11} /> مكالمة صوتية
+                                    </span>
+                                    {s.rating ? (
+                                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', color: '#FFB703', fontWeight: 700 }}>
+                                        <Star size={11} fill="#FFB703" /> {s.rating}/5
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                )}
 
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '0.7rem', color: 'var(--text-muted)' }}>
                                   <span>{sessionMsgs.length} رسالة</span>
@@ -21101,9 +21227,14 @@ export default function App({ initialTab }: AppProps = {}) {
                             <span style={{ fontSize: '0.86rem', fontWeight: 800, color: 'var(--text-main)' }}>
                               {activeSession?.title || 'تفاصيل الجلسة'}
                             </span>
-                            {activeSession?.subject && (
+                            {activeSession && sessionSubject(activeSession) && (
                               <span style={{ fontSize: '0.74rem', color: 'var(--primary-color)', marginRight: '8px' }}>
-                                ({activeSession.subject})
+                                ({sessionSubject(activeSession)})
+                              </span>
+                            )}
+                            {activeSession?.kind === 'voice' && (
+                              <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginRight: '8px' }}>
+                                {activeSession.dialect === 'msa' ? 'فصحى مبسطة' : 'عامية مصرية'} · {activeSession.teacher === 'female' ? 'أستاذة' : 'أستاذ'}{activeSession.rating ? ` · تقييم الطالب ${activeSession.rating}/5` : ''}
                               </span>
                             )}
                           </div>
@@ -21125,6 +21256,15 @@ export default function App({ initialTab }: AppProps = {}) {
                           ) : (
                             activeMessages.map((msg: any, idx: number) => {
                               const isUser = msg.sender === 'user';
+                              if (msg.kind === 'search') {
+                                return (
+                                  <div key={msg.id || idx} style={{ alignSelf: 'center', display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'center', gap: '6px', maxWidth: '100%', padding: '5px 12px', borderRadius: 'var(--radius-sm)', background: 'rgba(157, 78, 221, 0.12)', color: '#C084FC', fontSize: '0.74rem' }}>
+                                    <Search size={12} />
+                                    <span style={{ overflowWrap: 'anywhere' }}>بحث في الكتاب: {msg.message}</span>
+                                    {msg.sources?.length > 0 && <span style={{ color: 'var(--text-muted)', overflowWrap: 'anywhere' }}>({msg.sources.join('، ')})</span>}
+                                  </div>
+                                );
+                              }
                               return (
                                 <div
                                   key={msg.id || idx}
@@ -21141,7 +21281,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                       fontWeight: 800,
                                       color: isUser ? 'var(--primary-color)' : 'var(--secondary-color)'
                                     }}>
-                                      {isUser ? (csConversationsData?.student?.name || 'الطالب') : 'المعلم الذكي (EGS AI)'}
+                                      {isUser ? (csConversationsData?.student?.name || 'الطالب') : msg.kind === 'voice' ? 'المعلم الصوتي' : 'المعلم الذكي (EGS AI)'}
                                     </span>
                                     <span>•</span>
                                     <span>{msg.created_at ? new Date(msg.created_at).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : ''}</span>
@@ -21166,6 +21306,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                   }}>
                                     {(() => {
                                       const text = msg.message || '';
+                                      if (msg.kind === 'voice') return msg.interrupted ? `${text} (اتقاطع)` : text;
                                       if (text.includes('VOICE_MESSAGE:')) {
                                         const voiceMatch = text.match(/\[?VOICE_MESSAGE:duration=([0-9.]+);mime=([\s\S]*?);audio=([\s\S]*?)\]([\s\S]*)/);
                                         if (voiceMatch) {

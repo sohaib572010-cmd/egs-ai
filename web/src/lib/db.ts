@@ -18,6 +18,41 @@ export function isExistingAccountForApology(profile: { created_at?: string; term
 }
 
 // Types
+export interface VoiceUsageRow {
+  user_id: string;
+  date: string;
+  seconds_used: number;
+  calls: number;
+  active_call_id: string | null;
+  call_started_at: string | null;
+  call_reserved: number;
+  last_beat_at: string | null;
+  key_slot?: number | null;
+  updated_at?: string;
+}
+
+export interface VoiceCallEntry {
+  role: 'student' | 'teacher' | 'search';
+  text: string;
+  at: string;
+  interrupted?: boolean;
+  sources?: string[];
+}
+
+export interface VoiceCallRow {
+  id: string;
+  user_id: string;
+  subject_name: string;
+  grade_level: string;
+  dialect: string;
+  teacher: string;
+  started_at: string;
+  ended_at?: string | null;
+  duration_seconds?: number | null;
+  rating?: number | null;
+  transcript: VoiceCallEntry[];
+}
+
 export interface Profile {
   id: string;
   phone?: string;
@@ -408,7 +443,9 @@ function initLocalDB() {
       curriculum_relations: [],
       user_lesson_progress: [],
       study_notebook: [],
-      claimed_daily_quests: []
+      claimed_daily_quests: [],
+      voice_usage: [],
+      voice_calls: []
     };
     fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), 'utf8');
   }
@@ -478,7 +515,9 @@ function getMemoryDB(): any {
       curriculum_relations: [],
       user_lesson_progress: [],
       study_notebook: [],
-      claimed_daily_quests: []
+      claimed_daily_quests: [],
+      voice_usage: [],
+      voice_calls: []
     };
   }
   return globalThis.__egs_memory_db;
@@ -627,7 +666,7 @@ function readLocalDB() {
       'exams', 'exam_submissions', 'reports', 'notifications',
       'app_versions', 'password_resets', 'curriculum_entities',
       'curriculum_relations', 'free_trial_grants', 'user_devices',
-      'user_lesson_progress', 'study_notebook', 'claimed_daily_quests'
+      'user_lesson_progress', 'study_notebook', 'claimed_daily_quests', 'voice_usage', 'voice_calls'
     ];
     for (const table of tables) {
       if (!parsed[table]) {
@@ -5025,6 +5064,8 @@ export const db = {
         await supabase.from('account_deletions').delete().eq('user_id', id);
         await supabase.from('user_devices').delete().eq('user_id', id);
         await supabase.from('notifications').delete().eq('user_id', id);
+        await supabase.from('voice_calls').delete().eq('user_id', id);
+        await supabase.from('voice_usage').delete().eq('user_id', id);
       } catch (e) {
         console.warn('deleteUser related tables cleanup notice:', e);
       }
@@ -5045,6 +5086,8 @@ export const db = {
       if (data.payment_transactions) data.payment_transactions = data.payment_transactions.filter((pt: any) => pt.user_id !== id);
       if (data.user_devices) data.user_devices = data.user_devices.filter((ud: any) => ud.user_id !== id);
       if (data.notifications) data.notifications = data.notifications.filter((n: any) => n.user_id !== id);
+      if (data.voice_calls) data.voice_calls = data.voice_calls.filter((v: any) => v.user_id !== id);
+      if (data.voice_usage) data.voice_usage = data.voice_usage.filter((v: any) => v.user_id !== id);
       writeLocalDB(data);
       return true;
     }
@@ -6689,6 +6732,70 @@ export const db = {
 
     return { success: true, pointsAwarded, totalPoints };
 
+  },
+
+  // Voice Tutor usage: Supabase table `voice_usage`, local store when it is unavailable or not yet migrated
+  async getVoiceUsage(userId: string, date: string): Promise<VoiceUsageRow | null> {
+    if (supabase) {
+      const { data, error } = await supabase.from('voice_usage').select('*').eq('user_id', userId).eq('date', date).maybeSingle();
+      if (!error) return (data as VoiceUsageRow) || null;
+    }
+    const local = readLocalDB();
+    return (local.voice_usage || []).find((r: VoiceUsageRow) => r.user_id === userId && r.date === date) || null;
+  },
+
+  async saveVoiceUsage(row: VoiceUsageRow): Promise<void> {
+    const record = { ...row, updated_at: new Date().toISOString() };
+    if (supabase) {
+      const { error } = await supabase.from('voice_usage').upsert(record, { onConflict: 'user_id,date' });
+      if (!error) return;
+    }
+    const local = readLocalDB();
+    const rows: VoiceUsageRow[] = local.voice_usage || [];
+    const i = rows.findIndex(r => r.user_id === row.user_id && r.date === row.date);
+    if (i >= 0) rows[i] = record; else rows.push(record);
+    local.voice_usage = rows;
+    writeLocalDB(local);
+  },
+
+  // Voice Tutor call logs (admin conversation viewer): Supabase `voice_calls`, local store as fallback
+  async createVoiceCall(call: VoiceCallRow): Promise<void> {
+    if (supabase) {
+      const { error } = await supabase.from('voice_calls').insert(call);
+      if (!error) return;
+    }
+    const local = readLocalDB();
+    local.voice_calls = [...(local.voice_calls || []), call];
+    writeLocalDB(local);
+  },
+
+  async updateVoiceCall(callId: string, userId: string, change: (call: VoiceCallRow) => Partial<VoiceCallRow>): Promise<boolean> {
+    if (supabase) {
+      const { data, error } = await supabase.from('voice_calls').select('*').eq('id', callId).eq('user_id', userId).maybeSingle();
+      if (!error) {
+        if (!data) return false;
+        const { error: updateError } = await supabase.from('voice_calls').update(change(data as VoiceCallRow)).eq('id', callId).eq('user_id', userId);
+        if (!updateError) return true;
+      }
+    }
+    const local = readLocalDB();
+    const call = (local.voice_calls || []).find((c: VoiceCallRow) => c.id === callId && c.user_id === userId);
+    if (!call) return false;
+    Object.assign(call, change(call));
+    writeLocalDB(local);
+    return true;
+  },
+
+  async getVoiceCalls(userId: string): Promise<VoiceCallRow[]> {
+    if (supabase) {
+      const { data, error } = await supabase.from('voice_calls').select('*').eq('user_id', userId).order('started_at', { ascending: false }).limit(100);
+      if (!error) return (data as VoiceCallRow[]) || [];
+    }
+    const local = readLocalDB();
+    return (local.voice_calls || [])
+      .filter((c: VoiceCallRow) => c.user_id === userId)
+      .sort((a: VoiceCallRow, b: VoiceCallRow) => b.started_at.localeCompare(a.started_at))
+      .slice(0, 100);
   }
 };
 
