@@ -36,9 +36,9 @@ export async function GET(req: NextRequest) {
     const result = await db.getUsers(search, { tier, grade_level });
     const rawUsers = result.users || [];
 
-    const usersWithDevices = await Promise.all(
-      rawUsers.map(async (u) => {
-        const devices = await db.getUserActiveDevices(u.id);
+    const devicesByUser = await db.getActiveDevicesByUser(rawUsers.map(u => u.id));
+    const usersWithDevices = rawUsers.map((u) => {
+        const devices = devicesByUser.get(u.id) || [];
         return {
           ...u,
           active_devices_count: devices.length,
@@ -50,8 +50,7 @@ export async function GET(req: NextRequest) {
             ip_address: d.ip_address
           }))
         };
-      })
-    );
+      });
 
     return NextResponse.json({
       success: true,

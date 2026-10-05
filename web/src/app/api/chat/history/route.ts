@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
+import { resolveMediaRefs } from '@/lib/chat_media';
 
 export async function GET(req: NextRequest) {
   try {
@@ -72,10 +73,9 @@ export async function GET(req: NextRequest) {
     }
 
     // Retrieve history
-    const history = await db.getChatHistory(userId || undefined, deviceId || undefined, sessionId || undefined);
-
-    // Limit return logs to last 100 entries for client optimization
-    const cappedHistory = history.slice(-100);
+    const cappedHistory = await resolveMediaRefs(
+      await db.getChatHistory(userId || undefined, deviceId || undefined, sessionId || undefined, 100)
+    );
 
     return NextResponse.json({
       success: true,

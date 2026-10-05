@@ -1,87 +1,40 @@
 import type { MetadataRoute } from 'next';
+import { FEATURES, SITE_URL } from '@/lib/seo';
+
+type Entry = [path: string, priority: number, changeFrequency: 'daily' | 'weekly' | 'monthly'];
+
+const PAGES: Entry[] = [
+  ['/', 1.0, 'daily'],
+  ['/chat', 0.95, 'daily'],
+  ['/voice', 0.95, 'weekly'],
+  ['/exams', 0.95, 'weekly'],
+  ['/flashcards', 0.9, 'weekly'],
+  ['/subscriptions', 0.9, 'weekly'],
+  ['/features', 0.9, 'weekly'],
+  ['/tasks', 0.75, 'weekly'],
+  ['/leaderboard', 0.75, 'daily'],
+  ['/download', 0.8, 'monthly'],
+  ['/sponsor', 0.7, 'monthly'],
+  ['/contact', 0.6, 'monthly'],
+  ['/privacy', 0.4, 'monthly'],
+  ['/terms', 0.4, 'monthly'],
+  ['/delete-account', 0.3, 'monthly']
+];
+
+const LAST_CONTENT_UPDATE = new Date('2026-10-05');
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const baseUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://egsaiedu.com';
-  const now = new Date();
-
-  return [
-    {
-      url: baseUrl,
-      lastModified: now,
-      changeFrequency: 'daily',
-      priority: 1.0,
-    },
-    {
-      url: `${baseUrl}/chat`,
-      lastModified: now,
-      changeFrequency: 'daily',
-      priority: 0.95,
-    },
-    {
-      url: `${baseUrl}/exams`,
-      lastModified: now,
-      changeFrequency: 'daily',
-      priority: 0.95,
-    },
-    {
-      url: `${baseUrl}/subscriptions`,
-      lastModified: now,
-      changeFrequency: 'weekly',
-      priority: 0.95,
-    },
-    {
-      url: `${baseUrl}/flashcards`,
-      lastModified: now,
-      changeFrequency: 'weekly',
-      priority: 0.85,
-    },
-    {
-      url: `${baseUrl}/leaderboard`,
-      lastModified: now,
-      changeFrequency: 'daily',
-      priority: 0.8,
-    },
-    {
-      url: `${baseUrl}/tasks`,
-      lastModified: now,
-      changeFrequency: 'weekly',
-      priority: 0.8,
-    },
-    {
-      url: `${baseUrl}/download`,
-      lastModified: now,
-      changeFrequency: 'weekly',
-      priority: 0.9,
-    },
-    {
-      url: `${baseUrl}/sponsor`,
-      lastModified: now,
-      changeFrequency: 'weekly',
-      priority: 0.8,
-    },
-    {
-      url: `${baseUrl}/contact`,
-      lastModified: now,
-      changeFrequency: 'monthly',
-      priority: 0.8,
-    },
-    {
-      url: `${baseUrl}/terms`,
-      lastModified: now,
-      changeFrequency: 'monthly',
-      priority: 0.5,
-    },
-    {
-      url: `${baseUrl}/privacy`,
-      lastModified: now,
-      changeFrequency: 'monthly',
-      priority: 0.5,
-    },
-    {
-      url: `${baseUrl}/delete-account`,
-      lastModified: now,
-      changeFrequency: 'monthly',
-      priority: 0.3,
-    },
-  ];
+  const pages = PAGES.map(([path, priority, changeFrequency]) => ({
+    url: `${SITE_URL}${path === '/' ? '' : path}`,
+    lastModified: LAST_CONTENT_UPDATE,
+    changeFrequency,
+    priority
+  }));
+  const features = FEATURES.map(f => ({
+    url: `${SITE_URL}/features/${f.slug}`,
+    lastModified: LAST_CONTENT_UPDATE,
+    changeFrequency: 'monthly' as const,
+    priority: 0.85
+  }));
+  return [...pages, ...features];
 }

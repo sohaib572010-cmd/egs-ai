@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db, type VoiceCallRow } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
+import { resolveMediaRefs } from '@/lib/chat_media';
 
 const formatDuration = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
@@ -96,7 +97,7 @@ export async function GET(req: NextRequest) {
     const voice = voiceCallsAsSessions(voiceCalls);
     const sessions = [...(chatSessions || []), ...voice.sessions]
       .sort((a: { created_at?: string }, b: { created_at?: string }) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
-    const messages = [...(chatMessages || []), ...voice.messages];
+    const messages = [...(await resolveMediaRefs(chatMessages || [])), ...voice.messages];
 
     return NextResponse.json({
       success: true,

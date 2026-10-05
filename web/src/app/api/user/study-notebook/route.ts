@@ -41,14 +41,7 @@ export async function GET(req: NextRequest) {
       }
 
       // Search user chat history for matching message content
-      const history = await db.getChatHistory(userId);
-      const match = history.find(ch => 
-        ch.sender === 'ai' &&
-        ch.message &&
-        (ch.message === targetNote.content ||
-         ch.message.includes(targetNote.content.trim().slice(0, 50)) ||
-         targetNote.content.includes(ch.message.trim().slice(0, 50)))
-      );
+      const match = await db.findUserAiMessage(userId, targetNote.content);
 
       return NextResponse.json({
         success: true,

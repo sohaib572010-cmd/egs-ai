@@ -17,6 +17,7 @@ import { getExhaustiveLessonContext, curriculumTextContains, findCurriculumFor, 
 import { getGradeDisplayName } from '@/lib/subject_helpers';
 import { acquireAiSlot, releaseAiSlot, chargeForUsage, usageFromProvider, estimateUsage, AI_BUSY_RESPONSE, type ChargeResult } from '@/lib/metering';
 import { RAG_OVERHEAD_USAGE, VISION_USAGE, type TokenUsage } from '@/lib/points_pricing';
+import { offloadInlineMedia } from '@/lib/chat_media';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -426,15 +427,16 @@ export async function POST(req: NextRequest) {
     const { cleanText, imageDesc: initialImageDesc, imageBase64, imageMime, isVoice, voiceDuration } = parsedMsg;
     let promptText = buildPromptText(cleanText, initialImageDesc, isVoice, voiceDuration);
 
-    // Save user message before streaming
-    await db.addChatMessage('user', message, userId, undefined, activeSessionId);
+    // Save user message before streaming; photos and voice notes go to object storage, not the row
+    const storedMessage = (parsedMsg.hasImage || isVoice) ? await offloadInlineMedia(message, userId as string) : message;
+    await db.addChatMessage('user', storedMessage, userId, undefined, activeSessionId);
 
     // Fetch recent message history (prior to the current turn)
     let recentHistory: any[] = [];
     let ongoingLessonTitle: string | null = null;
     let roadmapMsg: any = null;
 
-    const rawHistory = await db.getChatHistory(undefined, undefined, activeSessionId);
+    const rawHistory = await db.getChatHistory(undefined, undefined, activeSessionId, 60);
     const priorHistory = (rawHistory && rawHistory.length > 0)
       ? rawHistory.slice(0, -1)
       : sanitizeClientHistory(history);

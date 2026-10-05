@@ -1,27 +1,12 @@
-import type { Metadata } from 'next';
+import { pageMetadata } from '@/lib/seo_metadata';
 
-export const metadata: Metadata = {
-  title: 'رعاية اشتراك طالب | منصة EGS AI التعليمية',
-  description: 'ساهم في دعم ورعاية اشتراك طالب مصري في منصة EGS AI للذكاء الاصطناعي للمناهج الدراسية لمساعدته في التفوق الدراسي.',
-  keywords: [
-    'رعاية طالب علم',
-    'اشتراك EGS AI',
-    'دعم طلاب الثانوية العامة',
-    'EGS AI sponsorship'
-  ],
-  alternates: {
-    canonical: '/sponsor',
-  },
-  robots: {
-    index: true,
-    follow: true,
-  }
-};
+export const metadata = pageMetadata({
+  title: 'رعاية اشتراك طالب: ادفع اشتراك ابنك في EGS AI',
+  description: 'ولي الأمر يمكنه دفع اشتراك الطالب في EGS AI من جهازه برابط الرعاية، ويتفعل الاشتراك فوراً على حساب الطالب. الدفع بالفيزا والمحافظ الإلكترونية وإنستاباي.',
+  path: '/sponsor',
+  keywords: ['اشتراك ولي الأمر', 'دفع اشتراك الطالب', 'رعاية طالب EGS AI']
+});
 
-export default function SponsorLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return <>{children}</>;
+export default function SponsorLayout({ children }: { children: React.ReactNode }) {
+  return children;
 }

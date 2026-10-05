@@ -530,11 +530,11 @@ export function cleanupOrphanedTmpFiles() {
     const fs = require('fs');
     const path = require('path');
     const dir = '.';
-    const files = fs.readdirSync(dir);
+    const files = fs.readdirSync(/*turbopackIgnore: true*/ dir);
     for (const file of files) {
       if (file.startsWith('db_data.json.tmp')) {
         try {
-          fs.unlinkSync(path.join(dir, file));
+          fs.unlinkSync(path.join(/*turbopackIgnore: true*/ dir, file));
         } catch {
           // Ignore unlink errors on locked files
         }
@@ -746,7 +746,28 @@ const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const isSupabaseEnabled = supabaseUrl !== '' && supabaseServiceKey !== '';
 
-const supabase = isSupabaseEnabled ? createClient(supabaseUrl, supabaseServiceKey) : null;
+const supabase = isSupabaseEnabled
+  ? createClient(supabaseUrl, supabaseServiceKey, { auth: { persistSession: false, autoRefreshToken: false } })
+  : null;
+
+export const supabaseAdmin = supabase;
+
+
+// last_active_at is informational (device list); writing it on every request is wasted I/O.
+const DEVICE_ACTIVITY_WRITE_INTERVAL_MS = 5 * 60 * 1000;
+const deviceActivityWrites = new Map<string, number>();
+
+async function deleteUserMedia(userId: string): Promise<void> {
+  if (!supabase) return;
+  const bucket = supabase.storage.from('chat-media');
+  const { data: folders } = await bucket.list(userId, { limit: 1000 });
+  for (const folder of folders || []) {
+    const prefix = `${userId}/${folder.name}`;
+    const { data: files } = await bucket.list(prefix, { limit: 1000 });
+    const paths = (files || []).map(f => `${prefix}/${f.name}`);
+    if (paths.length) await bucket.remove(paths);
+  }
+}
 
 if (isSupabaseEnabled) {
   console.log("Database Mode: Supabase Cloud Database Connected.");
@@ -2543,6 +2564,7 @@ export const db = {
         .from('curriculum_chunks')
         .select('content')
         .eq('curriculum_id', currList[0].id)
+        .lt('position_index', 0)
         .eq('heading', '__CURRICULUM_SUMMARY__')
         .limit(1)
         .single();
@@ -2787,9 +2809,10 @@ export const db = {
   },
 
   // Chat History Logging
-  async getChatHistory(userId?: string, deviceId?: string, sessionId?: string): Promise<ChatMessage[]> {
+  // Oldest-first; with `limit`, only the most recent `limit` messages are read.
+  async getChatHistory(userId?: string, deviceId?: string, sessionId?: string, limit?: number): Promise<ChatMessage[]> {
     if (supabase) {
-      let query = supabase.from('chat_history').select('*');
+      let query = supabase.from('chat_history').select('id, user_id, device_id, session_id, sender, message, coins_cost, created_at');
       if (sessionId) {
         query = query.eq('session_id', sessionId);
       } else if (userId) {
@@ -2799,20 +2822,43 @@ export const db = {
       } else {
         return [];
       }
+      if (limit) {
+        const { data, error } = await query.order('created_at', { ascending: false }).limit(limit);
+        return error || !data ? [] : data.reverse();
+      }
       const { data, error } = await query.order('created_at', { ascending: true });
       if (error) return [];
       return data;
     } else {
       const data = readLocalDB();
+      let rows: ChatMessage[] = [];
       if (sessionId) {
-        return data.chat_history.filter((chat: ChatMessage) => chat.session_id === sessionId);
+        rows = data.chat_history.filter((chat: ChatMessage) => chat.session_id === sessionId);
       } else if (userId) {
-        return data.chat_history.filter((chat: ChatMessage) => chat.user_id === userId);
+        rows = data.chat_history.filter((chat: ChatMessage) => chat.user_id === userId);
       } else if (deviceId) {
-        return data.chat_history.filter((chat: ChatMessage) => chat.device_id === deviceId);
+        rows = data.chat_history.filter((chat: ChatMessage) => chat.device_id === deviceId);
       }
-      return [];
+      return limit ? rows.slice(-limit) : rows;
     }
+  },
+
+  async findUserAiMessage(userId: string, snippet: string): Promise<ChatMessage | null> {
+    const needle = snippet.trim().slice(0, 50);
+    if (!needle) return null;
+    if (supabase) {
+      const { data } = await supabase
+        .from('chat_history')
+        .select('id, session_id, sender, message, created_at')
+        .eq('user_id', userId)
+        .eq('sender', 'ai')
+        .ilike('message', `%${needle.replace(/[%_\\]/g, m => `\\${m}`)}%`)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      return (data && data[0]) || null;
+    }
+    const data = readLocalDB();
+    return (data.chat_history || []).find((m: ChatMessage) => m.user_id === userId && m.sender === 'ai' && m.message?.includes(needle)) || null;
   },
 
   async addChatMessage(sender: 'user' | 'ai', message: string, userId?: string, deviceId?: string, sessionId?: string, coinsCost?: number): Promise<ChatMessage> {
@@ -3093,6 +3139,7 @@ export const db = {
         .from('curriculum_chunks')
         .select('content')
         .eq('curriculum_id', id)
+        .lt('position_index', 0)
         .eq('heading', '__RAW_MARKDOWN__')
         .maybeSingle();
 
@@ -4662,86 +4709,37 @@ export const db = {
     };
   }> {
     if (supabase) {
-      const [
-        { data: rawProfiles, error },
-        { data: userMessages },
-        { data: userExams },
-        { data: userSubmissions },
-        { data: userDecks },
-        { data: allCards }
-      ] = await Promise.all([
-        supabase.from('profiles').select('*').eq('role', 'student').order('created_at', { ascending: false }),
-        supabase.from('chat_history').select('user_id, created_at').eq('sender', 'user'),
-        supabase.from('exams').select('user_id'),
-        supabase.from('exam_submissions').select('user_id'),
-        supabase.from('flashcard_decks').select('id, user_id'),
-        supabase.from('flashcards').select('deck_id')
-      ]);
-      
-      if (error || !rawProfiles) {
+      let rawProfiles: any[];
+      let activityRows: any[];
+      try {
+        [rawProfiles, activityRows] = await Promise.all([
+          fetchAllRows<any>((from, to) =>
+            supabase!.from('profiles').select('*').eq('role', 'student').order('created_at', { ascending: false }).range(from, to)
+          ),
+          fetchAllRows<any>((from, to) => supabase!.rpc('admin_user_activity').range(from, to)).catch(() => [])
+        ]);
+      } catch (error) {
         console.error('getUsers Supabase query error:', error);
         return { users: [], counts: { total: 0, subscribed: 0, free: 0, expired: 0, pwa: 0 } };
       }
-
-      const messageCounts: Record<string, number> = {};
-      const userChatDaysMap: Record<string, Set<string>> = {};
-      userMessages?.forEach((m: any) => {
-        if (m.user_id) {
-          messageCounts[m.user_id] = (messageCounts[m.user_id] || 0) + 1;
-          if (m.created_at) {
-            if (!userChatDaysMap[m.user_id]) userChatDaysMap[m.user_id] = new Set<string>();
-            try {
-              const d = new Date(m.created_at).toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
-              userChatDaysMap[m.user_id].add(d);
-            } catch (_) {
-              userChatDaysMap[m.user_id].add(m.created_at.slice(0, 10));
-            }
-          }
-        }
-      });
-
-      const examCreatedCounts: Record<string, number> = {};
-      userExams?.forEach((e: any) => {
-        if (e.user_id) examCreatedCounts[e.user_id] = (examCreatedCounts[e.user_id] || 0) + 1;
-      });
-
-      const examCompletedCounts: Record<string, number> = {};
-      userSubmissions?.forEach((s: any) => {
-        if (s.user_id) examCompletedCounts[s.user_id] = (examCompletedCounts[s.user_id] || 0) + 1;
-      });
-
-      const deckCounts: Record<string, number> = {};
-      const deckUserMap: Record<string, string> = {};
-      userDecks?.forEach((d: any) => {
-        if (d.user_id) {
-          deckCounts[d.user_id] = (deckCounts[d.user_id] || 0) + 1;
-          if (d.id) deckUserMap[d.id] = d.user_id;
-        }
-      });
-
-      const cardCounts: Record<string, number> = {};
-      allCards?.forEach((c: any) => {
-        if (c.deck_id && deckUserMap[c.deck_id]) {
-          const uId = deckUserMap[c.deck_id];
-          cardCounts[uId] = (cardCounts[uId] || 0) + 1;
-        }
-      });
+      const activity = new Map<string, any>(activityRows.map((a: any) => [a.user_id, a]));
 
       const optedOutIds = await getAllOptedOutUserIds();
-      const allProfiles = rawProfiles.map((p: any) => {
+      const allProfiles = rawProfiles.map(({ password_hash: _hash, ...p }: any) => {
         const isSub = (p.subscription_status === 'active') || (p.plan_type && p.plan_type !== 'free');
         const isExp = p.subscription_status === 'expired';
+        const a = activity.get(p.id);
         return {
           ...p,
           subscription_status: p.subscription_status || (isSub ? 'active' : (isExp ? 'expired' : 'inactive')),
           subscription_start_date: p.subscription_start_date || (isSub ? p.created_at : null),
           subscription_end_date: p.subscription_end_date || null,
-          messages_sent_count: messageCounts[p.id] || 0,
-          active_chat_days_count: userChatDaysMap[p.id]?.size || 0,
-          exams_created_count: examCreatedCounts[p.id] || 0,
-          exams_completed_count: examCompletedCounts[p.id] || 0,
-          flashcard_decks_count: deckCounts[p.id] || 0,
-          flashcards_created_count: cardCounts[p.id] || 0,
+          messages_sent_count: Number(a?.messages_sent || 0),
+          active_chat_days_count: Number(a?.active_days || 0),
+          exams_created_count: Number(a?.exams_created || 0),
+          exams_completed_count: Number(a?.exams_completed || 0),
+          flashcard_decks_count: Number(a?.decks || 0),
+          flashcards_created_count: Number(a?.cards || 0),
           pwa_installed: !!p.pwa_installed,
           pwa_installed_at: p.pwa_installed_at || null,
           pwa_platform: p.pwa_platform || null,
@@ -5056,6 +5054,7 @@ export const db = {
   async deleteUser(id: string): Promise<boolean> {
     if (supabase) {
       try {
+        await deleteUserMedia(id).catch(err => console.error('Error deleting user media:', err));
         await supabase.from('chat_history').delete().eq('user_id', id);
         await supabase.from('exams').delete().eq('user_id', id);
         await supabase.from('reports').delete().eq('user_id', id);
@@ -6003,6 +6002,33 @@ export const db = {
     }
   },
 
+  async getActiveDevicesByUser(userIds: string[]): Promise<Map<string, UserDevice[]>> {
+    const byUser = new Map<string, UserDevice[]>();
+    if (userIds.length === 0) return byUser;
+    let rows: UserDevice[] = [];
+    if (supabase) {
+      for (let i = 0; i < userIds.length; i += 300) {
+        const { data } = await supabase
+          .from('user_devices')
+          .select('*')
+          .in('user_id', userIds.slice(i, i + 300))
+          .eq('is_active', true)
+          .order('last_active_at', { ascending: false });
+        if (data) rows = rows.concat(data);
+      }
+    } else {
+      const ids = new Set(userIds);
+      rows = (readLocalDB().user_devices || [])
+        .filter((d: UserDevice) => ids.has(d.user_id) && d.is_active)
+        .sort((a: UserDevice, b: UserDevice) => new Date(b.last_active_at).getTime() - new Date(a.last_active_at).getTime());
+    }
+    for (const d of rows) {
+      const list = byUser.get(d.user_id);
+      if (list) list.push(d); else byUser.set(d.user_id, [d]);
+    }
+    return byUser;
+  },
+
   async getUserDeviceCount(userId: string): Promise<number> {
     const devices = await this.getUserActiveDevices(userId);
     return devices.length;
@@ -6161,9 +6187,9 @@ export const db = {
       try {
         const { data } = await supabase
           .from('user_devices')
-          .select('*')
+          .select('device_id, session_token, is_active')
           .eq('user_id', userId);
-        devices = data || [];
+        devices = (data || []) as UserDevice[];
       } catch (err) {
         console.error('Error validating device session in Supabase:', err);
         return { valid: true };
@@ -6201,7 +6227,12 @@ export const db = {
   },
 
   async updateDeviceActivity(userId: string, deviceId: string): Promise<void> {
-    const nowIso = new Date().toISOString();
+    const key = `${userId}:${deviceId}`;
+    const now = Date.now();
+    if (now - (deviceActivityWrites.get(key) || 0) < DEVICE_ACTIVITY_WRITE_INTERVAL_MS) return;
+    deviceActivityWrites.set(key, now);
+    if (deviceActivityWrites.size > 20000) deviceActivityWrites.clear();
+    const nowIso = new Date(now).toISOString();
     if (supabase) {
       try {
         await supabase
@@ -6537,7 +6568,7 @@ export const db = {
 
   // ─── Daily Quests & Habit Formation System ──────────────────────────────────
 
-  async getDailyQuests(userId: string): Promise<DailyQuestProgress> {
+  async getDailyQuests(userId: string, knownProfile?: Profile | null): Promise<DailyQuestProgress> {
     const existingPromise = inFlightDailyQuests.get(userId);
     if (existingPromise) {
       return existingPromise;
@@ -6545,7 +6576,7 @@ export const db = {
 
     const fetchPromise = (async () => {
       const todayCairo = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Cairo' });
-      const profile = await this.getProfile(userId);
+      const profile = knownProfile ?? await this.getProfile(userId);
       const streakDays = profile?.study_streak || 1;
 
       // Check today's user activity

@@ -1,31 +1,7 @@
-import type { Metadata } from 'next';
+import { featureRouteMetadata } from '@/lib/seo_metadata';
 
-export const metadata: Metadata = {
-  title: 'توليد وبنك الامتحانات التفاعلية بالذكاء الاصطناعي للمناهج المصرية | EGS AI',
-  description: 'اختبر نفسك فوراً في أي مادة أو وحدة دراسية للمرحلتين الإعدادية والثانوية. توليد امتحانات إلكترونية ذكية مطابقة لمواصفات وزارة التربية والتعليم والتقييم مع التصحيح التلقائي وتوضيح الإجابات النموذجية.',
-  keywords: [
-    'امتحانات إلكترونية بالذكاء الاصطناعي',
-    'امتحانات الثانوية العامة',
-    'امتحانات الشهادة الإعدادية',
-    'بنك أسئلة المناهج المصرية',
-    'اختبارات تفاعلية',
-    'تصحيح امتحانات فوري',
-    'EGS AI exams'
-  ],
-  alternates: {
-    canonical: '/exams',
-  },
-  openGraph: {
-    title: 'بنك وامتحانات الذكاء الاصطناعي للمناهج المصرية | EGS AI',
-    description: 'توليد امتحانات إلكترونية تفاعلية وتصحيح فوري وشرح الأخطاء خطوة بخطوة بالذكاء الاصطناعي.',
-    url: 'https://egsaiedu.com/exams',
-  }
-};
+export const metadata = featureRouteMetadata('quizzes-exams');
 
-export default function ExamsLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
-  return <>{children}</>;
+export default function ExamsLayout({ children }: { children: React.ReactNode }) {
+  return children;
 }

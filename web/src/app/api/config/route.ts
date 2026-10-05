@@ -33,9 +33,7 @@ export async function GET(req: NextRequest) {
           profile = await db.getProfile(userId);
           if (profile) {
             authValid = true;
-            try {
-              dailyQuests = await db.getDailyQuests(userId);
-            } catch (e) {}
+            dailyQuests = await db.getDailyQuests(userId, profile).catch(() => null);
           }
         }
       } catch (e) {}

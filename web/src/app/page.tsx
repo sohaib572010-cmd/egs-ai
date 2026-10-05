@@ -126,7 +126,9 @@ import {
   Mail,
   AudioLines
 } from 'lucide-react';
-import AppTour, { TourScreen } from '@/components/AppTour';
+import { TAB_TITLES } from '@/lib/seo';
+import dynamic from 'next/dynamic';
+import type { TourScreen } from '@/components/AppTour';
 import { isEnglishSubject, isEnglishText, getGradeDisplayName, registerStageCatalog } from '@/lib/subject_helpers';
 import {
   DEFAULT_EDUCATION_CATALOG,
@@ -146,13 +148,16 @@ import {
   type StudentPath
 } from '@/lib/education_catalog';
 import StudyPathPicker, { isPathComplete, pathSubjects } from '@/components/StudyPathPicker';
-import EducationCatalogManager from '@/components/EducationCatalogManager';
-import VoiceTutor from '@/components/VoiceTutor';
 import { isVoiceInviteEligible } from '@/lib/voice_policy';
 import { speakEnglish, stopSpeech, isPureEnglishVocab, isEnglishSpeechEligible } from '@/lib/speech_helpers';
 import { DEFAULT_STATIC_CURRICULUMS, DEFAULT_DAILY_QUESTS, DEFAULT_DAILY_QUESTS_DATA } from '@/lib/default_curriculums';
 import { buildPricingSnapshot, peakWindowsLabel, type PricingSnapshot } from '@/lib/points_pricing';
 import { KASHIER_PLANS } from '@/lib/plans';
+
+// Loaded on demand: the tour, the voice tutor and the admin catalog editor are not needed for first paint.
+const AppTour = dynamic(() => import('@/components/AppTour'), { ssr: false });
+const VoiceTutor = dynamic(() => import('@/components/VoiceTutor'), { ssr: false });
+const EducationCatalogManager = dynamic(() => import('@/components/EducationCatalogManager'), { ssr: false });
 
 interface SearchStep {
   step: string;
@@ -541,6 +546,10 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
     return f.replace(/\s+/g, ' ').trim();
   };
 
+  // Chat media is a signed storage URL (current) or inline base64 (legacy rows and the pending upload)
+  const mediaSrc = (mime: string, data: string): string =>
+    /^(https?:|data:|blob:)/.test(data) ? data : `data:${mime};base64,${data}`;
+
   // Helper to format chat session titles cleanly, preventing protocol tags from appearing as garbled text
   const formatSessionTitle = (rawTitle?: string): string => {
     if (!rawTitle) return 'محادثة جديدة';
@@ -592,13 +601,13 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
     const [showTranscript, setShowTranscript] = useState(false);
     const audioRef = useRef<HTMLAudioElement | null>(null);
 
-    const audioSrc = audioBase64
-      ? (audioBase64.startsWith('data:') ? audioBase64 : `data:${mimeType};base64,${audioBase64}`)
-      : '';
+    const audioSrc = audioBase64 ? mediaSrc(mimeType, audioBase64) : '';
 
     useEffect(() => {
       if (!audioSrc) return;
-      const audio = new Audio(audioSrc);
+      const audio = new Audio();
+      audio.preload = 'none';
+      audio.src = audioSrc;
       audioRef.current = audio;
 
       audio.ontimeupdate = () => {
@@ -648,7 +657,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
       <div className="voice-message-bubble">
         {imageThumbnail && (
           <img
-            src={`data:${imageThumbnail.mime};base64,${imageThumbnail.base64}`}
+            src={mediaSrc(imageThumbnail.mime, imageThumbnail.base64)}
             alt="Attached question"
             style={{
               maxWidth: '100%',
@@ -4229,6 +4238,7 @@ export default function App({ initialTab }: AppProps = {}) {
   const activeTabRef = useRef<AppTab>(activeTab);
   useEffect(() => {
     activeTabRef.current = activeTab;
+    if (TAB_TITLES[activeTab]) document.title = TAB_TITLES[activeTab];
   }, [activeTab]);
 
   // The URL is pushed outside the state updater: updaters run during render, and pushState there makes
@@ -8577,13 +8587,13 @@ export default function App({ initialTab }: AppProps = {}) {
     };
     document.addEventListener('visibilitychange', handleVisibilityCheck);
 
-    // Periodic curriculum/config sync interval (every 45s for active visible tab)
+    // Periodic config sync for the visible tab; returning to the tab and cross-tab messages refresh sooner
     const backgroundSyncTimer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
         const currentTok = localStorage.getItem('egs_token');
         loadSystemConfig(devId, currentTok, false);
       }
-    }, 45000);
+    }, 90000);
 
     // Cross-tab synchronization for immediate curriculum & settings updates
     let curriculumSyncChannel: BroadcastChannel | null = null;
@@ -12527,7 +12537,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                 return (
                                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                     <img 
-                                      src={`data:${imageThumbnail.mime};base64,${imageThumbnail.base64}`} 
+                                      src={mediaSrc(imageThumbnail.mime, imageThumbnail.base64)} 
                                       alt="Student upload" 
                                       style={{ maxWidth: '100%', maxHeight: '220px', borderRadius: '10px', objectFit: 'contain', border: '1px solid rgba(255,255,255,0.2)' }}
                                     />
@@ -21365,74 +21375,76 @@ export default function App({ initialTab }: AppProps = {}) {
       )}
 
       {/* Platform App Tour Guide */}
-      <AppTour
-        screen={tourScreen}
-        isOpen={isTourOpen}
-        onClose={handleTourClose}
-        currentSubject={chatSubject}
-        onSelectSubjectPrompt={() => {
-          const targetGrade = user ? user.grade_level : chatGrade;
-          const activeSubjs = getActiveSubjectsForGrade(targetGrade);
-          if (!chatSubject && activeSubjs.length > 0) {
-            setChatSubject(activeSubjs[0].subject_name);
-          }
-        }}
-        onPrefillPrompt={(text) => {
-          setInputMessage(text);
-          if (!isMobile && textareaRef.current) {
-            textareaRef.current.focus();
-          }
-        }}
-        onSubmitTourMessage={() => {
-          const targetGrade = user ? user.grade_level : chatGrade;
-          const activeSubjs = getActiveSubjectsForGrade(targetGrade);
-          const subj = chatSubject || (activeSubjs[0]?.subject_name || 'الفيزياء');
-          const prompt = inputMessage.trim() || `اشرحلي بالتفصيل وبأمثلة واضحة أول درس في منهج ${subj}`;
-          handleTourClose(true);
-          setTimeout(() => {
-            handleSendMessage(undefined, prompt);
-          }, 40);
-        }}
-        onStartExamPrompt={() => {
-          if (!user) {
-            setAuthTab('register');
-            setShowAuthModal(true);
-            return;
-          }
-          const targetGrade = user.grade_level || chatGrade;
-          const activeSubjs = getActiveSubjectsForGrade(targetGrade);
-          const subj = examSubject || chatSubject || (activeSubjs[0]?.subject_name || '');
-          setExamSubject(subj);
-          setExamTopic('');
-          setSelectedExamLesson(null);
-          setLessonSearchQuery('');
-          setExamLessonTab('curriculum');
-          setShowExamCreateModal(true);
-          if (subj) fetchCurriculumStructure(targetGrade, subj);
-        }}
-        onStartFlashcardPrompt={() => {
-          if (!user) {
-            setAuthTab('register');
-            setShowAuthModal(true);
-            return;
-          }
-          const targetGrade = user.grade_level || chatGrade || '1_high';
-          const activeSubjects = getActiveSubjectsForGrade(targetGrade);
-          const subj = activeSubjects.length > 0 ? activeSubjects[0].subject_name : '';
-          setFlashcardSubject(subj);
-          setFlashcardTopic('');
-          setSelectedFlashcardLesson(null);
-          setLessonSearchQuery('');
-          setFlashcardLessonTab('curriculum');
-          setShowFlashcardCreateModal(true);
-          if (subj) fetchCurriculumStructure(targetGrade, subj);
-        }}
-        onNavigateToChat={() => {
-          setActiveTab('chat');
-          startTour('chat');
-        }}
-        isMobile={isMobile}
-      />
+      {isTourOpen && (
+        <AppTour
+          screen={tourScreen}
+          isOpen={isTourOpen}
+          onClose={handleTourClose}
+          currentSubject={chatSubject}
+          onSelectSubjectPrompt={() => {
+            const targetGrade = user ? user.grade_level : chatGrade;
+            const activeSubjs = getActiveSubjectsForGrade(targetGrade);
+            if (!chatSubject && activeSubjs.length > 0) {
+              setChatSubject(activeSubjs[0].subject_name);
+            }
+          }}
+          onPrefillPrompt={(text) => {
+            setInputMessage(text);
+            if (!isMobile && textareaRef.current) {
+              textareaRef.current.focus();
+            }
+          }}
+          onSubmitTourMessage={() => {
+            const targetGrade = user ? user.grade_level : chatGrade;
+            const activeSubjs = getActiveSubjectsForGrade(targetGrade);
+            const subj = chatSubject || (activeSubjs[0]?.subject_name || 'الفيزياء');
+            const prompt = inputMessage.trim() || `اشرحلي بالتفصيل وبأمثلة واضحة أول درس في منهج ${subj}`;
+            handleTourClose(true);
+            setTimeout(() => {
+              handleSendMessage(undefined, prompt);
+            }, 40);
+          }}
+          onStartExamPrompt={() => {
+            if (!user) {
+              setAuthTab('register');
+              setShowAuthModal(true);
+              return;
+            }
+            const targetGrade = user.grade_level || chatGrade;
+            const activeSubjs = getActiveSubjectsForGrade(targetGrade);
+            const subj = examSubject || chatSubject || (activeSubjs[0]?.subject_name || '');
+            setExamSubject(subj);
+            setExamTopic('');
+            setSelectedExamLesson(null);
+            setLessonSearchQuery('');
+            setExamLessonTab('curriculum');
+            setShowExamCreateModal(true);
+            if (subj) fetchCurriculumStructure(targetGrade, subj);
+          }}
+          onStartFlashcardPrompt={() => {
+            if (!user) {
+              setAuthTab('register');
+              setShowAuthModal(true);
+              return;
+            }
+            const targetGrade = user.grade_level || chatGrade || '1_high';
+            const activeSubjects = getActiveSubjectsForGrade(targetGrade);
+            const subj = activeSubjects.length > 0 ? activeSubjects[0].subject_name : '';
+            setFlashcardSubject(subj);
+            setFlashcardTopic('');
+            setSelectedFlashcardLesson(null);
+            setLessonSearchQuery('');
+            setFlashcardLessonTab('curriculum');
+            setShowFlashcardCreateModal(true);
+            if (subj) fetchCurriculumStructure(targetGrade, subj);
+          }}
+          onNavigateToChat={() => {
+            setActiveTab('chat');
+            startTour('chat');
+          }}
+          isMobile={isMobile}
+        />
+      )}
 
     </div>
   );

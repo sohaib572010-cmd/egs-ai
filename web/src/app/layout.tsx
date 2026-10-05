@@ -1,15 +1,21 @@
 import type { Metadata, Viewport } from 'next';
+import Link from 'next/link';
+import { Readex_Pro } from 'next/font/google';
+import { DEFAULT_DESCRIPTION, DEFAULT_TITLE, FEATURES, SITE_URL } from '@/lib/seo';
+import { OG_IMAGE } from '@/lib/seo_metadata';
 import './globals.css';
 
-const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || 'https://egsaiedu.com';
+const siteUrl = SITE_URL;
+
+const readex = Readex_Pro({ subsets: ['arabic', 'latin'], display: 'swap', variable: '--font-readex' });
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: 'EGS AI | ذكاء اصطناعي للمناهج المصرية | أول مساعد ومعلم ذكي للمنهج المصري',
+    default: DEFAULT_TITLE,
     template: '%s | EGS AI'
   },
-  description: 'منصة EGS AI هي المنصة المصرية الأولى للذكاء الاصطناعي للطلاب (Egyptian Artificial Intelligence for Students). مساعد ومعلم ذكي للمذاكرة، شرح المناهج الدراسية، حل المسائل والواجبات من الصور، وتوليد امتحانات تفاعلية فوراً لجميع المراحل الإعدادية والثانوية.',
+  description: DEFAULT_DESCRIPTION,
   keywords: [
     // Brand, Exact Names & Common Typos / Spelling Mistakes
     'EGS AI',
@@ -216,8 +222,6 @@ export const metadata: Metadata = {
     canonical: '/',
     languages: {
       'ar-EG': '/',
-      'ar': '/',
-      'en': '/',
     },
   },
   manifest: '/manifest.webmanifest',
@@ -231,27 +235,19 @@ export const metadata: Metadata = {
     title: 'EGS AI',
   },
   openGraph: {
-    title: 'EGS AI | ذكاء اصطناعي للمناهج المصرية | أول مساعد ومعلم ذكي للمنهج المصري',
-    description: 'منصة EGS AI هي أول منصة ذكاء اصطناعي مصري متخصصة في شرح المناهج الدراسية المصرية لطلاب الإعدادية والثانوية العامة. حل المسائل من الصور، تلخيص الدروس، وتوليد امتحانات تفاعلية فوراً.',
+    title: DEFAULT_TITLE,
+    description: DEFAULT_DESCRIPTION,
     url: siteUrl,
-    siteName: 'EGS AI | ذكاء اصطناعي للمناهج المصرية',
+    siteName: 'EGS AI',
     locale: 'ar_EG',
-    alternateLocale: ['en_US'],
     type: 'website',
-    images: [
-      {
-        url: '/icon.png',
-        width: 512,
-        height: 512,
-        alt: 'EGS AI - أول ذكاء اصطناعي للمناهج المصرية',
-      }
-    ],
+    images: [OG_IMAGE],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'EGS AI | ذكاء اصطناعي للمناهج المصرية | أول مساعد ومعلم ذكي للمنهج المصري',
-    description: 'منصة EGS AI أول ذكاء اصطناعي مصري متخصص في شرح المناهج الدراسية المصرية وحل المسائل وتوليد امتحانات تفاعلية لطلاب الإعدادية والثانوية العامة.',
-    images: ['/icon.png'],
+    title: DEFAULT_TITLE,
+    description: DEFAULT_DESCRIPTION,
+    images: [OG_IMAGE.url],
   },
   robots: {
     index: true,
@@ -353,26 +349,25 @@ export default function RootLayout({
         }
       },
       {
-        '@type': 'EducationalApplication',
+        '@type': ['WebApplication', 'EducationalApplication'],
         '@id': `${siteUrl}/#application`,
-        'name': 'EGS AI - المساعد الذكي للمناهج المصرية',
-        'operatingSystem': 'All (Web, Android, iOS, Windows, macOS)',
+        'name': 'EGS AI',
+        'alternateName': 'EGS AI - المعلم الذكي للمنهج المصري',
+        'operatingSystem': 'Web, Android, iOS, Windows, macOS',
         'applicationCategory': 'EducationalApplication',
+        'browserRequirements': 'Requires JavaScript and a modern browser',
         'url': siteUrl,
-        'description': 'تطبيق ووكيل ذكاء اصطناعي متطور لطلاب المدارس الإعدادية والثانوية في مصر لشرح الدروس وحل المسائل وتوليد الاختبارات من كتب الوزارة.',
-        'offers': {
-          '@type': 'Offer',
-          'price': '0',
-          'priceCurrency': 'EGP',
-          'availability': 'https://schema.org/InStock'
-        },
-        'featureList': [
-          'شرح المناهج الدراسية المصرية الرسمية بالذكاء الاصطناعي',
-          'حل وتفسير مسائل الرياضيات والعلوم واللغات بالخطوات الكاملة والقوانين',
-          'توليد اختبارات وامتحانات ذكية مطابقة لمواصفات وزارة التربية والتعليم',
-          'مساعد بصري لتحليل أسئلة الكتب المدرسية والمسائل من الصور',
-          'تدريب تفاعلي ومحاكاة لامتحانات الثانوية العامة والشهادة الإعدادية'
-        ]
+        'inLanguage': 'ar-EG',
+        'publisher': { '@id': `${siteUrl}/#organization` },
+        'description': DEFAULT_DESCRIPTION,
+        'educationalLevel': ['المرحلة الإعدادية', 'المرحلة الثانوية', 'البكالوريا المصرية'],
+        'audience': { '@type': 'EducationalAudience', 'educationalRole': 'student', 'audienceType': 'طلاب الإعدادية والثانوية في مصر' },
+        'offers': [
+          { '@type': 'Offer', 'name': 'الحساب المجاني', 'price': '0', 'priceCurrency': 'EGP', 'availability': 'https://schema.org/InStock' },
+          { '@type': 'AggregateOffer', 'name': 'باقات الاشتراك', 'lowPrice': '60', 'highPrice': '140', 'offerCount': 3, 'priceCurrency': 'EGP', 'url': `${siteUrl}/subscriptions` }
+        ],
+        'featureList': FEATURES.map(f => f.navLabel),
+        'hasPart': FEATURES.map(f => ({ '@type': 'WebPage', 'name': f.title, 'url': `${siteUrl}/features/${f.slug}` }))
       },
       {
         '@type': 'FAQPage',
@@ -380,59 +375,38 @@ export default function RootLayout({
         'mainEntity': [
           {
             '@type': 'Question',
-            'name': 'ما هو موقع ومنصة EGS AI (إي جي إس)؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'منصة EGS AI هي أول منصة وتطبيق ذكاء اصطناعي مصري مخصص بالكامل لمناهج وزارة التربية والتعليم المصرية للمرحلتين الإعدادية والثانوية، يساعد الطلاب في فهم واستيعاب الدروس وحل المسائل خطوة بخطوة وتوليد امتحانات إلكترونية تقييمية.'
-            }
+            'name': 'ما هو EGS AI؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'EGS AI معلم ذكي بالذكاء الاصطناعي لطلاب الإعدادية والثانوية والبكالوريا المصرية، مرتبط بكتب المنهج المصري: يشرح الدروس، يحل المسائل من الصور، يولّد امتحانات وكويزات ويصححها، ينشئ بطاقات مراجعة ذكية، ويذاكر معك صوتياً.' }
           },
           {
             '@type': 'Question',
-            'name': 'هل يقدم EGS AI ذكاء اصطناعي خاص بالمناهج المصرية حصراً؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'نعم، يعتمد EGS AI على محرك بحث فائق التطور مرتبط بكتب ومقررات المناهج المصرية الرسمية المعتمدة، ويجيب بدقة من صلب المنهج الدراسي للشهادة الإعدادية وصفوف الثانوية العامة.'
-            }
+            'name': 'هل يجيب EGS AI من المنهج المصري؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، يبحث في كتاب مادتك لصفك الدراسي قبل الإجابة، ويوضح إذا كانت نقطة ما خارج المطلوب في الامتحان.' }
           },
           {
             '@type': 'Question',
-            'name': 'كيف يساعد الذكاء الاصطناعي طلاب الثانوية العامة والشهادة الإعدادية في مصر؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'يساعدهم كمدرس خصوصي ذكي متاح دائماً لشرح النقاط الصعبة، تبسيط القوانين والنظريات، حل الواجبات والمسائل المعقدة، تحليل الصور والرسوم البيانية، وتوليد امتحانات تفاعلية لقياس مستوى التحصيل قبل الامتحانات النهائية.'
-            }
+            'name': 'هل يوجد مساعد صوتي للمذاكرة في EGS AI؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، المعلم الصوتي يتيح مكالمة صوتية مباشرة بالعامية المصرية أو الفصحى المبسطة مع معلم ذكي يبحث في كتابك أثناء المكالمة، ويمكنك مقاطعته في أي وقت.' }
           },
           {
             '@type': 'Question',
-            'name': 'هل يمكن حل مسائل الرياضيات والعلوم عن طريق تصويرها؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'نعم، يتيح EGS AI ميزة المساعد البصري الذكي؛ حيث يمكنك التقاط أو رفع صورة للمسألة أو المعادلة أو الرسم البياني ليقوم الذكاء الاصطناعي بقراءتها وتفسير خطوات حلها النموذجية فوراً.'
-            }
+            'name': 'هل يمكنني عمل امتحانات وكويزات على المنهج؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، ولّد امتحاناً من أي درس بأسئلة اختيار من متعدد وصح وخطأ ومقالية، واستلم تصحيحاً فورياً مع شرح كل خطأ وامتحاناً علاجياً لنقاط ضعفك.' }
           },
           {
             '@type': 'Question',
-            'name': 'ما هي الصفوف والمراحل الدراسية المدعومة في EGS AI؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'يدعم EGS AI صفوف المرحلة الإعدادية (الأول، الثاني، والثالث الإعدادي) وصفوف المرحلة الثانوية (الصف الأول الثانوي، والصف الثاني الثانوي بمساراته التخصصية، بالإضافة للثانوية العامة).'
-            }
+            'name': 'هل يوجد فلاش كارد للمراجعة؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، يولّد EGS AI بطاقات مراجعة من دروسك ويجدولها بنظام التكرار المتباعد.' }
           },
           {
             '@type': 'Question',
-            'name': 'هل يمكن للطلاب استخدام EGS AI كذكاء اصطناعي عام للمذاكرة وحل الأسئلة؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'نعم، يتيح EGS AI للطلاب استخدام الذكاء الاصطناعي كمعلم ومساعد عام للمذاكرة (Artificial Intelligence for Students)، لشرح وتبسيط أي مسألة أو مفهوم علمي، حل الواجبات المدرسية بالخطوات، وتلخيص الدروس بدقة فائقة دون الحاجة للتقيد بمادة معينة.'
-            }
+            'name': 'هل يمكن حل المسائل بتصويرها؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، صوّر المسألة بكاميرا الموقع أو ارفع صورتها، وقصها، ويشرح المعلم الذكي الحل خطوة بخطوة.' }
           },
           {
             '@type': 'Question',
-            'name': 'ما هو أفضل موقع وتطبيق ذكاء اصطناعي مصري للمذاكرة والطلاب؟',
-            'acceptedAnswer': {
-              '@type': 'Answer',
-              'text': 'يعد EGS AI المنصة الرائدة في مصر كأول ذكاء اصطناعي مصري مخصص للطلاب، يوفر بيئة تعليمية ذكية تفهم اللهجة المصرية واللغة العربية الفصحى والإنجليزية، ويحل المسائل من الصور والكتب فوراً.'
-            }
+            'name': 'كم سعر الاشتراك في EGS AI؟',
+            'acceptedAnswer': { '@type': 'Answer', 'text': 'تبدأ مجاناً بنقاط تجريبية، والباقات: شهر 60 جنيه، شهرين 110 جنيه، 3 أشهر 140 جنيه، والدفع بالفيزا والمحافظ الإلكترونية وإنستاباي.' }
           }
         ]
       }
@@ -440,12 +414,12 @@ export default function RootLayout({
   };
 
   return (
-    <html lang="ar" dir="rtl" suppressHydrationWarning>
+    <html lang="ar" dir="rtl" className={readex.variable} suppressHydrationWarning>
       <head>
         <script src="https://accounts.google.com/gsi/client" async defer></script>
         <script
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd).replace(/</g, '\\u003c') }}
         />
         <script
           dangerouslySetInnerHTML={{
@@ -537,33 +511,14 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/icon.png" />
       </head>
       <body suppressHydrationWarning>
-        {/* Semantic crawler-accessible educational index for search engines */}
-        <section className="sr-only" aria-label="نبذة تعريفية عن منصة EGS AI للذكاء الاصطناعي للمناهج المصرية">
-          <h1>منصة EGS AI — أول ذكاء اصطناعي للمناهج المصرية</h1>
-          <p>
-            منصة وتطبيق EGS AI هو أول ذكاء اصطناعي مصري ومعلم ذكي مخصص بالكامل لطلاب المدارس الإعدادية والثانوية في جمهورية مصر العربية. 
-            يوفر التطبيق شرحاً دقيقاً وتفاعلياً لمنهج وزارة التربية والتعليم، وحل المسائل والواجبات خطوة بخطوة بالذكاء الاصطناعي، وتحليل مسائل الكتب والامتحانات من الصور، وتوليد اختبارات إلكترونية تفاعلية تحاكي امتحانات الثانوية العامة والشهادة الإعدادية.
-          </p>
-          <h2>الذكاء الاصطناعي الخاص بالمناهج المصرية</h2>
-          <p>
-            يتميز EGS AI بارتباطه الوثيق بالمقررات والكتب المدرسية الرسمية: الرياضيات، العلوم، الفيزياء، الكيمياء، الأحياء، اللغة العربية، والنحو. يجيب المساعد الذكي بدقة تامة من داخل المنهج المدرسي مع توضيح القوانين والخطوات.
-          </p>
-          <h2>الذكاء الاصطناعي للطلاب والمذاكرة (Artificial Intelligence for Students)</h2>
-          <p>
-            منصة ذكاء اصطناعي شاملة للطلاب والطلبة في مصر والوطن العربي؛ تساعدك في فهم الدروس الصعبة، كتابة الملخصات، حل مسائل الرياضيات والعلوم خطوة بخطوة، والإجابة على أي سؤال دراسي فوري بدون تعقيد.
-          </p>
-          <h2>الذكاء الاصطناعي المصري (Egyptian Artificial Intelligence)</h2>
-          <p>
-            تطبيق وموقع ذكاء اصطناعي مصري 100% صُمم لدعم الطلاب وتوفير بديل ذكي واحترافي لشات جي بي تي متوافق مع المناهج التعليمية المصرية، ليكون بمثابة مدرس خصوصي متاح على مدار الساعة مجاناً.
-          </p>
-          <h2>ذكاء اصطناعي للثانوية العامة والشهادة الإعدادية</h2>
+        <nav className="sr-only" aria-label="مميزات EGS AI">
+          <h1>EGS AI: معلم ذكاء اصطناعي للمنهج المصري</h1>
           <ul>
-            <li>ذكاء اصطناعي مصري لطلاب الصف الأول الإعدادي، الثاني الإعدادي، والثالث الإعدادي.</li>
-            <li>شرح ومراجعات ذكية لطلاب الصف الأول الثانوي والصف الثاني الثانوي بشعبه العلمية والأدبية.</li>
-            <li>بنك أسئلة وامتحانات وتدريبات متطورة لطلاب الثانوية العامة (تالتة ثانوي).</li>
-            <li>حل المسائل الرياضية والعلمية المعقدة فوراً بواسطة الذكاء الاصطناعي.</li>
+            {FEATURES.map(f => (
+              <li key={f.slug}><Link href={`/features/${f.slug}`}>{f.navLabel}</Link></li>
+            ))}
           </ul>
-        </section>
+        </nav>
         {children}
       </body>
     </html>

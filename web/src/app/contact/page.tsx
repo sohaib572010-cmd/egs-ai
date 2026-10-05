@@ -2,20 +2,14 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Phone, Mail, MessageCircle, ArrowRight, ShieldCheck, Clock } from 'lucide-react';
 import ContactForm from '@/components/ContactForm';
+import { pageMetadata } from '@/lib/seo_metadata';
 
-export const metadata: Metadata = {
-  title: 'تواصل معنا | EGS AI | دعم منصة المناهج المصرية',
-  description: 'طرق التواصل الرسمية مع فريق دعم منصة EGS AI للمساعدة الدراسية والذكاء الاصطناعي عبر الهاتف، واتساب، ونموذج المساعدة.',
-  keywords: [
-    'تواصل معنا EGS AI',
-    'دعم منصة EGS AI',
-    'خدمة عملاء EGS AI',
-    'رقم EGS AI'
-  ],
-  alternates: {
-    canonical: '/contact',
-  },
-};
+export const metadata: Metadata = pageMetadata({
+  title: 'تواصل معنا: دعم EGS AI عبر الهاتف وواتساب والبريد',
+  description: 'تواصل مع فريق دعم EGS AI عبر الهاتف أو واتساب 01037220587 أو البريد business@egsaiedu.com أو نموذج المساعدة، للاستفسارات والاشتراكات وطلبات الاسترداد.',
+  path: '/contact',
+  keywords: ['تواصل معنا EGS AI', 'دعم EGS AI', 'خدمة عملاء EGS AI', 'رقم EGS AI']
+});
 
 export default function ContactPage() {
   return (
