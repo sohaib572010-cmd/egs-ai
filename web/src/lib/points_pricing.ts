@@ -28,7 +28,7 @@ export interface TokenUsage {
 // Metered on top of every curriculum-grounded chat reply: query analysis (its instructions and lesson map are
 // usually a cache hit) and the engagement check.
 export const RAG_OVERHEAD_USAGE: TokenUsage = { cacheHit: 3000, cacheMiss: 800, output: 650 };
-export const VISION_USAGE: TokenUsage = { cacheHit: 0, cacheMiss: 2000, output: 900 };
+export const VISION_USAGE: TokenUsage = { cacheHit: 0, cacheMiss: 4900, output: 1800 };
 export const TRANSCRIPT_REFINE_USAGE: TokenUsage = { cacheHit: 0, cacheMiss: 900, output: 500 };
 
 // Typical request sizes, used only to show estimates to students.

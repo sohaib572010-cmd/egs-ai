@@ -48,8 +48,10 @@ export interface PageExtractionResult {
   pageNumber: number;
   rawVisionText: string;
   processedMarkdown: string;
-  detectedUnit?: string | null;
-  detectedLesson?: string | null;
+  /** Page class from the extraction request (content, toc, front_matter, exercises, answer_key, blank). */
+  pageType?: string;
+  /** Outline lines read from a table-of-contents page. */
+  tocText?: string;
   status: "pending" | "success" | "failed";
   attempts: number;
   error: string | null;
@@ -70,7 +72,7 @@ export interface JobCheckpoint {
 }
 
 export interface ProcessingSettings {
-  /** Primary Multimodal Engine: DeepSeek-V4.1-Flash (deepseek-flash) for both page vision and curriculum structuring */
+  /** DeepSeek-V4.1-Flash (deepseek-flash): one request per page reads, classifies and organizes it */
   deepSeekApiKey: string;
   batchSize: number;
   maxConcurrentFiles: number;

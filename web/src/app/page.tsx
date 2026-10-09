@@ -88,6 +88,7 @@ import {
   Share,
   PlusSquare,
   Target,
+  Repeat,
   Headphones,
   MessageCircle,
   UserX,
@@ -503,16 +504,20 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
          .replace(/±/g, ' \\pm ')
          .replace(/∞/g, ' \\infty ');
 
-    // 7.1 Normalize visual roots, powers, and fractions to LaTeX
+    // 7.1 Normalize visual roots, powers, and fractions to LaTeX. Text groups such as units (\text{m/s}) are set
+    // aside first, and a numerator never starts inside a command name (\rho/2), so neither is rewritten.
+    const textGroups: string[] = [];
+    f = f.replace(/\\(?:text|mathrm|operatorname|mbox)\{[^{}]*\}/g, (m) => `\uE000${String.fromCharCode(0xE100 + textGroups.push(m) - 1)}\uE000`);
     f = f.replace(/∛\s*\(([^)]+)\)/g, '\\sqrt[3]{$1}')
          .replace(/∛\s*([٠-٩0-9a-zA-Z\u0600-\u06FF]+)/g, '\\sqrt[3]{$1}')
          .replace(/√\s*\(([^)]+)\)/g, '\\sqrt{$1}')
          .replace(/√\s*([٠-٩0-9a-zA-Z\u0600-\u06FF]+)/g, '\\sqrt{$1}')
          .replace(/\^\s*\(([^)]+)\)/g, '^{$1}')
          .replace(/\^\s*([0-9a-zA-Z\u0600-\u06FF]+)/g, '^{$1}')
-         .replace(/(?:\(([^\)]+)\)|([٠-٩0-9a-zA-Z\u0600-\u06FF]+))\s*\/\s*(?:\(([^\)]+)\)|([٠-٩0-9a-zA-Z\u0600-\u06FF]+))/g,
+         .replace(/(?:\(([^\)]+)\)|(?<![\\a-zA-Z])([٠-٩0-9a-zA-Z\u0600-\u06FF]+))\s*\/\s*(?:\(([^\)]+)\)|([٠-٩0-9a-zA-Z\u0600-\u06FF]+))/g,
            (m, n1, n2, d1, d2) => `\\frac{${n1 || n2}}{${d1 || d2}}`
          );
+    f = f.replace(/\uE000([\uE100-\uEFFF])\uE000/g, (_, c: string) => textGroups[c.charCodeAt(0) - 0xE100]);
 
     // 8. In Arabic formulas (with Arabic variables and NO Latin variables), normalize standalone Western digits into Arabic numerals
     if (isArabicFormula) {
@@ -2170,8 +2175,7 @@ ${studentSponsorUrl}
     onGoToFlashcards,
     onGoToSubscriptions,
     onSparkPrompt,
-    onSaveToNotebook,
-    isBookmarked,
+    isLatest,
     onPlayEnglish,
     playingSpeechId,
     messageId
@@ -2184,8 +2188,7 @@ ${studentSponsorUrl}
     onGoToFlashcards?: (subjectName: string) => void;
     onGoToSubscriptions?: () => void;
     onSparkPrompt?: (text: string) => void;
-    onSaveToNotebook?: (text: string) => void;
-    isBookmarked?: boolean;
+    isLatest?: boolean;
     onPlayEnglish?: (text: string, id: string) => void;
     playingSpeechId?: string | null;
     messageId?: string;
@@ -2574,35 +2577,42 @@ ${studentSponsorUrl}
           </div>
         )}
 
-        {sender === 'ai' && !isPaywall && !isStreaming && !lessonNavData && displayContent.trim().length > 60 && (
-          <div className="continuity-sparks animate-fade-in">
+        {sender === 'ai' && isLatest && !isPaywall && !isStreaming && !lessonNavData && !examData && !flashcardsData && displayContent.trim().length > 160 && (
+          <div className="continuity-sparks animate-fade-in" role="group" aria-label="خطوات تالية مقترحة">
             <button
               type="button"
-              onClick={() => onSparkPrompt?.('ما الفكرة الخادعة أو السؤال الأكثر تكراراً في الامتحانات حول هذه النقطة؟')}
+              onClick={() => onSparkPrompt?.('مش فاهم كويس، اشرحها تاني بطريقة أبسط وبمثال من الحياة.')}
+              className="continuity-spark-btn"
+            >
+              <Lightbulb size={15} />
+              <span>اشرحها أبسط</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onSparkPrompt?.('اديني مثال تاني على نفس الفكرة، ولو فيها مسائل حل واحدة زيها خطوة بخطوة.')}
+              className="continuity-spark-btn"
+            >
+              <Repeat size={15} />
+              <span>مثال تاني</span>
+            </button>
+            {!quizData && (
+              <button
+                type="button"
+                onClick={() => onSparkPrompt?.('اسألني سؤال واحد على النقطة دي عشان أتأكد إني فهمتها.')}
+                className="continuity-spark-btn"
+              >
+                <Target size={15} />
+                <span>اختبرني عليها</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => onSparkPrompt?.('إيه الفكرة الخادعة أو السؤال اللي بيتكرر في الامتحان على النقطة دي؟')}
               className="continuity-spark-btn"
             >
               <Sparkles size={15} />
-              <span>فكرة خادعة تتكرر في الامتحانات</span>
+              <span>فخ الامتحان</span>
             </button>
-            <button
-              type="button"
-              onClick={() => onSparkPrompt?.('اعطني مسألة تدريبية مماثلة من كتاب خارجي مع الحل بالخطوات والقوانين.')}
-              className="continuity-spark-btn"
-            >
-              <FileText size={15} />
-              <span>مسألة مماثلة من الكتب الخارجية</span>
-            </button>
-            {onSaveToNotebook && (
-              <button
-                type="button"
-                onClick={() => onSaveToNotebook(displayContent)}
-                className={`continuity-spark-btn ${isBookmarked ? 'saved' : ''}`}
-                title={isBookmarked ? 'محفوظ في دفتري الذكي — اضغط للحذف' : 'حفظ أهم قانون في دفتري الذكي'}
-              >
-                {isBookmarked ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
-                <span>{isBookmarked ? 'محفوظ في دفتري الذكي' : 'حفظ أهم قانون في دفتري الذكي'}</span>
-              </button>
-            )}
           </div>
         )}
       </div>
@@ -2665,6 +2675,8 @@ ${studentSponsorUrl}
 
 // ─── Image Editor (crop + freehand markup, dependency-free) ──────────────────
 const EDITOR_BRUSH_COLORS = ['#FFB703', '#00B4D8', '#7209B7', '#10b981', '#fbbf24', '#FFFFFF', '#0D1B2A'];
+
+const IMAGE_EXPORT_MAX_SIDE = 2400;
 
 const ImageEditorModal = ({
   src,
@@ -2790,12 +2802,19 @@ const ImageEditorModal = ({
     const region = cropRect && cropRect.w >= 10 && cropRect.h >= 10
       ? cropRect
       : { x: 0, y: 0, w: imgSize.w, h: imgSize.h };
+    // Cap the long side so digits stay sharp without dropping JPEG quality to fit the 5 MB limit
+    const scale = Math.min(1, IMAGE_EXPORT_MAX_SIDE / Math.max(region.w, region.h));
     const canvas = document.createElement('canvas');
-    canvas.width = Math.round(region.w);
-    canvas.height = Math.round(region.h);
+    canvas.width = Math.round(region.w * scale);
+    canvas.height = Math.round(region.h * scale);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    ctx.drawImage(img, region.x, region.y, region.w, region.h, 0, 0, canvas.width, canvas.height);
+    // JPEG has no alpha: paint white first so transparent screenshots do not turn black
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.scale(scale, scale);
+    ctx.drawImage(img, region.x, region.y, region.w, region.h, 0, 0, region.w, region.h);
     ctx.lineWidth = Math.max(3, imgSize.w / 250);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
@@ -2807,11 +2826,10 @@ const ImageEditorModal = ({
       for (const p of stroke.points.slice(1)) ctx.lineTo(p.x - region.x, p.y - region.y);
       ctx.stroke();
     }
-    // JPEG keeps the payload small; step quality down until it fits the 5 MB cap
     let quality = 0.92;
     let dataUrl = canvas.toDataURL('image/jpeg', quality);
-    while (dataUrl.length * 0.75 > 5 * 1024 * 1024 && quality > 0.4) {
-      quality -= 0.12;
+    while (dataUrl.length * 0.75 > 5 * 1024 * 1024 && quality > 0.6) {
+      quality -= 0.08;
       dataUrl = canvas.toDataURL('image/jpeg', quality);
     }
     onConfirm(dataUrl.split(',')[1], 'image/jpeg');
@@ -4714,6 +4732,7 @@ export default function App({ initialTab }: AppProps = {}) {
     localStorage.removeItem('egs_chat_sessions');
     localStorage.removeItem('egs_active_exam_id');
     localStorage.removeItem('egs_active_exam_time');
+    localStorage.removeItem('egs_active_exam_answers');
     setToken(null);
     setUser(null);
     setProfileName('');
@@ -5749,6 +5768,7 @@ export default function App({ initialTab }: AppProps = {}) {
 
       localStorage.removeItem('egs_active_exam_id');
       localStorage.removeItem('egs_active_exam_time');
+      localStorage.removeItem('egs_active_exam_answers');
       setExamTimeRemaining(0);
       loadExamsData();
     } catch (e: any) {
@@ -5795,9 +5815,21 @@ export default function App({ initialTab }: AppProps = {}) {
       if (activeExam) {
         setSelectedExam(activeExam);
         setExamTimeRemaining(parseInt(savedTime, 10));
+        try {
+          const saved = JSON.parse(localStorage.getItem('egs_active_exam_answers') || 'null');
+          if (saved?.examId === savedExamId && saved.answers) setActiveExamAnswers(saved.answers);
+        } catch {}
       }
     }
   }, [exams]);
+
+  // Answers of the exam in progress survive a reload, like its timer
+  useEffect(() => {
+    if (!selectedExam?.id || examResult) return;
+    try {
+      localStorage.setItem('egs_active_exam_answers', JSON.stringify({ examId: selectedExam.id, answers: activeExamAnswers }));
+    } catch {}
+  }, [selectedExam?.id, examResult, activeExamAnswers]);
 
   useEffect(() => {
     if (activeTab === 'flashcards' && token) {
@@ -9271,6 +9303,7 @@ export default function App({ initialTab }: AppProps = {}) {
     localStorage.removeItem('egs_chat_sessions');
     localStorage.removeItem('egs_active_exam_id');
     localStorage.removeItem('egs_active_exam_time');
+    localStorage.removeItem('egs_active_exam_answers');
     setToken(null);
     setUser(null);
     setProfileName('');
@@ -9331,8 +9364,13 @@ export default function App({ initialTab }: AppProps = {}) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 5 * 1024 * 1024) {
-      notify('حجم الصورة كبير جداً. الحد الأقصى هو 5 ميجابايت.', 'info');
+    if (!file.type.startsWith('image/')) {
+      notify('يرجى اختيار ملف صورة.', 'info');
+      return;
+    }
+    // Phone photos often exceed 5 MB; the editor downsizes them before upload
+    if (file.size > 25 * 1024 * 1024) {
+      notify('حجم الصورة كبير جداً. الحد الأقصى هو 25 ميجابايت.', 'info');
       return;
     }
 
@@ -9718,6 +9756,19 @@ export default function App({ initialTab }: AppProps = {}) {
   };
 
   // Chat Operation
+  const openFlashcardCreate = () => {
+    const targetGrade = user?.grade_level || chatGrade || '1_high';
+    const activeSubjects = getActiveSubjectsForGrade(targetGrade);
+    const subj = activeSubjects.length > 0 ? activeSubjects[0].subject_name : '';
+    setFlashcardSubject(subj);
+    setFlashcardTopic('');
+    setSelectedFlashcardLesson(null);
+    setLessonSearchQuery('');
+    setFlashcardLessonTab('curriculum');
+    setShowFlashcardCreateModal(true);
+    if (subj) fetchCurriculumStructure(targetGrade, subj);
+  };
+
   const handleSendMessage = async (e?: React.FormEvent, customText?: string) => {
     if (e) e.preventDefault();
 
@@ -9788,7 +9839,7 @@ export default function App({ initialTab }: AppProps = {}) {
       if (!sessionCurrValid) {
         setMessages(prev => [...prev, {
           sender: 'ai',
-          message: 'Please continue in another chat because the course has changed or been deleted.'
+          message: 'المنهج الخاص بالمحادثة دي اتغير أو اتحذف، كمّل من فضلك في محادثة جديدة. (Please continue in a new chat: this course has changed or been deleted.)'
         }]);
         return;
       }
@@ -10082,7 +10133,8 @@ export default function App({ initialTab }: AppProps = {}) {
       setMessages(prev => [...prev, {
         sender: 'ai',
         message: `حدث خطأ في الاتصال بالخادم. يرجى التحقق من اتصال الإنترنت والمحاولة مرة أخرى. (التفاصيل: ${err.message})`,
-        isStreaming: false
+        isStreaming: false,
+        hasError: true
       }]);
     } finally {
       setChatLoading(false);
@@ -11965,8 +12017,8 @@ export default function App({ initialTab }: AppProps = {}) {
               </div>
               <div className="sidebar-balance">
                 <div className="sidebar-balance-labels">
-                  <span>رصيد الذكاء اليوم</span>
-                  <span className="num" dir="ltr">{Number(coins.toFixed(1))} / {dailyAllowance}</span>
+                  <span>{coins > dailyAllowance ? 'رصيدك الحالي (شامل الهدايا)' : 'رصيد الذكاء اليوم'}</span>
+                  <span className="num" dir="ltr">{coins > dailyAllowance ? Number(coins.toFixed(1)) : `${Number(coins.toFixed(1))} / ${dailyAllowance}`}</span>
                 </div>
                 <div className="meter"><span style={{ width: `${Math.max(0, Math.min(100, (coins / dailyAllowance) * 100))}%` }} /></div>
               </div>
@@ -12136,7 +12188,7 @@ export default function App({ initialTab }: AppProps = {}) {
               <button
                 type="button"
                 onClick={handleOpenNotebook}
-                className={`header-icon-btn ${notebookItems.length > 0 ? 'active-gold' : ''}`}
+                className={`header-icon-btn header-notebook-btn ${notebookItems.length > 0 ? 'active-gold' : ''}`}
                 title="دفتري الذكي"
                 aria-label="دفتري الذكي"
               >
@@ -12651,10 +12703,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                 onSparkPrompt={(sparkText: string) => {
                                   handleSendMessage(undefined, sparkText);
                                 }}
-                                onSaveToNotebook={(cleanContent: string) => {
-                                  handleBookmarkMessage({ sender: 'ai', message: cleanContent, id: msg.id, session_id: msg.session_id || activeSessionId || undefined }, index);
-                                }}
-                                isBookmarked={isMessageBookmarked(msg, index)}
+                                isLatest={index === messages.length - 1 && !chatLoading}
                               />
                             </div>
                           ) : (
@@ -12672,11 +12721,12 @@ export default function App({ initialTab }: AppProps = {}) {
                           const msgKey = msg.id || `msg-${index}`;
                           const saved = isMessageBookmarked(msg, index);
                           const isSpeaking = playingSpeechId === msgKey;
-                          const failed = msg.hasError || msg.message.includes('خطأ') || msg.message.includes('Error');
+                          const failed = msg.hasError || msg.message.startsWith('**حدث خطأ');
                           return (
                             <div className="msg-actions animate-fade-in">
                               <div className="msg-actions-group">
-                                <button type="button" className="msg-action-btn" onClick={() => navigator.clipboard.writeText(msg.message)} title="نسخ الإجابة" aria-label="نسخ الإجابة">
+                                {!failed && (<>
+                                <button type="button" className="msg-action-btn" onClick={() => navigator.clipboard.writeText(msg.message.replace(/<thought[^>]*>[\s\S]*?<\/thought>/g, '').replace(/\[(QUIZ_QUESTION|CREATE_EXAM|CREATE_FLASHCARDS|LESSON_NAV|LISTEN_PASSAGE)[^\]]*\][\s\S]*?\[\/\1\]/g, '').trim())} title="نسخ الإجابة" aria-label="نسخ الإجابة">
                                   <Copy size={16} />
                                   <span>نسخ</span>
                                 </button>
@@ -12703,6 +12753,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                     <span>{isSpeaking ? 'إيقاف النطق' : 'استماع'}</span>
                                   </button>
                                 )}
+                                </>)}
                                 {failed && (
                                   <button
                                     type="button"
@@ -12721,6 +12772,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                     <span>إعادة المحاولة</span>
                                   </button>
                                 )}
+                                {!failed && (
                                 <button
                                   type="button"
                                   className="msg-action-btn report"
@@ -12734,6 +12786,7 @@ export default function App({ initialTab }: AppProps = {}) {
                                   <Flag size={16} />
                                   <span>إبلاغ</span>
                                 </button>
+                                )}
                               </div>
                               {!!msg.coinsUsed && (
                                 <span
@@ -17166,6 +17219,7 @@ export default function App({ initialTab }: AppProps = {}) {
                             setActiveExamAnswers({});
                             localStorage.removeItem('egs_active_exam_id');
                             localStorage.removeItem('egs_active_exam_time');
+                            localStorage.removeItem('egs_active_exam_answers');
                             setExamTimeRemaining(0);
                           }}
                           aria-label="الخروج من الاختبار"
@@ -17539,18 +17593,7 @@ export default function App({ initialTab }: AppProps = {}) {
               {!selectedFlashcardSubject && (
                 <button
                   id="tour-flashcards-create-btn"
-                  onClick={() => {
-                    const targetGrade = user?.grade_level || chatGrade || '1_high';
-                    const activeSubjects = getActiveSubjectsForGrade(targetGrade);
-                    const subj = activeSubjects.length > 0 ? activeSubjects[0].subject_name : '';
-                    setFlashcardSubject(subj);
-                    setFlashcardTopic('');
-                    setSelectedFlashcardLesson(null);
-                    setLessonSearchQuery('');
-                    setFlashcardLessonTab('curriculum');
-                    setShowFlashcardCreateModal(true);
-                    if (subj) fetchCurriculumStructure(targetGrade, subj);
-                  }}
+                  onClick={openFlashcardCreate}
                   className="btn-primary compact"
                 >
                   <Plus size={17} strokeWidth={2.5} />
@@ -17944,12 +17987,14 @@ export default function App({ initialTab }: AppProps = {}) {
                           <div
                             className="flashcard-perspective"
                             style={{ width: '100%', height: '100%' }}
-                            onClick={() => {
-                              if (isDealingAway) return;
-                              if (!isCardFlipped) {
-                                setIsCardFlipped(true);
-                              } else {
-                                setIsCardFlipped(false);
+                            role="button"
+                            tabIndex={0}
+                            aria-label={isCardFlipped ? 'الرجوع إلى السؤال' : 'اقلب الكارت لرؤية الإجابة'}
+                            onClick={() => { if (!isDealingAway) setIsCardFlipped(f => !f); }}
+                            onKeyDown={(e) => {
+                              if ((e.key === 'Enter' || e.key === ' ') && e.target === e.currentTarget && !isDealingAway) {
+                                e.preventDefault();
+                                setIsCardFlipped(f => !f);
                               }
                             }}
                           >
@@ -17988,16 +18033,20 @@ export default function App({ initialTab }: AppProps = {}) {
                                   </div>
                                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                                     <button
+                                      type="button"
                                       onClick={() => setEditingCard(activeCard)}
-                                      style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+                                      className="card-icon-btn"
                                       title="تعديل الكارت"
+                                      aria-label="تعديل الكارت"
                                     >
                                       <Edit2 size={15} />
                                     </button>
                                     <button
+                                      type="button"
                                       onClick={() => handleDeleteCard(activeCard?.id)}
-                                      style={{ background: 'transparent', border: 'none', color: '#ff6b6b', cursor: 'pointer', padding: '4px' }}
+                                      className="card-icon-btn danger"
                                       title="حذف الكارت"
+                                      aria-label="حذف الكارت"
                                     >
                                       <Trash2 size={15} />
                                     </button>
@@ -18065,16 +18114,20 @@ export default function App({ initialTab }: AppProps = {}) {
                                   </div>
                                   <div style={{ display: 'flex', gap: '6px' }} onClick={(e) => e.stopPropagation()}>
                                     <button
+                                      type="button"
                                       onClick={() => setEditingCard(activeCard)}
-                                      style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+                                      className="card-icon-btn"
                                       title="تعديل الكارت"
+                                      aria-label="تعديل الكارت"
                                     >
                                       <Edit2 size={15} />
                                     </button>
                                     <button
+                                      type="button"
                                       onClick={() => handleDeleteCard(activeCard?.id)}
-                                      style={{ background: 'transparent', border: 'none', color: '#ff6b6b', cursor: 'pointer', padding: '4px' }}
+                                      className="card-icon-btn danger"
                                       title="حذف الكارت"
+                                      aria-label="حذف الكارت"
                                     >
                                       <Trash2 size={15} />
                                     </button>
@@ -18149,6 +18202,10 @@ export default function App({ initialTab }: AppProps = {}) {
                     <Brain size={48} style={{ color: 'var(--primary-color)', opacity: 0.5, marginBottom: '16px' }} />
                     <p style={{ margin: 0, fontSize: '1rem', fontWeight: 700 }}>لا توجد كروت تعليمية بعد</p>
                     <p style={{ margin: '8px 0 0', fontSize: '0.85rem' }}>أنشئ أول مجموعة كروت بالذكاء الاصطناعي أو اكتبها بنفسك الآن!</p>
+                    <button type="button" onClick={openFlashcardCreate} className="btn-primary compact" style={{ marginTop: '18px' }}>
+                      <Plus size={17} strokeWidth={2.5} />
+                      <span>اعمل أول مجموعة كروت</span>
+                    </button>
                   </div>
                 ) : (
                   <div id="tour-flashcards-card" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '20px' }}>

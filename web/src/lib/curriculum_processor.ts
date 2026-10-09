@@ -30,12 +30,63 @@ export interface ChildChunk {
 
 const EXAMPLE_PARTS = /^(?:الحل|الإجابة|وسيلة مساعدة|ماذا لو|فكرة الحل|خطوات الحل)(?![\p{L}\p{N}])/u;
 
+/** Sections at most this long carry little meaning alone: a lead-in before sub-sections, or one list entry. */
+const SHORT_SECTION_CHARS = 150;
+
+type RawSection = { base: string[]; path: string[]; contentLines: string[]; merged?: boolean };
+
+const sectionHeading = (base: string[], path: string[]) => {
+  const parts = [...base, ...path].map(p => p.trim()).filter(Boolean).filter((v, i, a) => i === 0 || v !== a[i - 1]);
+  return parts.join(' > ') || 'مقدمة المنهج';
+};
+const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+const sectionText = (s: RawSection) => s.contentLines.join('\n').trim();
+
+/**
+ * Short sections are never dropped: a lead-in ("تتمثل في:") moves into the sub-section that follows it, and
+ * consecutive short siblings (vocabulary entries, short definitions) become one section under their parent
+ * heading, one "**title**: content" line each.
+ */
+function consolidateShortSections(sections: RawSection[]): RawSection[] {
+  const out: RawSection[] = [];
+  let carry: string[] = [];
+  for (let i = 0; i < sections.length; i++) {
+    const sec: RawSection = { ...sections[i], contentLines: [...carry, ...sections[i].contentLines] };
+    carry = [];
+    const text = sectionText(sec);
+    if (!text) continue;
+    const next = sections[i + 1];
+    const short = text.length <= SHORT_SECTION_CHARS;
+    if (short && next && sameList(next.base, sec.base) && next.path.length > sec.path.length &&
+        sameList(next.path.slice(0, sec.path.length), sec.path)) {
+      carry = sec.contentLines;
+      continue;
+    }
+    const prev = out[out.length - 1];
+    const parentPath = sec.path.slice(0, -1);
+    const title = sec.path[sec.path.length - 1];
+    if (short && title && prev?.merged &&
+        sameList(prev.base, sec.base) && sameList(prev.path, parentPath) && sectionText(prev).length + text.length < 1500) {
+      prev.contentLines.push(`**${title}**: ${text.replace(/\n+/g, ' ')}`);
+      continue;
+    }
+    const nextIsShortSibling = !!next && !!title && sameList(next.base, sec.base) && sameList(next.path.slice(0, -1), parentPath) &&
+      next.path.length === sec.path.length && sectionText(next).length > 0 && sectionText(next).length <= SHORT_SECTION_CHARS;
+    if (short && nextIsShortSibling) {
+      out.push({ base: sec.base, path: parentPath, contentLines: [`**${title}**: ${text.replace(/\n+/g, ' ')}`], merged: true });
+      continue;
+    }
+    out.push(sec);
+  }
+  return out.map(({ base, path, contentLines }) => ({ base, path, contentLines }));
+}
+
 export function chunkMarkdownHierarchical(markdownText: string): {
   parents: ParentChunk[];
   children: ChildChunk[];
 } {
   const lines = markdownText.split('\n').filter(l => !/^\s*<!--.*-->\s*$/.test(l));
-  const rawSections: { heading: string; contentLines: string[] }[] = [];
+  const collected: RawSection[] = [];
 
   // A "#" heading followed directly by another "#" heading is a parent unit grouping chapters
   const isGroupHeading = (index: number) => {
@@ -50,17 +101,18 @@ export function chunkMarkdownHierarchical(markdownText: string): {
   let currentGroup = '';
   let currentUnit = '';
   let currentLesson = '';
-  let currentHeading = 'مقدمة المنهج';
+  // Headings below the lesson (### and deeper), so a sub-section keeps the topic it belongs to
+  let headingStack: { level: number; title: string }[] = [];
   let currentLines: string[] = [];
 
-  const buildBreadcrumb = () => {
-    const raw = [currentGroup, currentUnit, currentLesson, currentHeading].map(s => (s || '').trim()).filter(Boolean);
-    const parts = raw.filter((v, i, a) => i === 0 || v !== a[i - 1]);
-    return parts.join(' > ') || 'مقدمة المنهج';
-  };
   const flush = () => {
-    if (currentLines.join('\n').trim().length > 10) {
-      rawSections.push({ heading: buildBreadcrumb(), contentLines: [...currentLines] });
+    if (currentLines.join('\n').trim()) {
+      const path = headingStack.map(h => h.title);
+      collected.push({
+        base: [currentGroup, currentUnit, currentLesson],
+        path: path.length || currentGroup || currentUnit || currentLesson ? path : ['مقدمة المنهج'],
+        contentLines: [...currentLines]
+      });
     }
     currentLines = [];
   };
@@ -75,7 +127,8 @@ export function chunkMarkdownHierarchical(markdownText: string): {
     const title = heading[2].trim();
     if (level === 1 && title.startsWith('منهج')) return;
     // A worked example's solution, hint and variation stay in the example's chunk so the question and its answer are retrieved together
-    if (level >= 3 && /^مثال/.test(currentHeading) && EXAMPLE_PARTS.test(title)) {
+    const currentTitle = headingStack[headingStack.length - 1]?.title || '';
+    if (level >= 3 && /^مثال/.test(currentTitle) && EXAMPLE_PARTS.test(title)) {
       currentLines.push(`**${title}**`);
       return;
     }
@@ -89,15 +142,20 @@ export function chunkMarkdownHierarchical(markdownText: string): {
         currentUnit = title;
       }
       currentLesson = '';
-      currentHeading = '';
+      headingStack = [];
     } else if (level === 2) {
       currentLesson = title;
-      currentHeading = '';
+      headingStack = [];
     } else {
-      currentHeading = title;
+      headingStack = [...headingStack.filter(h => h.level < level), { level, title }];
     }
   });
   flush();
+
+  const rawSections = consolidateShortSections(collected).map(sec => ({
+    heading: sectionHeading(sec.base, sec.path),
+    contentLines: sec.contentLines
+  }));
 
   const parents: ParentChunk[] = [];
 
@@ -151,67 +209,67 @@ export function chunkMarkdownHierarchical(markdownText: string): {
   return { parents, children };
 }
 
+const TABLE_ROW = /^\s*\|.*\|\s*$/;
+const TABLE_SEPARATOR = /^\s*\|?\s*:?-{3,}/;
+
+/**
+ * Sentence-aware sliding window. Markdown table rows are kept as whole lines, and a window that starts inside
+ * a table repeats the table's header row, so every chunk of a table still says what its columns mean.
+ */
 function createSlidingWindowChunks(
   text: string,
   parentHeading: string,
   maxTokens: number,
   overlapTokens: number
 ): Omit<ChildChunk, 'parentIndex'>[] {
-  const sentences = text
-    .split(/(?<=[.!?؟\n])\s+|(?<=[\n])\s*/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0);
-
-  if (sentences.length === 0) return [];
-
+  if (!text.trim()) return [];
   if (countTokens(text) <= maxTokens) {
-    return [{
-      heading: parentHeading,
-      content: text.trim(),
-      parentHeading
-    }];
+    return [{ heading: parentHeading, content: text.trim(), parentHeading }];
   }
 
-  const sentencesWithTokens = sentences.map(s => ({
-    text: s,
-    tokens: countTokens(s)
-  }));
+  const items: { text: string; tokens: number; tableHeader: string | null; isRow: boolean }[] = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    if (TABLE_ROW.test(line)) {
+      let header: string | null = null;
+      for (let j = i - 1; j >= 0 && TABLE_ROW.test(lines[j].trim()); j--) {
+        if (TABLE_SEPARATOR.test(lines[j].trim()) && j > 0) header = `${lines[j - 1].trim()}\n${lines[j].trim()}`;
+      }
+      const isHeaderPart = TABLE_SEPARATOR.test(line) || (i + 1 < lines.length && TABLE_SEPARATOR.test(lines[i + 1].trim()));
+      items.push({ text: line, tokens: countTokens(line), tableHeader: header, isRow: !isHeaderPart });
+      continue;
+    }
+    for (const sentence of line.split(/(?<=[.!?؟])\s+/)) {
+      if (sentence.trim()) items.push({ text: sentence.trim(), tokens: countTokens(sentence), tableHeader: null, isRow: false });
+    }
+  }
+  if (items.length === 0) return [];
 
   const chunks: Omit<ChildChunk, 'parentIndex'>[] = [];
-  let buffer: { text: string; tokens: number }[] = [];
+  const emit = (buffer: typeof items) => {
+    const first = buffer[0];
+    const header = first.isRow && first.tableHeader ? `${first.tableHeader}\n` : '';
+    const body = buffer.map((b, k) => (b.isRow || (k > 0 && buffer[k - 1].isRow) || TABLE_SEPARATOR.test(b.text) ? `\n${b.text}` : ` ${b.text}`)).join('').trim();
+    chunks.push({ heading: parentHeading, content: `${header}${body}`.trim(), parentHeading });
+  };
+
+  const buffer: typeof items = [];
   let bufferTokens = 0;
-
-  for (const item of sentencesWithTokens) {
+  for (const item of items) {
     if (bufferTokens + item.tokens > maxTokens && buffer.length > 0) {
-      chunks.push({
-        heading: parentHeading,
-        content: buffer.map(b => b.text).join(' ').trim(),
-        parentHeading
-      });
-
+      emit(buffer);
       while (buffer.length > 0 && bufferTokens > overlapTokens) {
-        const removed = buffer.shift()!;
-        bufferTokens -= removed.tokens;
+        bufferTokens -= buffer.shift()!.tokens;
       }
     }
-
     buffer.push(item);
     bufferTokens += item.tokens;
   }
+  if (buffer.length > 0 && buffer.map(b => b.text).join(' ').trim().length > 5) emit(buffer);
 
-  if (buffer.length > 0 && buffer.map(b => b.text).join(' ').trim().length > 5) {
-    chunks.push({
-      heading: parentHeading,
-      content: buffer.map(b => b.text).join(' ').trim(),
-      parentHeading
-    });
-  }
-
-  return chunks.length > 0 ? chunks : [{
-    heading: parentHeading,
-    content: text.trim(),
-    parentHeading
-  }];
+  return chunks.length > 0 ? chunks : [{ heading: parentHeading, content: text.trim(), parentHeading }];
 }
 
 /**

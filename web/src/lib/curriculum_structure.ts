@@ -116,10 +116,12 @@ export function invalidateStructureCache() {
 }
 
 const normalizedTextCache = new Map<string, string>();
+const sectionLessonCache = new Map<string, Map<string, string>>();
 
 registerCurriculumInvalidator(() => {
   structureCache.clear();
   normalizedTextCache.clear();
+  sectionLessonCache.clear();
 });
 
 /**
@@ -136,6 +138,52 @@ export async function curriculumTextContains(curriculumId: string, phrase: strin
     if (text) normalizedTextCache.set(curriculumId, text);
   }
   return !text || text.includes(target);
+}
+
+/**
+ * Lesson that contains a retrieved section: from its breadcrumb when it names a lesson, otherwise from the
+ * section heading's place in the textbook Markdown. Headings repeated across lessons ("مصطلحات الدرس") are
+ * ambiguous and place nothing. Returns the matching title of `lessonTitles` (exact, or the one whose title
+ * contains the book's lesson title or is contained in it), else the book's own lesson heading, else undefined.
+ */
+export async function lessonOfSection(curriculumId: string, heading: string, lessonTitles: string[]): Promise<string | undefined> {
+  const byNorm = new Map(lessonTitles.map(t => [normalize(t), t]));
+  const segments = heading.split('>').map(s => normalize(s.replace(/\s*\(\d+\)\s*$/, '')));
+  for (const segment of segments) {
+    const hit = byNorm.get(segment);
+    if (hit) return hit;
+  }
+  let index = sectionLessonCache.get(curriculumId);
+  if (!index) {
+    const detail = await db.getCurriculumDetail(curriculumId);
+    const built = new Map<string, string>();
+    let lesson = '';
+    for (const line of (detail?.content || '').split('\n')) {
+      const m = line.trim().match(/^(#{1,6})\s+(.+)$/);
+      if (!m) continue;
+      const title = normalize(m[2]);
+      if (m[1].length === 1) lesson = '';
+      else if (m[1].length === 2) lesson = m[2].trim();
+      if (!lesson) continue;
+      const known = built.get(title);
+      built.set(title, known === undefined || known === lesson ? lesson : '');
+    }
+    index = built;
+    sectionLessonCache.set(curriculumId, index);
+  }
+  const bookLesson = index.get(segments[segments.length - 1]);
+  if (!bookLesson) return undefined;
+  const exact = byNorm.get(normalize(bookLesson));
+  if (exact) return exact;
+  const sub = normalize(lessonSubtitle(bookLesson));
+  if (sub.length >= 4) {
+    const close = lessonTitles.find(t => {
+      const other = normalize(lessonSubtitle(t));
+      return other.length >= 4 && (other.includes(sub) || sub.includes(other));
+    });
+    if (close) return close;
+  }
+  return bookLesson;
 }
 
 /**

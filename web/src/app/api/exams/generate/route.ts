@@ -1,4 +1,4 @@
-export const maxDuration = 60;
+export const maxDuration = 90;
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { verifySessionToken } from '@/lib/auth_helpers';
@@ -31,7 +31,8 @@ async function generateExamWithAI(systemPrompt: string, gradeLevel: string, subj
           thinking: { type: 'disabled' },
           temperature: 0.4,
           max_tokens: 8000
-        })
+        }),
+        signal: AbortSignal.timeout(40000)
       });
 
       if (response.ok) {

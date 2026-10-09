@@ -308,7 +308,7 @@ export default function Dashboard() {
               مُستخرج ومُنظّم المناهج الدراسية المتزامن (EGS AI Multi-Curriculum Engine)
             </h1>
             <p style={{ fontSize: "14px", color: "var(--text-muted)", marginTop: "4px" }}>
-              معالجة متوازية فائقة السرعة مدعومة بنموذج DeepSeek 4.1 متعدد الوسائط الموحد (رؤية بصرية وهيكلة تربوية مباشرة)
+              معالجة متوازية بنموذج DeepSeek 4.1: طلب واحد لكل صفحة يقرأ النص ويصنف الصفحة وينظمها في نفس الخطوة
             </p>
           </div>
         </div>
@@ -740,7 +740,7 @@ export default function Dashboard() {
                 value={outlineText}
                 onChange={(e) => setOutlineText(e.target.value)}
                 rows={4}
-                placeholder={"الوحدة 1: ...\nالفصل 1: ...\nالدرس 1: ...\nمقدمة: ... (للأقسام التمهيدية قبل الوحدة الأولى)"}
+                placeholder={"الوحدة 1: ...\nالفصل 1: ...\nالدرس 1: ...\nمقدمة: ... (للأقسام التمهيدية قبل الوحدة الأولى)\nعنوان العمل وحده إن لم يكن مرقّماً (مثل: عودة الروح)"}
                 style={{
                   width: "100%",
                   padding: "12px",
@@ -1565,7 +1565,7 @@ export default function Dashboard() {
                   فهرس الكتاب المعتمد لضبط الوحدات والدروس
                 </summary>
                 <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: "10px 0" }}>
-                  سطر لكل عنصر: &quot;الوحدة 1: ...&quot; أو &quot;الفصل 2: ...&quot; أو &quot;الدرس 1: ...&quot; أو &quot;مقدمة: ...&quot;. عند الحفظ يُعاد بناء المنهج فوراً دون أي استهلاك لواجهات الذكاء الاصطناعي.
+                  سطر لكل عنصر: &quot;الوحدة 1: ...&quot; أو &quot;الفصل 2: ...&quot; أو &quot;الدرس 1: ...&quot; أو &quot;مقدمة: ...&quot;. للكتب التي لا ترقّم أعمالها (مثل مجموعة روايات): اكتب عنوان كل عمل وحده في سطر، و&quot;قسم: ...&quot; للجزء غير المرقّم. عند الحفظ يُعاد بناء المنهج فوراً دون أي استهلاك لواجهات الذكاء الاصطناعي.
                 </p>
                 <textarea
                   value={previewOutline}

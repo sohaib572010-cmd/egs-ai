@@ -7,17 +7,31 @@ import { isEnglishSubject, isEnglishText, isClearlyDifferentSubject } from '@/li
 import {
   analyzeQueryIntelligence,
   classifyEngagement,
-  callDeepSeekVision,
   isSinglePointQuestion,
+  isStepByStepRequest,
   resolveAnswerScope,
-  type AnswerScope
+  WEAK_TEXTBOOK_RELEVANCE,
+  type AnswerScope,
+  type StudentIntent
 } from '@/lib/gemini';
-import { retrieveCurriculumContext, formatCurriculumMap, formatSections } from '@/lib/hybrid_retriever';
-import { getExhaustiveLessonContext, curriculumTextContains, findCurriculumFor, getCurriculumStructure } from '@/lib/curriculum_structure';
+import { retrieveCurriculumContext, formatCurriculumMap, formatSections, type RetrievedSection } from '@/lib/hybrid_retriever';
+import { getExhaustiveLessonContext, curriculumTextContains, findCurriculumFor, getCurriculumStructure, lessonOfSection } from '@/lib/curriculum_structure';
+import {
+  conversationDigest,
+  isConversationalGreeting,
+  isImageCapabilityInquiry,
+  isLessonNavAction,
+  isLessonRequestText,
+  isVoiceCapabilityInquiry,
+  ongoingStepLesson,
+  stripThought,
+  type HistoryMessage
+} from '@/lib/chat_intent';
 import { getGradeDisplayName } from '@/lib/subject_helpers';
 import { acquireAiSlot, releaseAiSlot, chargeForUsage, usageFromProvider, estimateUsage, AI_BUSY_RESPONSE, type ChargeResult } from '@/lib/metering';
 import { RAG_OVERHEAD_USAGE, VISION_USAGE, type TokenUsage } from '@/lib/points_pricing';
 import { offloadInlineMedia } from '@/lib/chat_media';
+import { readStudentImage } from '@/lib/image_reader';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -99,137 +113,6 @@ function parseMessage(msg: string): {
   };
 }
 
-function isConversationalGreeting(text: string): boolean {
-  if (!text) return false;
-  const clean = text
-    .replace(/[؟?!.،,;:~`!@#$%^&*()_+\-=\[\]{}'"]/g, ' ')
-    .trim()
-    .toLowerCase();
-  if (!clean || clean.length > 60) return false;
-
-  const exactGreetings = new Set([
-    'سلام', 'سلام عليكم', 'السلام عليكم', 'وعليكم السلام', 'أهلا', 'اهلا', 'مرحبا', 'مرحباً',
-    'هاي', 'هلو', 'صباح الخير', 'مساء الخير', 'صباح النور', 'مساء النور', 'صباح الورد', 'مساء الورد',
-    'ازيك', 'ازي حضرتك', 'إزيك', 'عامل ايه', 'اخبارك', 'أخبارك', 'شخبارك', 'تمام', 'الحمد لله',
-    'مين انت', 'أنت مين', 'انت مين', 'مين حضرتك', 'عرفني بنفسك', 'بتعمل ايه', 'تقدر تساعدني ازاي',
-    'شكرا', 'شكراً', 'تسلم', 'جزاك الله خير', 'جزاك الله خيرا', 'ألف شكر', 'مشكور',
-    'عاوز اذاكر', 'عايز اذاكر', 'ممكن تساعدني', 'محتاج مساعدة', 'يلا نذاكر', 'ابدأ معايا',
-    'يا مستر', 'يا استاذ', 'يا باشا', 'يا دكتور', 'يا بشمهندس'
-  ]);
-
-  if (exactGreetings.has(clean)) return true;
-
-  const greetingPrefixes = [
-    'ازيك', 'إزيك', 'السلام عليكم', 'سلام عليكم', 'صباح الخير', 'مساء الخير', 'أهلا', 'اهلا', 'مرحبا'
-  ];
-  return greetingPrefixes.some(p => clean.startsWith(p) && clean.length < 30);
-}
-
-function isImageCapabilityInquiry(text: string): boolean {
-  if (!text) return false;
-  const clean = text
-    .replace(/[؟?!.،,;:~`!@#$%^&*()_+\-=\[\]{}'"]/g, ' ')
-    .trim()
-    .toLowerCase();
-  if (!clean || clean.length > 150) return false;
-
-  // Never match physics optics curriculum questions about mirrors/lenses and image formations
-  if (/(?:مرآة|مرايا|عدسة|عدسات|تكون الصور|صفات الصورة|خواص الصورة|مسار الأشعة|بؤرة|خيالية|حقيقية|مقلوبة|معتدلة)/i.test(clean)) {
-    return false;
-  }
-
-  // Check direct query about text-only model or camera/image capabilities
-  const directTextOnlyCheck = /(?:نصي فقط|نصوص بس|كلام بس|text[- ]?only)/i.test(clean);
-
-  const cameraOrImagePattern = /(?:صورة|صور|صوره|كاميرا|كاميره|تصوير|أصور|اصور|صورة بالكاميرا|صور بالكاميرا|رفع صورة|ارفق صورة|ارفاق صورة|image|images|picture|pictures|photo|photos|camera)/i;
-  const capabilityQuestionPattern = /(?:هل|أقدر|اقدر|تقدر|بتقدر|ينفع|ممكن|عايز|عاوز|كيف|ازاي|طريقة|تدعم|بتدعم|تقبل|بيقبل|بتقبل|تفهم|بيفهم|بتفهم|تشوف|بيشوف|بتشوف|تقرأ|بتقرأ|تستقبل|بتستقبل|يمكنك|تستطيع|بتعرف|تعرف|أبعت|ابعت|ارفع|أرفع|اصور|أصور|can i|do you (?:support|accept|see|read|take)|are you (?:text|multimodal))/i;
-
-  return directTextOnlyCheck || (cameraOrImagePattern.test(clean) && capabilityQuestionPattern.test(clean));
-}
-
-function isVoiceCapabilityInquiry(text: string): boolean {
-  if (!text) return false;
-  const clean = text
-    .replace(/[؟?!.،,;:~`!@#$%^&*()_+\-=\[\]{}'"]/g, ' ')
-    .trim()
-    .toLowerCase();
-  if (!clean || clean.length > 150) return false;
-
-  const voicePattern = /(?:صوتية|رسالة صوتية|رسائل صوتية|فويس|فويسات|صوت|تسجيل صوتي|تسجيل صوت|مايك|ميكروفون|تسجيلات|voice|audio|voice[- ]?note)/i;
-  const capabilityPattern = /(?:هل|أقدر|اقدر|تقدر|بتقدر|ينفع|ممكن|عايز|عاوز|كيف|ازاي|طريقة|تدعم|بتدعم|تقبل|بيقبل|بتقبل|تسمع|بيسمع|بتسمع|تفهم|بيفهم|بتفهم|تستقبل|بتستقبل|تتكلم|اتكلم|أبعت|ابعت|اسجل|أسجل|can i|do you (?:support|accept|hear|listen))/i;
-
-  return voicePattern.test(clean) && capabilityPattern.test(clean);
-}
-
-async function analyzeImageWithEdenAI(base64: string, mimeType: string): Promise<string> {
-  if (!base64) return '';
-
-  // Step 1: DeepSeek Flash (deepseek-flash, Primary Vision Model with native multimodal)
-  if (process.env.DEEPSEEK_API_KEY) {
-    try {
-      const desc = await callDeepSeekVision(
-        base64,
-        mimeType || 'image/jpeg',
-        'اقرأ هذه الصورة بالتفصيل واكتب وصفاً شاملاً ومفصلاً لها باللغة العربية، بما في ذلك أي نصوص أو أسئلة أو مسائل أو معادلات رياضية أو فيزيائية أو كيميائية أو جداول أو رسوم توضيحية بداخلها بدقة بالغة واكتب النصوص والمسائل كما هي حرفياً.'
-      );
-      if (desc && desc.trim().length > 0) {
-        return desc.trim();
-      }
-    } catch (deepseekVisionErr) {
-      console.warn('DeepSeek Vision in chat failed, falling back to EdenAI:', deepseekVisionErr);
-    }
-  }
-
-  // Step 2: EdenAI VQA Fallback (Google / OpenAI)
-  const EDENAI_API_KEY = process.env.EDENAI_API_KEY || '';
-  if (!EDENAI_API_KEY) return '';
-
-  try {
-    const binaryString = atob(base64);
-    const len = binaryString.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binaryString.charCodeAt(i);
-    }
-    const blob = new Blob([bytes], { type: mimeType || 'image/jpeg' });
-
-    const formData = new FormData();
-    formData.append('providers', 'google');
-    formData.append('fallback_providers', 'openai');
-    formData.append('file', blob, `image.${(mimeType || 'image/jpeg').split('/')[1] || 'jpg'}`);
-    formData.append(
-      'question',
-      'اقرأ هذه الصورة بالتفصيل واكتب وصفاً شاملاً ومفصلاً لها باللغة العربية، بما في ذلك أي نصوص أو أسئلة أو مسائل أو معادلات رياضية أو فيزيائية أو كيميائية أو جداول أو رسوم توضيحية بداخلها بدقة بالغة واكتب النصوص والمسائل كما هي حرفياً.'
-    );
-
-    const response = await fetch('https://api.edenai.run/v2/image/question_answer', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${EDENAI_API_KEY}`
-      },
-      body: formData
-    });
-
-    if (!response.ok) {
-      console.error('EdenAI VQA in chat error:', response.status);
-      return '';
-    }
-
-    const data = await response.json();
-    const googleAnswers = data?.google?.answers;
-    const openaiAnswers = data?.openai?.answers;
-
-    return (googleAnswers && googleAnswers.length > 0 ? googleAnswers[0] : null) || 
-           (openaiAnswers && openaiAnswers.length > 0 ? openaiAnswers[0] : null) || 
-           data?.google?.answer || 
-           data?.openai?.answer || 
-           '';
-  } catch (err) {
-    console.error('Error analyzing image in chat via EdenAI fallback:', err);
-    return '';
-  }
-}
-
 function buildPromptText(
   cleanText: string,
   imageDesc?: string,
@@ -252,6 +135,27 @@ function buildPromptText(
 
 const HEAD_HOLD_CHARS = 280;
 const RELATED_EXCERPT_RELEVANCE = 0.6;
+const LESSON_EVIDENCE_RELEVANCE = 0.6;
+const MAX_STORED_IMAGE_TEXT = 6000;
+
+/**
+ * The lesson an in-curriculum answer may name. The classifier's choice is kept when a relevant retrieved section
+ * belongs to it (or when no section can be placed in a lesson); otherwise the lesson of the strongest section is
+ * named, and nothing when the evidence is weak, because naming the wrong lesson misleads the student.
+ */
+async function evidenceLesson(curriculumId: string, sections: RetrievedSection[], lessonTitles: string[], claimed?: string): Promise<string> {
+  if (sections.length === 0 || sections[0].relevance === null) return claimed || '';
+  const placed = await Promise.all(
+    sections
+      .filter(sec => (sec.relevance ?? 0) >= WEAK_TEXTBOOK_RELEVANCE)
+      .slice(0, 4)
+      .map(async sec => ({ lesson: await lessonOfSection(curriculumId, sec.chunk.heading, lessonTitles).catch(() => undefined), relevance: sec.relevance ?? 0 }))
+  );
+  const known = placed.filter(p => p.lesson);
+  if (claimed && (known.length === 0 || known.some(p => p.lesson === claimed))) return claimed;
+  return known[0] && known[0].relevance >= LESSON_EVIDENCE_RELEVANCE ? known[0].lesson! : '';
+}
+
 // ─── Main POST Handler ────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   let heldSlotUser: string | null = null;
@@ -429,48 +333,26 @@ export async function POST(req: NextRequest) {
 
     // Save user message before streaming; photos and voice notes go to object storage, not the row
     const storedMessage = (parsedMsg.hasImage || isVoice) ? await offloadInlineMedia(message, userId as string) : message;
-    await db.addChatMessage('user', storedMessage, userId, undefined, activeSessionId);
+    const savedUserMsg = await db.addChatMessage('user', storedMessage, userId, undefined, activeSessionId);
 
-    // Fetch recent message history (prior to the current turn)
-    let recentHistory: any[] = [];
-    let ongoingLessonTitle: string | null = null;
-    let roadmapMsg: any = null;
-
+    // Recent history (before this turn); an unfinished step-by-step lesson keeps its roadmap message anchored
+    let recentHistory: HistoryMessage[] = [];
     const rawHistory = await db.getChatHistory(undefined, undefined, activeSessionId, 60);
-    const priorHistory = (rawHistory && rawHistory.length > 0)
+    const priorHistory: HistoryMessage[] = (rawHistory && rawHistory.length > 0)
       ? rawHistory.slice(0, -1)
       : sanitizeClientHistory(history);
+    const ongoingLesson = ongoingStepLesson(priorHistory);
+    const ongoingLessonTitle = ongoingLesson?.title || null;
 
-    if (priorHistory && priorHistory.length > 0) {
-      // Check if session has an active lesson explanation roadmap that is not yet completed
-      roadmapMsg = [...priorHistory].reverse().find((m: any) =>
-        m.sender === 'ai' && (m.message.includes('مقسم إلى') || m.message.includes('نقاط أساسية'))
-      );
-      if (roadmapMsg) {
-        const lastNavMsg = [...priorHistory].reverse().find((m: any) =>
-          m.sender === 'ai' && m.message.includes('[LESSON_NAV]')
-        );
-        const isLessonAlreadyCompleted = !!lastNavMsg && /"is_completed"\s*:\s*true/.test(lastNavMsg.message);
-
-        if (!isLessonAlreadyCompleted) {
-          const match1 = roadmapMsg.message.match(/درسنا اليوم هو\s+([^\n،,]+?)(?:\s+يا بطل|\s*،|\s*والدرس)/);
-          const match2 = roadmapMsg.message.match(/درس\s+([^\n،,]+?)\s+مقسم إلى/);
-          ongoingLessonTitle = (match1 && match1[1]?.trim()) || (match2 && match2[1]?.trim()) || null;
-        }
+    if (priorHistory.length > 0) {
+      let selectedHistory = priorHistory.slice(-MAX_CLIENT_HISTORY);
+      if (ongoingLesson && !selectedHistory.includes(ongoingLesson.roadmap)) {
+        selectedHistory = [ongoingLesson.roadmap, ...selectedHistory];
       }
-
-      // Preserve up to 14 prior messages; anchor the roadmap message at the front if evicted
-      let selectedHistory = priorHistory.slice(-14);
-      if (roadmapMsg && !selectedHistory.some((m: any) => m.id && m.id === roadmapMsg.id)) {
-        selectedHistory = [roadmapMsg, ...selectedHistory];
-      }
-
-      recentHistory = selectedHistory.map((h: any) => {
+      recentHistory = selectedHistory.map(h => {
+        if (h.sender === 'ai') return { sender: h.sender, message: stripThought(h.message) };
         const { cleanText: hText, imageDesc: histDesc, isVoice: hVoice, voiceDuration: hDuration } = parseMessage(h.message);
-        return {
-          sender: h.sender,
-          message: buildPromptText(hText, histDesc, hVoice, hDuration)
-        };
+        return { sender: h.sender, message: buildPromptText(hText, histDesc, hVoice, hDuration) };
       });
     }
 
@@ -516,11 +398,19 @@ export async function POST(req: NextRequest) {
             emitSearchStep('image_analysis', '🔍', 'تحليل الصورة');
             let desc = initialImageDesc;
             if (!desc) {
-              desc = await analyzeImageWithEdenAI(imageBase64, imageMime || 'image/jpeg');
+              desc = await readStudentImage(imageBase64, imageMime || 'image/jpeg');
               if (desc) meteredUsage.push(VISION_USAGE);
             }
             if (desc) {
               promptText = buildPromptText(cleanText, desc, isVoice, voiceDuration);
+              // Keep the transcription with the photo so follow-ups ("حل السؤال التاني") can still see it
+              if (!initialImageDesc) {
+                const withText = storedMessage.replace(
+                  /\[IMAGE_MESSAGE:([^;\]]+);([^;\]]+)(?:;[^\]]*)?\]/,
+                  (_, mime, data) => `[IMAGE_MESSAGE:${mime};${data};${encodeURIComponent(desc!.slice(0, MAX_STORED_IMAGE_TEXT))}]`
+                );
+                if (withText !== storedMessage) await db.updateChatMessageText(savedUserMsg.id, withText).catch(() => {});
+              }
             }
           }
 
@@ -533,6 +423,7 @@ export async function POST(req: NextRequest) {
           let scopeReasoning = false;
           let isLessonExplanationActive = false;
           let lessonMode: LessonMode = 'none';
+          let studentIntent: StudentIntent | undefined;
           const activeSubject = targetCurr.subject_name;
           const activeGrade = targetCurr.grade_level;
 
@@ -556,11 +447,12 @@ export async function POST(req: NextRequest) {
 3. أكد له أنك ستقرأ كل تفاصيل الصورة والمسائل والرسومات بدقة تامة وستشرحها وتحلها خطوة بخطوة وفق المنهج المصري لمادة "${subject_name}".
 4. ادعه بهدوء وثقة لتجربة تصوير أي مسألة أو سؤال أمامه الآن والضغط على إرسال لتبدأ في تحليلها وشرحها معه.
 استثناء حاسم: يمنع منعاً باتاً إصدار أي تنبيه بأن المعلومة خارج المنهج أو أنك نموذج نصي فقط.`;
-          } else if (!imageBase64 && isConversationalGreeting(cleanText)) {
+          } else if (!imageBase64 && recentHistory.length === 0 && isConversationalGreeting(cleanText)) {
             emitSearchStep('greeting', '✨', 'أهلاً بك...');
             const studentGreetingName = profile?.name && profile.name !== 'طالب جديد' ? profile.name : '';
             ragContext = `أنت في محادثة ترحيبية افتتاحية مع الطالب${studentGreetingName ? ` (${studentGreetingName})` : ''}.
-1. رحب بالطالب بلهجة مصرية تعليمية مهذبة وذكية وراقية، دون أي مدح مصطنع أو مجاملات مبالغ فيها، ودون استخدام ألقاب متكررة مثل "يا بطل" أو "يا دكتور".
+0. الرد كله من ثلاث إلى خمس جمل قصيرة وطبيعية، كأنك مدرس حقيقي بيرد على طالبه، وليس قائمة مميزات.
+1. رحب بالطالب بلهجة مصرية تعليمية مهذبة وذكية وراقية، دون أي مدح مصطنع أو مجاملات مبالغ فيها، ودون استخدام ألقاب متكررة مثل "يا بطل" أو "يا دكتور". لو سألك عن حالك رد بجملة إنسانية قصيرة.
 2. عرف بنفسك باختصار شديد بأنك معلمه ومساعده الذكي في مادة "${subject_name}".
 3. وضّح له باحترافية أنك جاهز لمساعدته في: شرح أي درس بالتفصيل، إيضاح أي نقطة غير مفهومة، حل المسائل والتدريبات خطوة بخطوة (سواء كتابة أو بتصوير المسألة بالكاميرا مباشرة أو إرفاق صورتها)، أو توليد اختبارات تدريبية سريعة.
 4. اقترح عليه البدء بسؤال محدد أو تحديد النقطة التي يريد استيعابها أو مراجعة أي موضوع في المنهج، بأسلوب واثق وذكي ومباشر.
@@ -572,13 +464,12 @@ export async function POST(req: NextRequest) {
             // Warm the in-memory retrieval corpus while the question is being analyzed
             getCurriculumCorpus(targetCurr.id).catch(() => {});
             const lessonMap = curriculumUnits.flatMap(u => u.lessons.map(l => ({ title: l.title, subtopics: l.subtopics })));
-            const conversation = recentHistory
-              .slice(-4)
-              .map(h => `${h.sender === 'user' ? 'الطالب' : 'المعلم'}: ${h.message.replace(/<thought[\s\S]*?<\/thought>/g, '').replace(/\[(QUIZ_QUESTION|CREATE_EXAM|CREATE_FLASHCARDS|LESSON_NAV)\][\s\S]*?\[\/\1\]/g, '').replace(/\s+/g, ' ').trim().slice(0, 400)}`)
-              .join('\n');
+            const lessonTitles = lessonMap.map(l => l.title);
+            const conversation = conversationDigest(recentHistory);
 
             const intelligence = await analyzeQueryIntelligence(promptText, subject_name, `${getGradeDisplayName(targetGrade)} (${targetGrade})`, lessonMap, conversation);
             const retrievalQuery = intelligence.standaloneQuery || promptText;
+            studentIntent = intelligence.intent;
 
             // The fixed redirect refuses to answer, so it needs the classifier flag, a recognizably unrelated subject
             // family, and none of the question's core terms appearing in this textbook. Anything less is answered.
@@ -587,7 +478,7 @@ export async function POST(req: NextRequest) {
             if (isSubjectMismatch) {
               const terms = intelligence.arabicKeywords.slice(0, 3);
               const inTextbook = await Promise.all(terms.map(t => curriculumTextContains(targetCurr.id, t).catch(() => true)));
-              isSubjectMismatch = terms.length > 0 && !inTextbook.some(Boolean);
+              isSubjectMismatch = !inTextbook.some(Boolean);
             }
             const isGradeMismatch = intelligence.isDifferentGrade === true;
 
@@ -603,24 +494,16 @@ export async function POST(req: NextRequest) {
             } else {
 
             const isSinglePointDoubt = isSinglePointQuestion(cleanText);
-
-            // Check if user specifically requested interactive step-by-step mode
-            const isExplicitStepByStep = /(?:خطوة بخطوة|نقطة بنقطة|خطوة خطوة|نقطة نقطة|تفاعلي|جزئية بجزئية|امشي معايا)/i.test(cleanText);
-
-            // Check if current user turn is an explicit lesson navigation action or check question response
-            const hasLessonNavAction = /(?:الانتقال إلى النقطة التالية|النقطة التالية|النقطة التانية|انقل للنقطة|النقطة اللي بعدها|كمل النقطة|فهمت كمل|استمر في الشرح وتفصيل هذه النقطة|لم أفهم، وضح بمثال إضافي|وضح بمثال إضافي)/i.test(cleanText) ||
-              /^(?:الخيار\s+)?[أابجد](?:\s*|\.)$/i.test(cleanText.trim()) ||
-              /^(?:صح|خطأ)$/i.test(cleanText.trim());
-
-            const isContinuityAnswer = !!ongoingLessonTitle && !isSinglePointDoubt && hasLessonNavAction;
-
-            // Lesson explanation request (either explicitly saying 'كامل' or asking to explain a lesson/chapter)
-            const isLessonRequest = !isSinglePointDoubt && (
-              intelligence.isLessonExplanation ||
-              /(?:شرح كامل|شرح شامل|الدرس كامل|كل نقاط الدرس|ذاكر معايا الدرس|من البداية بالكامل|شرح الدرس|اشرح الدرس|اشرح لي الدرس|اشرحلي الدرس)/i.test(cleanText) ||
-              /(?:اشرح|شرح|ذاكر|ابدأ|عايز شرح|عاوز شرح|ممكن شرح|ممكن تشرح|فهمني)\s+(?:لي\s+)?(?:معايا\s+)?(?:الدرس|درس)\s+([^؟?!.\n]+)/i.test(cleanText) ||
-              /(?:الدرس|درس)\s+([^؟?!.\n]+?)\s+(?:شرح كامل|كامل|بالكامل|شامل|من البداية|شرح|بالتفصيل)/i.test(cleanText)
+            // Inside an unfinished step-by-step lesson, "تمام", "مش فاهم", "النقطة التالية" or an answer to its
+            // check question continue that lesson instead of starting a new search
+            const isContinuityAnswer = !!ongoingLessonTitle && (
+              isLessonNavAction(cleanText) ||
+              studentIntent === 'answer_attempt' ||
+              studentIntent === 'accept_offer' ||
+              (studentIntent === 'confused' && cleanText.length <= 120)
             );
+            const isLessonRequest = !isContinuityAnswer && !isSinglePointDoubt && (intelligence.isLessonExplanation || isLessonRequestText(cleanText));
+            const isExplicitStepByStep = isStepByStepRequest(cleanText);
 
             lessonMode = 'none';
             if (isContinuityAnswer || (isExplicitStepByStep && isLessonRequest)) {
@@ -691,7 +574,8 @@ export async function POST(req: NextRequest) {
                 emitSearchStep('found', '✅', `وجدت ${foundCount} ${foundCount === 1 ? 'قسماً' : 'أقسام'} ذات صلة من المنهج`);
 
                 const coreConcept = intelligence.arabicKeywords[0];
-                const needsTextCheck = intelligence.scope === 'beyond_curriculum' || !intelligence.scope;
+                const weakEvidence = retrieval.topRelevance !== null && retrieval.topRelevance < WEAK_TEXTBOOK_RELEVANCE;
+                const needsTextCheck = intelligence.scope === 'beyond_curriculum' || !intelligence.scope || weakEvidence;
                 const termInTextbook = needsTextCheck && !!coreConcept
                   ? await curriculumTextContains(targetCurr.id, coreConcept).catch(() => true)
                   : false;
@@ -702,7 +586,9 @@ export async function POST(req: NextRequest) {
                   ragContext = [formatCurriculumMap(curriculumUnits), formatSections(related)].filter(Boolean).join('\n\n');
                 }
                 if (answerScope === 'beyond' && intelligence.relatedLesson) scopeLesson = intelligence.relatedLesson;
-                else if (answerScope === 'curriculum') scopeLesson = intelligence.curriculumLesson || '';
+                else if (answerScope === 'curriculum') {
+                  scopeLesson = await evidenceLesson(targetCurr.id, retrieval.sections, lessonTitles, intelligence.curriculumLesson);
+                }
                 scopeConcept = coreConcept || retrievalQuery;
                 scopeReasoning = intelligence.scope === 'curriculum_reasoning' || intelligence.queryType === 'inferential';
               }
@@ -722,6 +608,7 @@ export async function POST(req: NextRequest) {
             thinkingEnabled: activeThinking,
             mode: chatMode,
             lessonMode,
+            intent: studentIntent === 'chitchat' || studentIntent === 'question' ? undefined : studentIntent,
             subjectName: activeSubject,
             gradeLevel: activeGrade
           };

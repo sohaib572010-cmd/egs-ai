@@ -62,6 +62,8 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin || url.pathname.startsWith('/api/')) return;
+  // Dev bundles are not content-hashed, so caching them on localhost would serve stale code
+  if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return;
 
   if (url.pathname.startsWith('/_next/static/') || /\.(?:woff2?|png|jpg|jpeg|webp|avif|svg|ico)$/.test(url.pathname)) {
     event.respondWith(cacheFirst(request));

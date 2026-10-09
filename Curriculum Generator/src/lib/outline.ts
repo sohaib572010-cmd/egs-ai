@@ -5,6 +5,8 @@ export interface OutlineNode {
   number: number | null;
   title: string;
   children: OutlineNode[];
+  /** False when the book prints the entry without a unit/lesson label (e.g. a story in a collection). */
+  labeled?: boolean;
 }
 
 export interface AlignmentReport {
@@ -54,8 +56,8 @@ export function cleanTitle(title: string): string {
   return (title || "")
     .replace(/\u0640/g, "")
     .replace(/[•·●▪]/g, " و ")
-    .replace(/^[\s:\-–—.،,و]+/, "")
-    .replace(/[\s:\-–—.،,و]+$/, "")
+    .replace(/^(?:[\s:\-–—.،,]|و(?=\s))+/, "")
+    .replace(/(?:[\s:\-–—.،,]|(?<=\s)و)+$/, "")
     .replace(/\s+و\s+و\s+/g, " و ")
     .replace(/\s+و\s+/g, " و")
     .replace(/\s+/g, " ")
@@ -64,7 +66,7 @@ export function cleanTitle(title: string): string {
 
 function parseNumberToken(token: string): number | null {
   const t = normalizeArabic(token);
-  const compound = t.match(/^(\d{1,2})\s*(\d{1,2})$/);
+  const compound = t.match(/^(\d{1,2})\s+(\d{1,2})$/);
   if (compound) return parseInt(compound[2], 10);
   if (/^\d{1,2}$/.test(t)) return parseInt(t, 10);
   return ORDINALS[t] ?? null;
@@ -97,11 +99,41 @@ function stem(word: string): string {
   return word.replace(/^(?:وال|بال|فال|كال|لل|ال)(?=\S{2,})/, "").replace(/^و(?=\S{3,})/, "");
 }
 
-function titleWords(title: string): string[] {
+export function titleWords(title: string): string[] {
   return normalizeArabic(title)
     .split(" ")
     .map(stem)
     .filter((w) => w.length > 1 && !STOP_WORDS.has(w) && !/^\d+$/.test(w));
+}
+
+function editDistanceAtMostOne(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++;
+    else if (b.length > a.length) j++;
+    else {
+      i++;
+      j++;
+    }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+
+/** Same word up to one scanning error (غبرات / عبرات, صخب / صح); very short words must match exactly. */
+function sameWord(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (long.length < 3 || /\d/.test(a + b)) return false;
+  return (short.length >= 3 || long.startsWith(short)) && editDistanceAtMostOne(a, b);
 }
 
 function similarity(a: string[], b: string[]): { jaccard: number; containment: number; exact: boolean } {
@@ -109,13 +141,22 @@ function similarity(a: string[], b: string[]): { jaccard: number; containment: n
   const A = new Set(a);
   const B = new Set(b);
   let inter = 0;
-  for (const w of A) if (B.has(w)) inter++;
+  for (const w of A) if (B.has(w) || [...B].some((x) => sameWord(w, x))) inter++;
   const union = A.size + B.size - inter;
   const exact = inter === A.size && inter === B.size;
   return { jaccard: inter / union, containment: inter / Math.min(A.size, B.size), exact };
 }
 
-/** Parses an operator-written outline: one entry per line, e.g. "الوحدة 1: ...", "الفصل 2: ...", "الدرس 1: ...", "مقدمة: ...". */
+const SECTION_LINE = /^(?:قسم|section|part)\s*[:：\-–—]\s*(.+)$/i;
+const AUTHOR_SUFFIX = /\s+(?:لـ?|للكاتب|للأديب|تأليف)\s*:?\s*[«"(][^»")]+[»")]\s*$/;
+const BACK_MATTER_ENTRY =/^(?:ال)?(?:اجابات|اجابه|اجابات النموذجيه|نماذج الاجابه|نماذج الاجابات|فهرس|محتويات|مراجع|answers|answer key|index|contents)$/;
+
+/**
+ * Parses an outline: one entry per line, e.g. "الوحدة 1: ...", "الفصل 2: ...", "الدرس 1: ...", "مقدمة: ...".
+ * "قسم: title" is a part the book prints without a unit label, and a bare title is an item the book prints
+ * without a lesson label (a story, text or poem); both keep their printed title with no invented number.
+ * An unlabelled answer-key or index line is not an entry.
+ */
 export function parseOutlineText(text: string): OutlineNode[] {
   const roots: OutlineNode[] = [];
   let unit: OutlineNode | null = null;
@@ -123,10 +164,13 @@ export function parseOutlineText(text: string): OutlineNode[] {
   for (const rawLine of (text || "").split(/\r?\n/)) {
     const line = rawLine.replace(/^[\s\-*•#>]+/, "").trim();
     if (!line) continue;
-    const parsed = parseHeadingLabel(line);
-    if (!parsed.title) continue;
+    const section = line.match(SECTION_LINE);
+    const parsed = section ? { kind: "unit" as const, number: null, title: cleanTitle(section[1]) } : parseHeadingLabel(line);
+    parsed.title = parsed.title.replace(AUTHOR_SUFFIX, "").trim();
+    if (!parsed.title || (!parsed.kind && BACK_MATTER_ENTRY.test(normalizeArabic(parsed.title)))) continue;
     const kind: OutlineKind = parsed.kind ?? "lesson";
     const node: OutlineNode = { kind, number: parsed.number, title: parsed.title, children: [] };
+    if (section || !parsed.kind) node.labeled = false;
     if (kind === "intro") {
       roots.push(node);
     } else if (kind === "unit") {
@@ -141,6 +185,10 @@ export function parseOutlineText(text: string): OutlineNode[] {
       if (parent) parent.children.push(node);
       else roots.push(node);
     }
+  }
+  const firstLabeled = roots.findIndex((n) => n.labeled !== false && n.kind !== "intro");
+  for (let i = 0; i < firstLabeled; i++) {
+    if (roots[i].kind === "lesson" && roots[i].labeled === false) roots[i] = { kind: "intro", number: null, title: roots[i].title, children: [] };
   }
   numberSiblings(roots);
   return roots;
@@ -157,11 +205,17 @@ function numberSiblings(nodes: OutlineNode[]) {
   }
 }
 
+function entryLabel(n: OutlineNode): string {
+  if (n.kind === "intro") return `مقدمة: ${n.title}`;
+  if (n.labeled === false) return n.kind === "lesson" ? n.title : `قسم: ${n.title}`;
+  return `${KIND_LABEL[n.kind]} ${n.number}: ${n.title}`;
+}
+
 export function outlineToText(nodes: OutlineNode[]): string {
   const lines: string[] = [];
   const walk = (list: OutlineNode[]) => {
     for (const n of list) {
-      lines.push(n.kind === "intro" ? `مقدمة: ${n.title}` : `${KIND_LABEL[n.kind]} ${n.number}: ${n.title}`);
+      lines.push(entryLabel(n));
       walk(n.children);
     }
   };
@@ -198,9 +252,65 @@ const INTRO_BLOCK = "# مقدمات أساسية";
 function headingsFor(anchor: Anchor, introOpen: boolean): string[] {
   const n = anchor.node;
   if (n.kind === "intro") return introOpen ? [`## ${n.title}`] : [INTRO_BLOCK, `## ${n.title}`];
-  if (n.kind === "lesson") return [`## الدرس ${n.number}: ${n.title}`];
-  const heading = `# ${KIND_LABEL[n.kind]} ${n.number}: ${n.title}`;
-  return isLeafContainer(n) ? [heading, `## الدرس 1: ${n.title}`] : [heading];
+  const unlabeled = n.labeled === false;
+  if (n.kind === "lesson") return [unlabeled ? `## ${n.title}` : `## الدرس ${n.number}: ${n.title}`];
+  const heading = unlabeled ? `# ${n.title}` : `# ${KIND_LABEL[n.kind]} ${n.number}: ${n.title}`;
+  return isLeafContainer(n) ? [heading, unlabeled ? `## ${n.title}` : `## الدرس 1: ${n.title}`] : [heading];
+}
+
+/** Whether the outline keeps the book's answer section as an entry of its own. */
+export function outlineHasAnswers(nodes: OutlineNode[]): boolean {
+  return flatten(nodes).some((a) => BACK_MATTER_ENTRY.test(normalizeArabic(a.node.title)));
+}
+
+/** Lessons listed at the top level (a book without units) are grouped into one block named after the book. */
+export function wrapLooseLessons(nodes: OutlineNode[], title: string): OutlineNode[] {
+  const out: OutlineNode[] = [];
+  let block: OutlineNode | null = null;
+  for (const n of nodes) {
+    if (n.kind !== "lesson") {
+      out.push(n);
+      block = null;
+      continue;
+    }
+    if (!block) {
+      block = { kind: "unit", number: null, title, children: [], labeled: false };
+      out.push(block);
+    }
+    block.children.push(n);
+  }
+  return out;
+}
+
+/**
+ * A contents page read by the vision model gets "الدرس N" labels even when the book prints its works
+ * without them. When the opening headings in the body rarely carry the outline's own lesson numbers,
+ * the labels were invented, so the lessons keep their printed titles only.
+ */
+export function markUnlabeledLessons(nodes: OutlineNode[], markdown: string): OutlineNode[] {
+  const lessons = flatten(nodes).filter((a) => a.node.kind === "lesson" && a.node.labeled !== false);
+  if (lessons.length < 3) return nodes;
+  const headings = markdown
+    .split("\n")
+    .map((l) => l.match(/^#{1,2}\s+(.+?)\s*$/))
+    .filter((m): m is RegExpMatchArray => !!m)
+    .map((m) => parseHeadingLabel(m[1]))
+    .map((label) => ({ label, words: titleWords(label.title) }));
+  let found = 0;
+  let numbered = 0;
+  for (const a of lessons) {
+    const hits = headings.filter((h) => {
+      const s = similarity(h.words, a.words);
+      return s.exact || s.jaccard >= 0.5 || s.containment === 1;
+    });
+    if (hits.length === 0) continue;
+    found++;
+    if (hits.some((h) => h.label.kind === "lesson" && h.label.number === a.node.number)) numbered++;
+  }
+  if (found < 3 || numbered * 2 >= found) return nodes;
+  const strip = (list: OutlineNode[]): OutlineNode[] =>
+    list.map((n) => ({ ...n, labeled: n.kind === "lesson" ? false : n.labeled, children: strip(n.children) }));
+  return strip(nodes);
 }
 
 /**
@@ -245,7 +355,7 @@ export function reconcileOutlineWithBody(nodes: OutlineNode[], markdown: string)
         if (end > i && (!best || end > best.end)) best = { end, title: h.title };
       }
       if (best) {
-        out.push({ kind: "lesson", number: null, title: best.title, children: [] });
+        out.push({ kind: "lesson", number: null, title: best.title, children: [], labeled: node.labeled });
         i = best.end;
       } else {
         out.push({ ...node, children: [] });
@@ -299,7 +409,7 @@ export function outlineToPromptContext(nodes: OutlineNode[]): string {
   return flatten(nodes)
     .map((a) => {
       const pad = "  ".repeat(a.ancestors.length);
-      return a.node.kind === "intro" ? `${pad}- مقدمة: ${a.node.title}` : `${pad}- ${KIND_LABEL[a.node.kind]} ${a.node.number}: ${a.node.title}`;
+      return `${pad}- ${entryLabel(a.node)}`;
     })
     .join("\n");
 }
@@ -328,6 +438,9 @@ export function isTocPage(pageMarkdown: string, nodes: OutlineNode[]): boolean {
   return hits >= Math.min(3, anchors.length) && bodyChars < hits * 160;
 }
 
+const PAGE_START = /^<!-- (?:بداية الصفحة|page) \d+ -->$/;
+const COVER_MAX_CHARS = 200;
+
 /**
  * Rewrites the heading structure of an assembled book to match its outline. Headings that name
  * the next outline entries become canonical unit/chapter/lesson headings (missing parents are
@@ -344,6 +457,8 @@ export function alignMarkdownToOutline(markdown: string, nodes: OutlineNode[]): 
   let pointer = 0;
   let introOpen = false;
   let active: Anchor[] = [];
+  let cover: { at: number; chars: number } | null = null;
+  let pageStart = false;
 
   const emitAnchor = (index: number) => {
     const anchor = anchors[index];
@@ -353,13 +468,18 @@ export function alignMarkdownToOutline(markdown: string, nodes: OutlineNode[]): 
         report.missing.push(skipped.title);
       }
     }
+    const opening: string[] = [];
     for (const parent of anchor.ancestors) {
       if (emitted.has(parent)) continue;
       const parentAnchor = anchors.find((a) => a.node === parent)!;
-      out.push("", ...headingsFor(parentAnchor, introOpen), "");
+      opening.push("", ...headingsFor(parentAnchor, introOpen), "");
       emitted.add(parent);
     }
-    out.push("", ...headingsFor(anchor, introOpen), "");
+    opening.push("", ...headingsFor(anchor, introOpen), "");
+    // A cover page that prints only the title (often misspelled by the scan) opens the entry.
+    if (cover) out.splice(cover.at, 1, ...opening);
+    else out.push(...opening);
+    cover = null;
     introOpen = anchor.node.kind === "intro";
     emitted.add(anchor.node);
     active = [...anchor.ancestors.map((p) => anchors.find((a) => a.node === p)!), anchor];
@@ -387,14 +507,35 @@ export function alignMarkdownToOutline(markdown: string, nodes: OutlineNode[]): 
     });
   });
 
+  // Words that tell a lesson apart from its neighbours: "المنصوبات" in "مراجعة على ما سبق دراسته: المنصوبات".
+  const distinctive = anchors.map((a, j) => {
+    if (a.node.kind !== "lesson") return [];
+    const parent = a.ancestors[a.ancestors.length - 1];
+    const near = [anchors[j - 1], anchors[j + 1]].filter((b) => b && b.node.kind === "lesson" && b.ancestors[b.ancestors.length - 1] === parent);
+    return a.words.filter((w) => !near.some((b) => b.words.some((x) => sameWord(w, x))));
+  });
+  // A lesson opening printed as a plain section title at the top of its page.
+  const opensAsSection = (words: string[], j: number) => {
+    const a = anchors[j];
+    if (a.node.kind !== "lesson") return false;
+    const d = distinctive[j];
+    if (d.length > 0 && d.length < a.words.length && similarity(words, d).exact) return true;
+    return words.length > a.words.length && a.words.every((w, k) => sameWord(words[k], w));
+  };
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const h = parsed[i];
+    const atPageStart = pageStart;
+    if (PAGE_START.test(line.trim())) pageStart = true;
+    else if (line.trim()) pageStart = false;
     if (!h) {
+      if (cover && (cover.chars += line.trim().length) > COVER_MAX_CHARS) cover = null;
       out.push(line);
       continue;
     }
     const { level, label, words, structural } = h;
+    if (level >= 3) cover = null;
     if (words.length === 0) {
       if (level <= 2) {
         report.dropped++;
@@ -412,9 +553,10 @@ export function alignMarkdownToOutline(markdown: string, nodes: OutlineNode[]): 
       const s = similarity(words, anchors[j].words);
       const accepted = structural
         ? s.exact || s.jaccard >= 0.5 || s.containment === 1
-        : s.exact && (lastStrongLine.get(j) ?? -1) < i;
+        : (s.exact || (atPageStart && j === pointer && opensAsSection(words, j))) && (lastStrongLine.get(j) ?? -1) < i;
       if (!accepted) continue;
-      const numberBonus = label.number !== null && label.number === anchors[j].node.number && label.kind === anchors[j].node.kind ? 0.4 : 0;
+      const node = anchors[j].node;
+      const numberBonus = node.labeled !== false && label.number !== null && label.number === node.number && label.kind === node.kind ? 0.4 : 0;
       const score = s.jaccard + 0.25 * s.containment + (s.exact ? 0.5 : 0) + numberBonus - 0.05 * (j - pointer);
       if (score > bestScore) {
         bestScore = score;
@@ -427,12 +569,15 @@ export function alignMarkdownToOutline(markdown: string, nodes: OutlineNode[]): 
       const s = similarity(words, a.words);
       return structural ? s.exact || s.jaccard >= 0.5 || s.containment === 1 : s.exact;
     });
+    // "التحليل الأدبي لرواية «الأرض»" inside the lesson الأرض is a section, not a repeat of its title.
+    const addsWords = !active.some((a) => similarity(words, a.words).containment === 1 && words.length <= a.words.length);
 
     if (best >= 0 && (!repeatsActive || bestExact)) {
       emitAnchor(best);
-    } else if (repeatsActive && level <= 3) {
+    } else if (repeatsActive && level <= 3 && !addsWords) {
       report.dropped++;
     } else if (level <= 2) {
+      cover = atPageStart ? { at: out.length, chars: 0 } : null;
       out.push(`### ${label.title}`);
       report.demoted++;
     } else {
@@ -446,4 +591,44 @@ export function alignMarkdownToOutline(markdown: string, nodes: OutlineNode[]): 
   }
 
   return { markdown: out.join("\n").replace(/\n{3,}/g, "\n\n").trim(), report };
+}
+
+export interface TocPageText {
+  pageNumber: number;
+  tocText: string;
+}
+
+export interface DerivedOutline {
+  outline: OutlineNode[] | null;
+  tocPages: number[];
+  /** Markdown for pages the model labelled "toc" that are not part of the accepted contents. */
+  fallbacks: Map<number, string>;
+}
+
+export const TOC_SCAN_PAGES = 15;
+
+function containerCount(nodes: OutlineNode[]): number {
+  return flatten(nodes).filter((a) => a.node.kind === "unit" || a.node.kind === "chapter").length;
+}
+
+/**
+ * Builds the book outline from the pages classified as a table of contents during extraction.
+ * Only pages near the start of the book that together list 2+ units/chapters (or 3+ top-level items for
+ * a book without units, such as a collection of stories) are accepted; any other
+ * "toc" page is usually a unit cover listing its lessons, so it keeps just its single unit heading.
+ */
+export function deriveOutlineFromTocPages(pages: TocPageText[]): DerivedOutline {
+  const sorted = pages.filter((p) => p.tocText.trim()).sort((a, b) => a.pageNumber - b.pageNumber);
+  const front = sorted.filter((p) => p.pageNumber <= TOC_SCAN_PAGES);
+  const combined = front.length ? parseOutlineText(front.map((p) => p.tocText).join("\n")) : [];
+  const containers = containerCount(combined);
+  const accepted = containers >= 2 || (containers === 0 && combined.filter((n) => n.kind === "lesson").length >= 3);
+  const tocPages = accepted ? front.map((p) => p.pageNumber) : [];
+  const fallbacks = new Map<number, string>();
+  for (const p of sorted) {
+    if (tocPages.includes(p.pageNumber)) continue;
+    const containers = flatten(parseOutlineText(p.tocText)).filter((a) => a.node.kind === "unit" || a.node.kind === "chapter");
+    fallbacks.set(p.pageNumber, containers.length === 1 ? headingsFor(containers[0], false)[0] : "");
+  }
+  return { outline: accepted ? combined : null, tocPages, fallbacks };
 }

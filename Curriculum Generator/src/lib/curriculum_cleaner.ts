@@ -1,8 +1,9 @@
-import { alignMarkdownToOutline, isOutlineIncomplete, isTocPage, normalizeArabic, parseHeadingLabel, reconcileOutlineWithBody, type AlignmentReport, type OutlineNode } from "./outline";
+import { alignMarkdownToOutline, isOutlineIncomplete, isTocPage, markUnlabeledLessons, normalizeArabic, outlineHasAnswers, parseHeadingLabel, reconcileOutlineWithBody, titleWords, wrapLooseLessons, type AlignmentReport, type OutlineNode } from "./outline";
 
 export interface PageMarkdown {
   pageNumber: number;
   markdown: string;
+  pageType?: string;
 }
 
 export interface BuildResult {
@@ -16,9 +17,10 @@ const PAGE_MARKER = /^<!-- (?:بداية الصفحة|page) (\d+) -->$/;
 
 const CLUTTER_HEADING = /^#{1,6}\s*(?:أهداف الدرس|أهداف الوحدة|نواتج التعلم|مخرجات التعلم|الأهداف التعليمية|المهارات والقيم والقضايا المتضمنة|المفاهيم المتقاطعة|تهيئة الدرس|التهيئة|تساؤلات تمهيدية(?: للدرس)?|سؤال الدرس|Learning Outcomes|Lesson Objectives)(?![\p{L}\p{N}])/iu;
 const OUTCOME_BULLET = /^[-*•]\s*(?:يتوقع من الطالب|في نهاية هذا الدرس|مع نهاية الدرس|أن يتعرف|أن يستنتج|أن يحدد|أن يفسر|أن يوضح|أن يميز)/;
-const BACK_MATTER = /^(?:#{1,4}\s*)?(?:المؤلفون|المراجعون|الإشراف العام|فريق الإعداد|جميع الحقوق محفوظة|All rights reserved)(?![\p{L}\p{N}])/iu;
+const BACK_MATTER = /^(?:#{1,4}\s*)?(?:المؤلفون|المراجعون|الإشراف العام|فريق الإعداد|جميع الحقوق محفوظة|احرص على اقتناء|All rights reserved)(?![\p{L}\p{N}])/iu;
 const META_LABEL = /^\[(?:نوع المحتوى|Content Type):.+\]$/i;
-const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}\u{2B55}\u{FE0F}]/gu;
+const BARE_LABEL = /^(?:[\d٠-٩]{1,2}|[ء-ي]|Q\d{1,2})\s*[.):-]?$/;
+const EMOJI =/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}\u{2B55}\u{FE0F}]/gu;
 
 /** Removes non-instructional clutter without touching the heading structure. */
 export function stripClutter(markdown: string): string {
@@ -53,7 +55,8 @@ export function finalizeMarkdown(markdown: string): string {
     .filter((l) => !/^<!--[\s\S]*-->$/.test(l.trim()))
     .map((l) => {
       const hm = l.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-      return hm ? `${hm[1]} ${hm[2].replace(/ـ/g, "").replace(/\s+/g, " ").trim()}` : l.replace(/\s+$/, "");
+      if (hm && BARE_LABEL.test(hm[2])) return hm[2];
+      return hm ?`${hm[1]} ${hm[2].replace(/ـ/g, "").replace(/\s+/g, " ").trim()}` : l.replace(/\s+$/, "");
     })
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -131,6 +134,33 @@ export function repairStructureHeuristically(markdown: string): string {
   return out.join("\n");
 }
 
+function headingWords(markdown: string, maxLevel: number): string[][] {
+  return markdown
+    .split("\n")
+    .map((l) => l.match(/^(#{1,6})\s+(.+?)\s*$/))
+    .filter((m): m is RegExpMatchArray => !!m && m[1].length <= maxLevel)
+    .map((m) => titleWords(parseHeadingLabel(m[2]).title))
+    .filter((w) => w.length > 0);
+}
+
+/**
+ * The answer section at the end of a book: from the first answer-key page after which no new unit or
+ * lesson opens (answer headings such as "## 10 صح النوم" repeat earlier titles). Pages there that were
+ * classified as content hold answer fragments without their questions.
+ */
+function trailingAnswerPages(pages: PageMarkdown[]): number[] {
+  const sorted = [...pages].sort((a, b) => a.pageNumber - b.pageNumber);
+  const earlier = sorted.map((p) => headingWords(p.markdown, 3));
+  const opensNew = (i: number) =>
+    headingWords(sorted[i].markdown, 2).some((w) => !earlier.slice(0, i).some((page) => page.some((e) => w.every((x) => e.includes(x)))));
+  let start = -1;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    if (opensNew(i)) break;
+    if (sorted[i].pageType === "answer_key") start = i;
+  }
+  return start < 0 ? [] : sorted.slice(start).map((p) => p.pageNumber);
+}
+
 /** Assembles extracted pages into the canonical curriculum Markdown consumed by the EGS AI site. */
 export function buildCurriculumMarkdown(
   pages: PageMarkdown[],
@@ -139,13 +169,15 @@ export function buildCurriculumMarkdown(
   tocPages: number[] = [],
   reconcile = false
 ): BuildResult {
+  const answerPages = outline && outlineHasAnswers(outline) ? [] : trailingAnswerPages(pages);
   const sorted = [...pages]
-    .filter((p) => p.markdown.trim().length > 0 && !tocPages.includes(p.pageNumber))
+    .filter((p) => p.markdown.trim().length > 0 && !tocPages.includes(p.pageNumber) && !answerPages.includes(p.pageNumber))
     .sort((a, b) => a.pageNumber - b.pageNumber);
   const raw = sorted.map((p) => p.markdown).join("\n");
   if (outline && outline.length > 0 && reconcile) {
-    outline = isOutlineIncomplete(outline, raw) ? null : reconcileOutlineWithBody(outline, raw);
+    outline = isOutlineIncomplete(outline, raw) ? null : markUnlabeledLessons(reconcileOutlineWithBody(outline, raw), raw);
   }
+  if (outline) outline = wrapLooseLessons(outline, subjectName);
   const droppedTocPages = [...tocPages];
   const kept = sorted.filter((p) => {
     const isToc = !!outline && isTocPage(p.markdown, outline);

@@ -1,4 +1,5 @@
 import { buildTurnMessage, buildTutorSystemPrompt, type ChatMode, type LessonMode } from './tutor_prompts';
+import type { StudentIntent } from './gemini';
 
 export type { ChatMode, LessonMode } from './tutor_prompts';
 
@@ -32,6 +33,7 @@ export interface ChatTurn {
   thinkingEnabled: boolean;
   mode: ChatMode;
   lessonMode: LessonMode;
+  intent?: StudentIntent;
   subjectName?: string;
   gradeLevel?: string;
 }
@@ -44,7 +46,7 @@ export function buildChatMessages(turn: ChatTurn): { role: 'system' | 'user' | '
   return [
     { role: 'system', content: buildTutorSystemPrompt({ subjectName: turn.subjectName, gradeLevel: turn.gradeLevel, mode: turn.mode }) },
     ...turn.history.map(msg => ({ role: msg.sender === 'user' ? 'user' as const : 'assistant' as const, content: msg.message })),
-    { role: 'user', content: buildTurnMessage(turn.studentMessage, turn.context, turn.lessonMode) }
+    { role: 'user', content: buildTurnMessage(turn.studentMessage, turn.context, turn.lessonMode, turn.intent) }
   ];
 }
 

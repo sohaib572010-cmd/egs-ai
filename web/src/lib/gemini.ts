@@ -28,9 +28,23 @@ export const QUERY_SCOPES: QueryScope[] = [
   'curriculum', 'curriculum_reasoning', 'beyond_curriculum', 'general_education', 'casual', 'non_academic'
 ];
 
+/**
+ * What the student is doing with this message, relative to the conversation:
+ * - question: a new question or request.
+ * - follow_up: continues the previous point ("طب ليه؟", "مثال تاني", "حل واحدة زيها").
+ * - confused: did not understand the last explanation ("مش فاهم", "مش واضحة").
+ * - answer_attempt: answers a question or exercise the tutor asked.
+ * - accept_offer: agrees to something the tutor offered ("اه", "ياريت") or asks to go on ("كمل", "تمام").
+ * - chitchat: greetings, thanks, small talk.
+ */
+export type StudentIntent = 'question' | 'follow_up' | 'confused' | 'answer_attempt' | 'accept_offer' | 'chitchat';
+
+export const STUDENT_INTENTS: StudentIntent[] = ['question', 'follow_up', 'confused', 'answer_attempt', 'accept_offer', 'chitchat'];
+
 export interface QueryIntelligence {
   queryType: 'direct' | 'inferential' | 'overview' | 'problem_solving';
   scope?: QueryScope;
+  intent?: StudentIntent;
   arabicKeywords: string[];
   englishKeywords: string[];
   hydePassage: string;          // hypothetical textbook passage for dense retrieval
@@ -55,6 +69,10 @@ export interface LessonMapEntry {
 // ─── Core AI Model Callers ────────────────────────────────────────────────────
 
 const DEEPSEEK_API_URL = 'https://api.deepseek.com/v1/chat/completions';
+// A hung provider must fall through to the fallback chain instead of stalling the student's turn
+const TEXT_CALL_TIMEOUT_MS = 15000;
+const FALLBACK_CALL_TIMEOUT_MS = 45000;
+const VISION_CALL_TIMEOUT_MS = 60000;
 
 export async function callDeepSeekChat(
   prompt: string,
@@ -83,7 +101,8 @@ export async function callDeepSeekChat(
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${deepseekApiKey}`
     },
-    body: JSON.stringify(requestBody)
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(TEXT_CALL_TIMEOUT_MS)
   });
 
   if (!response.ok) {
@@ -104,9 +123,9 @@ export async function callDeepSeekChat(
  */
 export async function callDeepSeekVision(
   base64Image: string,
-  mimeType: string = 'image/jpeg',
-  promptText: string = 'اقرأ هذه الصورة بالتفصيل واكتب وصفاً شاملاً ومفصلاً لها باللغة العربية، بما في ذلك أي نصوص أو معادلات رياضية أو فيزيائية أو كيميائية أو جداول أو رسوم توضيحية بداخلها بدقة بالغة وكتابتها حرفياً.',
-  maxTokens: number = 2048
+  mimeType: string,
+  promptText: string,
+  maxTokens: number = 4000
 ): Promise<string> {
   const deepseekApiKey = process.env.DEEPSEEK_API_KEY || '';
   if (!deepseekApiKey) throw new Error('DEEPSEEK_API_KEY is not set');
@@ -135,8 +154,10 @@ export async function callDeepSeekVision(
         }
       ],
       thinking: { type: 'disabled' },
+      temperature: 0,
       max_tokens: maxTokens
-    })
+    }),
+    signal: AbortSignal.timeout(VISION_CALL_TIMEOUT_MS)
   });
 
   if (!response.ok) {
@@ -166,7 +187,8 @@ export async function callGeminiFlash(prompt: string, maxTokens: number = 600): 
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.1,
       max_tokens: maxTokens
-    })
+    }),
+    signal: AbortSignal.timeout(FALLBACK_CALL_TIMEOUT_MS)
   });
 
   if (!response.ok) {
@@ -371,19 +393,32 @@ export async function rerankDocuments(query: string, documents: string[]): Promi
 
 // ─── Query Intelligence ───────────────────────────────────────────────────────
 
+const WHOLE_LESSON_REQUEST = /(?:اشرح|شرح|ذاكر|راجع|ابدأ|فهمني|تشرح)\s*(?:لي|لى)?\s*(?:معايا\s+|معي\s+)?(?:ال)?درس|(?:شرح كامل|شرح شامل|كل نقاط الدرس|الدرس كامل|الدرس بالكامل)/;
+const STEP_PHRASES = /(?:نقط[ةه]\s*(?:ب|ورا)?\s*نقط[ةه]|خطو[ةه]\s*(?:ب)?\s*خطو[ةه]|جزئي[ةه]\s*(?:ب)?\s*جزئي[ةه])/g;
+const SINGLE_POINT_CUES = /(?:مش فاهم|مش مستوعب|مش واضح|وضحلي|اشرحلي نقطة|نقطة|جزئية|مفهوم|معنى|يعني ايه|يعني إيه|ما هو|ما هي|ماهو|ماهي|ما المقصود|ليه|لماذا|علل|ازاي|إزاي|كيف|ما الفرق|الفرق بين|قارن|سؤال|مسألة|مسأله|احسب|أوجد|اوجد|حل المعادلة|عرف|تعريف|قانون|قوانين|نظرية|متى|أين|هل)/i;
+
 /**
  * True when the student asks about one concept, law, term, or problem (even if a lesson is named
- * for context), as opposed to requesting a whole-lesson explanation.
+ * for context), as opposed to requesting a whole-lesson explanation. An explicit "explain the lesson"
+ * request wins even when the lesson title itself contains a cue word ("اشرح درس قانون بويل").
  */
 export function isSinglePointQuestion(text: string): boolean {
-  return /(?:مش فاهم|مش مستوعب|مش واضحة|وضحلي|اشرحلي نقطة|نقطة|جزئية|مفهوم|معنى|يعني ايه|يعني إيه|ما هو|ما هي|ماهو|ماهي|ما المقصود|ليه|لماذا|علل|ازاي|إزاي|كيف|ما الفرق|الفرق بين|قارن|سؤال|مسألة|مسأله|احسب|أوجد|اوجد|حل المعادلة|عرف|تعريف|قانون|قوانين|نظرية|متى|أين|هل)/i.test(text) &&
-    !/(?:شرح كامل|شرح شامل|الدرس كامل|كل نقاط الدرس|اشرح لي الدرس من البداية|ذاكر معايا الدرس|بالتفصيل|شرح مفصل|كامل)/i.test(text);
+  if (WHOLE_LESSON_REQUEST.test(text)) return false;
+  return SINGLE_POINT_CUES.test(text.replace(STEP_PHRASES, ' '));
+}
+
+/** "نقطة نقطة", "خطوة بخطوة": the student wants a lesson taught one point per message. */
+export function isStepByStepRequest(text: string): boolean {
+  return new RegExp(STEP_PHRASES.source).test(text) || /(?:تفاعلي|امشي معايا)/.test(text);
 }
 
 const QUERY_INTELLIGENCE_INSTRUCTIONS = `You are the query-understanding engine of an AI tutor for the Egyptian national curriculum.
 Read the LESSON MAP of the student's textbook, the recent conversation and the student's message, then return ONE JSON object.
 
+READING THE STUDENT: students write in Egyptian dialect, Modern Standard Arabic, English or Franco-Arabic (Arabic in Latin letters with digits: 2=ء, 3=ع, 5=خ, 7=ح, 8=غ, 9=ق), with misspellings, missing hamzas, merged words and voice-transcription errors. Work out what they mean, the way an experienced teacher would, and write every output field in correct textbook terms. Short replies ("اه", "لا", "تمام", "كمل", "مش فاهم", "ب", "عشان كده") only make sense against the teacher's last message: resolve them from the conversation.
+
 FIELDS:
+- intent: what the message does in the conversation: "question" (new question or request), "follow_up" (continues the previous point: why, more detail, another example, a similar problem), "confused" (did not understand the last explanation), "answer_attempt" (answers a question, exercise or quiz the teacher asked, even with a single word, letter or number), "accept_offer" (agrees to what the teacher offered or proposed, or asks to go on: "اه", "ياريت", "تمام كمل"), "chitchat" (greeting, thanks, small talk).
 - scope: how the message relates to THIS textbook. Decide from the lesson map (titles and subtopics) and your knowledge of what these lessons teach:
   * "curriculum": the asked concept, rule, law, event, text, example or problem type is taught in one of the mapped lessons.
   * "curriculum_reasoning": the answer is not written verbatim in the book but follows by reasoning from concepts the book teaches: applying a law to a new situation, explaining an everyday phenomenon with a lesson's principle, "what happens if", "why", comparisons, multi-lesson problems, exam-style inference questions. This IS the curriculum; prefer it over "beyond_curriculum" whenever the mapped lessons contain the principles needed.
@@ -394,13 +429,13 @@ FIELDS:
 - queryType: "direct" (fact/definition), "inferential" (needs reasoning), "problem_solving" (calculation or exercise), "overview" (whole curriculum or unit).
 - isLessonExplanation: true ONLY when the student asks to explain or study a WHOLE lesson ("اشرح درس ...", "عايز شرح الدرس الأول"). A question about one concept, law, term or problem is false even if it names a lesson.
 - lessonTitle: the lesson the student wants explained in full (copy the map title when you can), otherwise null.
-- curriculumLesson: for scope "curriculum" or "curriculum_reasoning", the EXACT map title of the lesson that teaches the concept or principle the answer relies on (a voltage/current calculation belongs to the Ohm's law lesson). Judge by topic, not by the lesson the student names. Otherwise null.
+- curriculumLesson: for scope "curriculum" or "curriculum_reasoning", the EXACT map title of the lesson that teaches the concept or principle the answer relies on (a voltage/current calculation belongs to the Ohm's law lesson). Judge by topic, not by the lesson the student names. null when no mapped lesson clearly teaches it: a wrong lesson is worse than none.
 - relatedLesson: for scope "beyond_curriculum" or "general_education", the EXACT map title of the closest genuinely related lesson, or null when none is truly related.
 - isDifferentSubject: true ONLY when the question clearly belongs to an UNRELATED school subject (Arabic grammar in a Science chat, a chemistry calculation in a History chat). Neighboring disciplines are one family: physics, chemistry, biology and earth science; history, geography, civics, the constitution, politics, economics, philosophy and sociology. Casual, general and platform questions are false. When unsure, false.
 - detectedSubject: Arabic name of the school subject the question belongs to, or null.
 - isDifferentGrade: true ONLY when the student explicitly says they study in another grade or asks for another grade's curriculum. A merely advanced topic is false.
 - detectedGrade: the grade the student referred to, or null.
-- standaloneQuery: the message rewritten as ONE self-contained question in textbook Arabic (English for English-language subjects). Resolve follow-ups ("طب ليه؟", "وضح أكتر", "حل واحدة زيها", "والنوع التاني؟") from the conversation.
+- standaloneQuery: the message rewritten as ONE self-contained question in textbook Arabic (English for English-language subjects). Resolve follow-ups ("طب ليه؟", "وضح أكتر", "حل واحدة زيها", "والنوع التاني؟") from the conversation. For "confused" restate the concept that needs a simpler explanation; for "answer_attempt" state the teacher's question and the student's answer; for "accept_offer" state what the teacher offered as the student's request.
 - searchQueries: 1-3 short textbook-phrased search queries that together retrieve EVERYTHING needed to answer: the asked concept itself, plus, for inference or application questions, the underlying laws, definitions or mechanisms the reasoning needs. Distinct from each other and from standaloneQuery. Empty for casual and non_academic.
 - arabicKeywords: 3-6 core terms exactly as an Egyptian textbook writes them (not dialect), most specific first.
 - englishKeywords: matching English terms for STEM or English subjects, else empty.
@@ -408,7 +443,7 @@ FIELDS:
 - searchAnnouncement: short Arabic status line, e.g. "أبحث في المنهج عن: ...".
 
 Return JSON only:
-{"scope":"","queryType":"","isLessonExplanation":false,"lessonTitle":null,"curriculumLesson":null,"relatedLesson":null,"isDifferentSubject":false,"detectedSubject":null,"isDifferentGrade":false,"detectedGrade":null,"standaloneQuery":"","searchQueries":[],"arabicKeywords":[],"englishKeywords":[],"hydePassage":"","searchAnnouncement":""}`;
+{"intent":"","scope":"","queryType":"","isLessonExplanation":false,"lessonTitle":null,"curriculumLesson":null,"relatedLesson":null,"isDifferentSubject":false,"detectedSubject":null,"isDifferentGrade":false,"detectedGrade":null,"standaloneQuery":"","searchQueries":[],"arabicKeywords":[],"englishKeywords":[],"hydePassage":"","searchAnnouncement":""}`;
 
 function formatLessonMapForClassifier(lessonMap: LessonMapEntry[]): string {
   return lessonMap
@@ -417,6 +452,22 @@ function formatLessonMapForClassifier(lessonMap: LessonMapEntry[]): string {
       return `- ${l.title}${subs ? ` | ${subs}` : ''}`.slice(0, 260);
     })
     .join('\n');
+}
+
+function normalizeTitle(title: string): string {
+  return title
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Lesson title without its "الدرس N:" label. */
+function lessonSubtitle(title: string): string {
+  return normalizeTitle(title.replace(/^\s*الدرس\s+[^:：]{1,20}[:：]/, ''));
 }
 
 function cleanString(value: unknown, max = 500): string | undefined {
@@ -460,7 +511,12 @@ ${conversation ? `RECENT CONVERSATION (oldest first):\n${conversation}\n\n` : ''
   const titles = lessonMap.map(l => l.title.trim());
   const pickTitle = (value: unknown) => {
     const t = cleanString(value);
-    return t ? lessonMap.find(l => l.title.trim() === t)?.title : undefined;
+    if (!t) return undefined;
+    const target = normalizeTitle(t);
+    const sub = lessonSubtitle(t);
+    return lessonMap.find(l => l.title.trim() === t)?.title
+      || lessonMap.find(l => normalizeTitle(l.title) === target)?.title
+      || (sub.length > 2 ? lessonMap.find(l => lessonSubtitle(l.title) === sub)?.title : undefined);
   };
 
   try {
@@ -479,6 +535,7 @@ ${conversation ? `RECENT CONVERSATION (oldest first):\n${conversation}\n\n` : ''
     const searchQueries = cleanStringList(parsed.searchQueries, 3).filter(q => q !== standaloneQuery);
 
     return {
+      intent: STUDENT_INTENTS.includes(parsed.intent) ? parsed.intent as StudentIntent : undefined,
       queryType: ['direct', 'inferential', 'overview', 'problem_solving'].includes(parsed.queryType)
         ? parsed.queryType
         : (isLesson ? 'overview' : 'direct'),
@@ -518,29 +575,34 @@ ${conversation ? `RECENT CONVERSATION (oldest first):\n${conversation}\n\n` : ''
   }
 }
 
-export type AnswerScope = 'curriculum' | 'beyond' | 'general' | 'casual' | 'non_academic';
+/** "uncertain": the classifier placed the question in the book but the textbook evidence does not back it up. */
+export type AnswerScope = 'curriculum' | 'uncertain' | 'beyond' | 'general' | 'casual' | 'non_academic';
 
 /** Cross-encoder relevance at which the textbook clearly covers the question, whatever the classifier said. */
 export const STRONG_TEXTBOOK_RELEVANCE = 0.72;
+/** Below this, no retrieved section really answers the question. */
+export const WEAK_TEXTBOOK_RELEVANCE = 0.6;
 
 /**
- * Final scope of an answer. The classifier sees the whole lesson map, but a "beyond the curriculum" verdict is
- * only accepted when the textbook evidence agrees (the core term is absent from the book and no retrieved
- * section is strongly relevant), because a false out-of-curriculum remark is worse than a missing one.
+ * Final scope of an answer. The classifier sees the whole lesson map, but its verdict is checked against the
+ * textbook evidence both ways: "beyond the curriculum" needs the core term to be absent from the book and no
+ * strongly relevant section (a false out-of-curriculum remark is worse than a missing one), and "in the
+ * curriculum" with neither the term in the book nor a relevant section becomes "uncertain", which claims neither.
  */
 export function resolveAnswerScope(
   intelligence: Pick<QueryIntelligence, 'scope' | 'curriculumLesson'>,
   evidence: { termInTextbook: boolean; topRelevance: number | null }
 ): AnswerScope {
   const strong = (evidence.topRelevance ?? 0) >= STRONG_TEXTBOOK_RELEVANCE;
+  const weak = evidence.topRelevance !== null && evidence.topRelevance < WEAK_TEXTBOOK_RELEVANCE;
   switch (intelligence.scope) {
     case 'casual': return 'casual';
     case 'non_academic': return 'non_academic';
     case 'curriculum':
-    case 'curriculum_reasoning': return 'curriculum';
-    case 'general_education': return intelligence.curriculumLesson ? 'curriculum' : 'general';
-    case 'beyond_curriculum': return intelligence.curriculumLesson || evidence.termInTextbook || strong ? 'curriculum' : 'beyond';
-    default: return intelligence.curriculumLesson || evidence.termInTextbook || strong ? 'curriculum' : 'general';
+    case 'curriculum_reasoning': return weak && !evidence.termInTextbook ? 'uncertain' : 'curriculum';
+    case 'general_education': return intelligence.curriculumLesson && !weak ? 'curriculum' : 'general';
+    case 'beyond_curriculum': return evidence.termInTextbook || strong ? 'curriculum' : 'beyond';
+    default: return evidence.termInTextbook || strong ? 'curriculum' : 'general';
   }
 }
 

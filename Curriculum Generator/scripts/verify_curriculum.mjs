@@ -4,9 +4,10 @@
  *   # منهج <subject>
  *   # الوحدة N: ...        (group heading: directly followed by its chapters)
  *   # الفصل N: ...         (teaching block: holds at least one lesson)
- *   ## الدرس N: ...        (lessons numbered 1..n inside each block)
+ *   ## الدرس N: ...        (lessons numbered in increasing order inside each block; gaps are warnings)
  *   ### / ####             (sections inside a lesson)
- * An optional "# مقدمات أساسية" block holds unnumbered "## <title>" introductory sections.
+ * An optional "# مقدمات أساسية" block holds unnumbered "## <title>" introductory sections. A block whose
+ * items the book prints without lesson labels (a collection of stories or texts) uses "## <title>" for all of them.
  */
 import fs from 'fs';
 import path from 'path';
@@ -49,7 +50,6 @@ function validate(filePath) {
         continue;
       }
       const m = h.text.match(/^(?:الدرس|Lesson)\s+(\d{1,2})\s*:\s*(.+)$/i);
-      if (!m && !block.isIntro) errors.push(`L${h.line}: level-2 heading must be "## الدرس N: title": "${h.text}"`);
       block.lessons.push({ number: m ? Number(m[1]) : null, line: h.line, text: h.text });
     }
   }
@@ -58,8 +58,16 @@ function validate(filePath) {
     if (b.isGroup) continue;
     if (b.lessons.length === 0) errors.push(`L${b.line}: "${b.text}" has no lessons.`);
     if (b.isIntro) continue;
+    const labeled = b.lessons.filter((l) => l.number !== null).length;
+    if (labeled === 0) continue;
+    if (labeled < b.lessons.length) {
+      b.lessons.filter((l) => l.number === null).forEach((l) => errors.push(`L${l.line}: "${b.text}" mixes labelled lessons with "## ${l.text}"; use "## الدرس N: title".`));
+      continue;
+    }
     b.lessons.forEach((l, i) => {
-      if (l.number !== i + 1) errors.push(`L${l.line}: expected lesson ${i + 1} in "${b.text}", found "${l.text}"`);
+      const prev = i === 0 ? 0 : b.lessons[i - 1].number;
+      if (l.number <= prev) errors.push(`L${l.line}: lesson numbers must increase in "${b.text}", found "${l.text}" after lesson ${prev}`);
+      else if (l.number !== prev + 1) warnings.push(`L${l.line}: "${b.text}" skips from lesson ${prev} to ${l.number} (the book's number is kept; skipped lessons have no extracted content).`);
     });
   }
 

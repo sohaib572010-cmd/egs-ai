@@ -2886,6 +2886,19 @@ export const db = {
     return chat;
   },
 
+  async updateChatMessageText(messageId: string, message: string): Promise<void> {
+    if (supabase) {
+      await supabase.from('chat_history').update({ message }).eq('id', messageId);
+      return;
+    }
+    const data = readLocalDB();
+    const row = (data.chat_history || []).find((m: ChatMessage) => m.id === messageId);
+    if (row) {
+      row.message = message;
+      writeLocalDB(data);
+    }
+  },
+
   async deductCoins(userId: string | null, deviceId: string | null, amount: number): Promise<number> {
     const today = getCairoDateString();
     if (userId) {

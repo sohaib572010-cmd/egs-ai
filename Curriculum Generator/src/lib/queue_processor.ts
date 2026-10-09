@@ -2,9 +2,17 @@ import fs from "fs";
 import path from "path";
 import type { FileQueueItem, FileStatus, ProcessingSettings, PageExtractionResult, ProcessingLog, JobCheckpoint } from "./types";
 import { PDFDocumentHandler } from "./pdf_parser";
-import { detectTocPage, organizePageWithDeepSeek, type TocEntry } from "./deepseek_organizer";
+import { extractPageWithDeepSeek, type PageExtraction } from "./deepseek_organizer";
 import { buildCurriculumMarkdown } from "./curriculum_cleaner";
-import { countOutlineLessons, outlineToPromptContext, outlineToText, parseOutlineText, type OutlineNode } from "./outline";
+import {
+  countOutlineLessons,
+  deriveOutlineFromTocPages,
+  outlineToPromptContext,
+  outlineToText,
+  parseOutlineText,
+  type DerivedOutline,
+  type OutlineNode,
+} from "./outline";
 import {
   initCheckpoint,
   loadCheckpoint,
@@ -17,8 +25,7 @@ import {
 
 const OUTPUT_DIR = path.join(process.cwd(), "output");
 const CHECKPOINTS_DIR = path.join(process.cwd(), "checkpoints");
-const TOC_SCAN_PAGES = 10;
-const PAGE_TIMEOUT_MS = 150000;
+const PAGE_TIMEOUT_MS = 300000;
 
 function outputPathFor(gradeLevel: string, subjectName: string): string {
   const stageDir = path.join(OUTPUT_DIR, gradeLevel.replace(/[\\/:*?"<>|]/g, "_") || "unassigned");
@@ -26,12 +33,28 @@ function outputPathFor(gradeLevel: string, subjectName: string): string {
   return path.join(stageDir, `${subjectName.replace(/[\\/:*?"<>|]/g, "_")}.md`);
 }
 
-function tocEntriesToText(entries: TocEntry[]): string {
-  const labels = { unit: "الوحدة", chapter: "الفصل", lesson: "الدرس" } as const;
-  return entries
-    .map((e) => (e.kind === "intro" ? `مقدمة: ${e.title}` : `${labels[e.kind]}${e.number !== null ? ` ${e.number}` : ""}: ${e.title}`))
-    .join("\n");
+function derivedOutline(cp: JobCheckpoint): DerivedOutline {
+  return deriveOutlineFromTocPages(
+    Object.values(cp.completedPages)
+      .filter((p) => p.status === "success" && p.pageType === "toc")
+      .map((p) => ({ pageNumber: p.pageNumber, tocText: p.tocText || "" }))
+  );
 }
+
+/** Success pages from before page typing that came back empty (e.g. the page image failed to render). */
+function legacyEmptyPages(cp: JobCheckpoint): number[] {
+  return Object.values(cp.completedPages)
+    .filter((p) => p.status === "success" && !p.pageType && !p.processedMarkdown.trim() && !(cp.tocPages ?? []).includes(p.pageNumber))
+    .map((p) => p.pageNumber);
+}
+
+const SKIP_LABELS: Record<string, string> = {
+  toc: "فهرس الكتاب",
+  front_matter: "صفحة تمهيدية (تم تخطيها)",
+  exercises: "تدريبات بدون حلول (تم تخطيها)",
+  answer_key: "إجابات (تم تخطيها)",
+  blank: "صفحة فارغة (تم تخطيها)",
+};
 
 export class QueueProcessor {
   private queue: FileQueueItem[] = [];
@@ -61,6 +84,7 @@ export class QueueProcessor {
     if (Array.isArray(saved.queue) && saved.queue.length > 0) {
       this.queue = saved.queue.map((f) => {
         if (f.status === "processing") f.status = this.settings.autoResumeOnStartup ? "pending" : "paused";
+        this.flagFalseBlankPages(f);
         return f;
       });
       this.log("info", `تمت استعادة ${this.queue.length} كتب من سجل المحفوظات بنجاح.`);
@@ -68,6 +92,24 @@ export class QueueProcessor {
         setTimeout(() => this.startProcessing(), 1500);
       }
     }
+  }
+
+  /**
+   * Older runs stored pages whose image failed to render as empty successes, which exported an
+   * empty book. When most of a book is like that, those pages are reset and the book is marked
+   * failed so "retry" re-extracts them.
+   */
+  private flagFalseBlankPages(file: FileQueueItem) {
+    const cp = loadCheckpoint(file.id);
+    if (!cp || !file.totalPages) return;
+    const empty = legacyEmptyPages(cp);
+    if (empty.length < Math.max(3, file.totalPages * 0.5)) return;
+    for (const pNo of empty) delete cp.completedPages[pNo];
+    saveCheckpoint(cp);
+    file.status = "failed";
+    file.failedPages = empty.length;
+    file.errorMessage = `${empty.length} صفحة سُجلت فارغة بسبب فشل تحويلها إلى صور؛ اضغط إعادة المحاولة لاستخراجها من جديد`;
+    this.log("warn", file.errorMessage, file.id);
   }
 
   public persistState() {
@@ -246,8 +288,17 @@ export class QueueProcessor {
       if (!file.totalPages || file.totalPages <= 0) file.totalPages = pages;
       const checkpoint = initCheckpoint(file);
 
-      const outline = await this.resolveOutline(file, checkpoint, doc);
-      const outlineContext = outline && outline.length > 0 ? outlineToPromptContext(outline) : undefined;
+      const outline = this.resolveOutline(file, checkpoint);
+      let outlineContext = outline && outline.length > 0 ? outlineToPromptContext(outline) : undefined;
+      const onTocPage = () => {
+        if (outlineContext) return;
+        const cp = loadCheckpoint(file.id);
+        const derived = cp ? derivedOutline(cp).outline : null;
+        if (!derived) return;
+        outlineContext = outlineToPromptContext(derived);
+        file.outlineText = outlineToText(derived);
+        this.log("success", "تم التعرف على فهرس الكتاب أثناء الاستخراج واعتماده لضبط عناوين الصفحات التالية.", file.id);
+      };
 
       const pending: number[] = [];
       for (let p = 1; p <= file.totalPages; p++) {
@@ -267,7 +318,8 @@ export class QueueProcessor {
           file.currentOperation = `معالجة الصفحات [${[...active].sort((a, b) => a - b).join(", ")}]`;
           this.notifyProgress();
           try {
-            await this.processPageWithTimeout(file, doc, pNo, outlineContext);
+            const result = await this.processPageWithTimeout(file, doc, pNo, outlineContext);
+            if (result?.pageType === "toc") onTocPage();
           } finally {
             active.delete(pNo);
             processed++;
@@ -316,73 +368,44 @@ export class QueueProcessor {
   }
 
   /**
-   * Book outline, in priority order: operator-provided text, the outline stored in the checkpoint,
-   * or one read from the table-of-contents pages among the first pages of the book.
+   * Book outline: an operator-provided outline wins; otherwise the table of contents is recognized
+   * by the same single extraction request as every other page (no separate scan).
    */
-  private async resolveOutline(file: FileQueueItem, cp: JobCheckpoint, doc: PDFDocumentHandler): Promise<OutlineNode[] | null> {
-    if (file.outlineText?.trim()) {
+  private resolveOutline(file: FileQueueItem, cp: JobCheckpoint): OutlineNode[] | null {
+    if (file.outlineText?.trim() && cp.outlineSource !== "toc") {
       cp.outline = parseOutlineText(file.outlineText);
       cp.outlineSource = "manual";
       saveCheckpoint(cp);
       this.log("info", `تم اعتماد فهرس الكتاب المُدخل يدوياً (${cp.outline.length} عنصر رئيسي).`, file.id);
       return cp.outline;
     }
-    if (cp.outline !== undefined) return cp.outline;
-    if (!this.settings.deepSeekApiKey) return null;
+    const derived = derivedOutline(cp).outline;
+    if (derived) return derived;
+    return cp.outlineSource === "toc" ? cp.outline ?? null : null;
+  }
 
-    file.currentOperation = "قراءة فهرس الكتاب";
-    this.notifyProgress();
-    const scan = Array.from({ length: Math.min(TOC_SCAN_PAGES, file.totalPages) }, (_, i) => i + 1);
-    const found = await Promise.all(
-      scan.map(async (pNo) => {
-        try {
-          const page = await doc.extractPage(pNo);
-          return { pNo, entries: await detectTocPage(page.imageBuffer, page.extractedText, { apiKey: this.settings.deepSeekApiKey }) };
-        } catch {
-          return { pNo, entries: null };
-        }
-      })
-    );
-    let tocPages = found.filter((f) => f.entries).map((f) => f.pNo);
-    let entries = found.flatMap((f) => f.entries || []);
-    if (entries.filter((e) => e.kind === "unit" || e.kind === "chapter").length < 2) {
-      tocPages = [];
-      entries = [];
+  /** Page Markdown for assembly, with the outline taken from the pages the model recognized as contents. */
+  private assemblyInput(cp: JobCheckpoint) {
+    const derived = derivedOutline(cp);
+    if (cp.outlineSource !== "manual" && derived.outline) {
+      cp.outline = derived.outline;
+      cp.outlineSource = "toc";
+      cp.tocPages = derived.tocPages;
     }
-    cp.tocPages = tocPages;
-    cp.outline = entries.length >= 2 ? parseOutlineText(tocEntriesToText(entries)) : null;
-    cp.outlineSource = cp.outline ? "toc" : null;
-    for (const pNo of tocPages) {
-      cp.completedPages[pNo] = {
-        pageNumber: pNo,
-        rawVisionText: "",
-        processedMarkdown: "",
-        status: "success",
-        attempts: 1,
-        error: null,
-        timestamp: new Date().toISOString(),
-      };
-    }
-    saveCheckpoint(cp);
-    if (cp.outline) {
-      file.outlineText = tocEntriesToText(entries);
-      this.log("success", `تم استخراج فهرس الكتاب من الصفحات [${tocPages.join(", ")}] واعتماده لضبط عناوين الوحدات والدروس.`, file.id);
-    } else {
-      this.log("warn", "لم يتم العثور على فهرس للكتاب؛ سيتم ضبط العناوين تلقائياً. يمكنك إدخال الفهرس يدوياً من نافذة المعاينة.", file.id);
-    }
-    return cp.outline;
+    const pages = Object.values(cp.completedPages)
+      .filter((p) => p.status === "success")
+      .map((p) => ({ pageNumber: p.pageNumber, pageType: p.pageType, markdown: derived.fallbacks.get(p.pageNumber) ?? (p.processedMarkdown || "") }));
+    return { pages, outline: cp.outline ?? null, tocPages: cp.tocPages ?? [], reconcile: cp.outlineSource === "toc" };
   }
 
   private exportCheckpoint(cp: JobCheckpoint, file: FileQueueItem): string {
-    const pages = Object.values(cp.completedPages)
-      .filter((p) => p.status === "success")
-      .map((p) => ({ pageNumber: p.pageNumber, markdown: p.processedMarkdown || "" }));
+    const input = this.assemblyInput(cp);
     const { markdown, report, droppedTocPages, outline } = buildCurriculumMarkdown(
-      pages,
+      input.pages,
       file.subjectName,
-      cp.outline ?? null,
-      cp.tocPages ?? [],
-      cp.outlineSource === "toc"
+      input.outline,
+      input.tocPages,
+      input.reconcile
     );
     if (outline && cp.outlineSource === "toc") file.outlineText = outlineToText(outline);
     const outputPath = outputPathFor(file.gradeLevel, file.subjectName);
@@ -416,17 +439,22 @@ export class QueueProcessor {
     this.notifyProgress();
   }
 
-  private async processPageWithTimeout(file: FileQueueItem, doc: PDFDocumentHandler, pageNumber: number, outlineContext?: string) {
+  private async processPageWithTimeout(
+    file: FileQueueItem,
+    doc: PDFDocumentHandler,
+    pageNumber: number,
+    outlineContext?: string
+  ): Promise<PageExtraction | null> {
     let timer: NodeJS.Timeout | null = null;
-    const timeout = new Promise<void>((resolve) => {
+    const timeout = new Promise<null>((resolve) => {
       timer = setTimeout(() => {
         this.log("warn", `تجاوزت الصفحة ${pageNumber} مهلة المعالجة القصوى، سيتم الانتقال للصفحة التالية`, file.id, pageNumber);
         savePageResult(file.id, this.failedResult(pageNumber, 1, "Execution timeout"));
-        resolve();
+        resolve(null);
       }, PAGE_TIMEOUT_MS);
     });
     try {
-      await Promise.race([this.processPage(file, doc, pageNumber, outlineContext), timeout]);
+      return await Promise.race([this.processPage(file, doc, pageNumber, outlineContext), timeout]);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -436,10 +464,11 @@ export class QueueProcessor {
     return { pageNumber, rawVisionText: "", processedMarkdown: "", status: "failed", attempts, error, timestamp: new Date().toISOString() };
   }
 
-  private async processPage(file: FileQueueItem, doc: PDFDocumentHandler, pageNumber: number, outlineContext?: string) {
+  /** One DeepSeek request per page: transcription, classification and organization together. */
+  private async processPage(file: FileQueueItem, doc: PDFDocumentHandler, pageNumber: number, outlineContext?: string): Promise<PageExtraction | null> {
     try {
       const page = await doc.extractPage(pageNumber);
-      const markdown = await organizePageWithDeepSeek(page.imageBuffer, page.extractedText, {
+      const result = await extractPageWithDeepSeek(page.imageBuffer, page.extractedText, {
         apiKey: this.settings.deepSeekApiKey,
         subjectName: file.subjectName,
         gradeLevel: file.gradeLevel,
@@ -452,21 +481,26 @@ export class QueueProcessor {
       savePageResult(file.id, {
         pageNumber,
         rawVisionText: page.extractedText || "",
-        processedMarkdown: markdown,
+        processedMarkdown: result.markdown,
+        pageType: result.pageType,
+        tocText: result.tocText || undefined,
         status: "success",
         attempts: 1,
         error: null,
         timestamp: new Date().toISOString(),
       });
+      if (result.truncated) this.log("warn", `محتوى الصفحة ${pageNumber} طويل جداً وقد يكون منقوصاً؛ راجعها في المعاينة`, file.id, pageNumber);
       this.log(
-        markdown.trim() ? "success" : "info",
-        markdown.trim() ? `تمت معالجة الصفحة ${pageNumber}` : `تم تخطي الصفحة ${pageNumber} (لا تحتوي على شرح)`,
+        result.pageType === "content" ? "success" : "info",
+        result.pageType === "content" ? `تمت معالجة الصفحة ${pageNumber}` : `الصفحة ${pageNumber}: ${SKIP_LABELS[result.pageType]}`,
         file.id,
         pageNumber
       );
+      return result;
     } catch (error: any) {
       this.log("error", `تعثرت معالجة الصفحة ${pageNumber}: ${error.message}`, file.id, pageNumber);
       savePageResult(file.id, this.failedResult(pageNumber, this.settings.maxRetries || 4, error.message));
+      return null;
     }
   }
 
@@ -476,8 +510,8 @@ export class QueueProcessor {
     if (item.outputFilePath && fs.existsSync(item.outputFilePath)) return fs.readFileSync(item.outputFilePath, "utf-8");
     const cp = loadCheckpoint(fileId);
     if (!cp) return null;
-    const pages = Object.values(cp.completedPages).map((p) => ({ pageNumber: p.pageNumber, markdown: p.processedMarkdown || "" }));
-    return buildCurriculumMarkdown(pages, item.subjectName, cp.outline ?? null, cp.tocPages ?? [], cp.outlineSource === "toc").markdown;
+    const input = this.assemblyInput(cp);
+    return buildCurriculumMarkdown(input.pages, item.subjectName, input.outline, input.tocPages, input.reconcile).markdown;
   }
 
   public reexportAllFiles(): { count: number; files: string[] } {
