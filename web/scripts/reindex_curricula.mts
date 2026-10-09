@@ -6,14 +6,32 @@
  *   npx tsx --env-file=.env.local scripts/reindex_curricula.mts            dry run (counts only)
  *   npx tsx --env-file=.env.local scripts/reindex_curricula.mts --apply    write to the database
  *   ... --apply --only=<curriculum id>                                       one curriculum
+ *   ... --apply --shard=0/4                                                  every 4th curriculum (run 4 in parallel)
+ * Curricula whose stored chunks already match the current chunker are skipped unless --force is given.
  */
-import { db } from '../src/lib/db';
-import { processCurriculumChunks } from '../src/lib/curriculum_processor';
+import { db, supabaseAdmin } from '../src/lib/db';
+import { chunkMarkdownHierarchical, processCurriculumChunks } from '../src/lib/curriculum_processor';
 import { generateEmbeddingBatch } from '../src/lib/gemini';
 
 const apply = process.argv.includes('--apply');
+const force = process.argv.includes('--force');
 const only = process.argv.find(a => a.startsWith('--only='))?.slice(7);
-const curricula = (await db.getCurriculums()).filter(c => !c.is_placeholder && (!only || c.id === only));
+const [shard, shards] = (process.argv.find(a => a.startsWith('--shard='))?.slice(8) || '0/1').split('/').map(Number);
+const curricula = (await db.getCurriculums())
+  .filter(c => !c.is_placeholder && (!only || c.id === only))
+  .filter((_, i) => i % shards === shard);
+
+async function storedCounts(curriculumId: string): Promise<{ parents: number; children: number; embedded: number } | null> {
+  if (!supabaseAdmin) return null;
+  const count = async (level: 'parent' | 'child', embeddedOnly = false) => {
+    let q = supabaseAdmin!.from('curriculum_chunks').select('id', { count: 'exact', head: true })
+      .eq('curriculum_id', curriculumId).eq('chunk_level', level).gte('position_index', 0);
+    if (embeddedOnly) q = q.not('embedding', 'is', null);
+    return (await q).count ?? -1;
+  };
+  const [parents, children, embedded] = await Promise.all([count('parent'), count('child'), count('child', true)]);
+  return { parents, children, embedded };
+}
 
 let failed = 0;
 for (const c of curricula) {
@@ -22,6 +40,14 @@ for (const c of curricula) {
   if (!detail?.content?.trim()) {
     console.log(`SKIP ${label}: no stored Markdown`);
     continue;
+  }
+  if (apply && !force) {
+    const { parents, children } = chunkMarkdownHierarchical(detail.content);
+    const stored = await storedCounts(c.id);
+    if (stored && stored.parents === parents.length && stored.children === children.length && stored.embedded === children.length) {
+      console.log(`CURRENT ${label}: already indexed with the current chunker`);
+      continue;
+    }
   }
   const result = await processCurriculumChunks(detail.content, c.id, { skipEmbeddings: !apply });
   const children = result.allChunks.filter(ch => ch.chunk_level === 'child');

@@ -3336,15 +3336,25 @@ export const db = {
         };
       });
 
-      // Insert in batches of 100 to avoid payload limits
+      // Batches of 100 avoid payload limits. A failed batch (usually a statement timeout) is retried and split, so
+      // one slow statement never leaves the curriculum half-indexed; each insert is atomic, so retries add no duplicates.
+      const insertRows = async (rows: typeof formattedChunks, attempt = 0): Promise<boolean> => {
+        const { error: chunkError } = await supabase!.from('curriculum_chunks').insert(rows);
+        if (!chunkError || (chunkError.code === '23505' && rows.length === 1)) return true;
+        if (rows.length > 1) {
+          const mid = Math.ceil(rows.length / 2);
+          return (await insertRows(rows.slice(0, mid))) && (await insertRows(rows.slice(mid)));
+        }
+        if (attempt < 2) {
+          await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+          return insertRows(rows, attempt + 1);
+        }
+        console.error('Error inserting updated chunks:', chunkError);
+        return false;
+      };
       const BATCH = 100;
       for (let i = 0; i < formattedChunks.length; i += BATCH) {
-        const batch = formattedChunks.slice(i, i + BATCH);
-        const { error: chunkError } = await supabase.from('curriculum_chunks').insert(batch);
-        if (chunkError) {
-          console.error('Error inserting updated chunks:', chunkError);
-          return false;
-        }
+        if (!(await insertRows(formattedChunks.slice(i, i + BATCH)))) return false;
       }
       
       await this.syncCurriculumStateMutation(id, false, false);
