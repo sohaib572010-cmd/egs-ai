@@ -1,0 +1,5 @@
+.env*
+db_data.json
+*embeddings_cache.json
+.next
+node_modules
