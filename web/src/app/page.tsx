@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import katex from 'katex';
 import 'katex/dist/katex.min.css';
 import DOMPurify from 'dompurify';
 import {
@@ -125,7 +124,8 @@ import {
   ArrowUp,
   Flag,
   Mail,
-  AudioLines
+  AudioLines,
+  SlidersHorizontal
 } from 'lucide-react';
 import { TAB_TITLES } from '@/lib/seo';
 import dynamic from 'next/dynamic';
@@ -154,6 +154,9 @@ import { speakEnglish, stopSpeech, isPureEnglishVocab, isEnglishSpeechEligible }
 import { DEFAULT_STATIC_CURRICULUMS, DEFAULT_DAILY_QUESTS, DEFAULT_DAILY_QUESTS_DATA } from '@/lib/default_curriculums';
 import { buildPricingSnapshot, peakWindowsLabel, type PricingSnapshot } from '@/lib/points_pricing';
 import { KASHIER_PLANS } from '@/lib/plans';
+import { liftMathFromText, renderLatex } from '@/lib/katex_render';
+import { MAX_EXAM_QUESTIONS } from '@/lib/exam_specifications';
+import { CreatorSheet, CreatorStep, CountStepper, GenerationProgress } from '@/components/CreatorSheet';
 
 // Loaded on demand: the tour, the voice tutor and the admin catalog editor are not needed for first paint.
 const AppTour = dynamic(() => import('@/components/AppTour'), { ssr: false });
@@ -444,6 +447,10 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
     f = f.replace(/\\?\$+/g, ' ').replace(/\\[\[\]\(\)]/g, ' ');
     // Strip leaked markdown bold / strikethrough tokens
     f = f.replace(/\*\*/g, '').replace(/~~/g, '');
+    f = liftMathFromText(f);
+    // Chemistry (\ce, \pu) and unit commands (\SI{5}{m/s}) have their own syntax, so they skip the normalizations below
+    const chemGroups: string[] = [];
+    f = f.replace(/\\(?:ce|pu|SI|si|qty|unit)(?:\{(?:[^{}]|\{[^{}]*\})*\}){1,2}/g, (m) => `\uE001${String.fromCharCode(0xE100 + chemGroups.push(m) - 1)}\uE001`);
 
     // 2. Normalize combinations and permutations from legacy forms
     f = f.replace(/(?:\{\s*\}|\{)?\s*\^\{?(?:\\text\{)?([٠-٩0-9\u0600-\u06FF]+)\}?\}?\s*\\text\{(ق|ل)\}_\{?(?:\\text\{)?([٠-٩0-9\u0600-\u06FF]+)\}?\}?/g,
@@ -547,6 +554,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
     f = f.replace(/\^(\{[^{}\s\+\-\*=,]+\}|[^\s\{\}\+\-\*=,]+)\s*\^(\{[^{}\s\+\-\*=,]+\}|[^\s\{\}\+\-\*=,]+)/g, '^{$1}\\,^{$2}');
 
     f = f.replace(/\\\s*$/, '');
+    f = f.replace(/\uE001([\uE100-\uEFFF])\uE001/g, (_, c: string) => chemGroups[c.charCodeAt(0) - 0xE100]);
     f = f.replace(/\\(approx|times|pm|div|le|ge|leq|geq|neq|sim|simeq|equiv|to|leftarrow|rightarrow|Rightarrow|Leftarrow)\\(frac|sqrt|text|mathbf|mathit|mathrm|sum|int|lim)/g, '\\$1 \\$2');
     return f.replace(/\s+/g, ' ').trim();
   };
@@ -836,63 +844,18 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
 
     const html = React.useMemo(() => {
       if (!cleaned) return '';
-      const macros = {
-        '\\RR': '\\mathbb{R}',
-        '\\NN': '\\mathbb{N}',
-        '\\ZZ': '\\mathbb{Z}',
-        '\\QQ': '\\mathbb{Q}',
-        '\\CC': '\\mathbb{C}',
-        '\\degree': '^\\circ',
-        '\\degreeC': '^\\circ\\text{C}',
-        '\\celsius': '^\\circ\\text{C}',
-        '\\ohm': '\\Omega',
-        '\\micro': '\\mu',
-        '\\ga': '\\text{جا}',
-        '\\gta': '\\text{جتا}',
-        '\\za': '\\text{ظا}',
-        '\\zota': '\\text{ظتا}',
-        '\\qaf': '\\text{ق}',
-        '\\lam': '\\text{ل}',
-        '\\naha': '\\text{نها}',
-        '\\logar': '\\text{لو}',
-        '\\defe': '\\text{د}',
-        '\\had': '\\text{ح}',
-      };
-
       try {
-        const res = katex.renderToString(cleaned, {
-          displayMode: block,
-          throwOnError: false, // Per PRD Section 3: graceful fallback without raw code dumps
-          strict: false,
-          trust: false, // security: AI LaTeX output blocks \includegraphics/\href/etc.
-          macros,
-        });
-
-        if (res.includes('class="katex-error"')) {
-          // Attempt a secondary repair pass: unwrap bare \text and clean syntax
-          const repaired = cleaned
-            .replace(/\\text\{\s*([^{}]+)\s*\}/g, '$1')
-            .replace(/\\(?:text|mathrm|mathbf|mathit)\b/g, '')
-            .replace(/[\{\}]/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (repaired && repaired !== cleaned) {
-            const retry = katex.renderToString(repaired, {
-              displayMode: block,
-              throwOnError: false,
-              strict: false,
-              trust: false,
-              macros,
-            });
-            if (!retry.includes('class="katex-error"')) {
-              return retry;
-            }
-          }
-          return ''; // Drop to clean fallbackText to prevent raw inverted code dumps
-        }
-
-        return res;
-      } catch (e) {
+        const res = renderLatex(cleaned, block);
+        if (res) return res;
+        // Secondary repair pass: unwrap bare \text and clean syntax
+        const repaired = cleaned
+          .replace(/\\text\{\s*([^{}]+)\s*\}/g, '$1')
+          .replace(/\\(?:text|mathrm|mathbf|mathit)\b/g, '')
+          .replace(/[\{\}]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        return repaired && repaired !== cleaned ? renderLatex(repaired, block) : '';
+      } catch {
         return '';
       }
     }, [cleaned, block]);
@@ -1012,7 +975,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
 
     const isEng = isEnglishText(text);
 
-    const regex = /(\\\[[\s\S]*?\\\])|(\\\([\s\S]*?\\\))|(\$\$[\s\S]*?\$\$)|(\$(?:[^\$]|\\.)+?\$)|(\*\*\*[^*]+?\*\*\*|___[^_]+?___)|(\*\*[^*]+?\*\*|__[^_]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(~~[^~\n]+?~~)|(`[^`\n]+?`)|(\[[^\]\n]+\]\(https?:\/\/[^\s\)]+\))|(\\(?:text|mathbf|mathrm|frac|sqrt|xrightarrow|times|div|pm|approx|le|ge|neq|sum|int|lim|sin|cos|tan|cot|sec|csc|log|ln|to|rightarrow|leftarrow|Rightarrow|Leftarrow|cdot|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi)\b(?:\{[^{}\n]*\}|[^\$\s،,\)]+)*)|([√∛]\s*(?:\([^)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+[²³]|[٠-٩0-9a-zA-Z\u0600-\u06FF]+\s*\^\s*(?:\([^)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)|(?:\([^\)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)\s*\/\s*(?:\([^\)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+))/g;
+    const regex = /(\\\[[\s\S]*?\\\])|(\\\([\s\S]*?\\\))|(\$\$[\s\S]*?\$\$)|(\$(?:[^\$]|\\.)+?\$)|(\*\*\*[^*]+?\*\*\*|___[^_]+?___)|(\*\*[^*]+?\*\*|__[^_]+?__)|(\*[^*\n]+?\*|_[^_\n]+?_)|(~~[^~\n]+?~~)|(`[^`\n]+?`)|(\[[^\]\n]+\]\(https?:\/\/[^\s\)]+\))|(\\(?:text|mathbf|mathrm|frac|sqrt|xrightarrow|times|div|pm|approx|le|ge|neq|sum|int|lim|sin|cos|tan|cot|sec|csc|log|ln|to|rightarrow|leftarrow|Rightarrow|Leftarrow|cdot|alpha|beta|gamma|delta|Delta|theta|Theta|pi|Pi|Omega|omega|sigma|Sigma|lambda|Lambda|mu|micro|phi|Phi|psi|Psi|rho|tau|eta|epsilon|zeta|kappa|xi|nu|chi|Gamma|varphi|vartheta|ce|pu|vec|overrightarrow|overline|hat|bar|dfrac|tfrac|binom|circ|infty|angle|degree|partial|nabla|therefore|because|parallel|perp|propto|equiv|leq|geq|cup|cap|subset|subseteq|in|notin|forall|exists|emptyset|varnothing)\b(?:\{[^{}\n]*\}|[^\$\s،,\)]+)*)|([√∛]\s*(?:\([^)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+[²³]|[٠-٩0-9a-zA-Z\u0600-\u06FF]+\s*\^\s*(?:\([^)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)|(?:\([^\)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+)\s*\/\s*(?:\([^\)]+\)|[٠-٩0-9a-zA-Z\u0600-\u06FF]+))/g;
 
     const parts: React.ReactNode[] = [];
     let lastIndex = 0;
@@ -5137,8 +5100,17 @@ export default function App({ initialTab }: AppProps = {}) {
     }
   };
 
-  const handleManualCreateDeck = async () => {
-    if (!token || !flashcardSubject || !manualDeckTitle) return;
+  const openCreatedDeck = async (subject: string, deckId: string | null, cardCount: number) => {
+    setShowFlashcardCreateModal(false);
+    setActiveTab('flashcards');
+    fetchFlashcardDecks();
+    await fetchSubjectCards(subject);
+    setDeckFilter(deckId);
+    notify(`تم إنشاء ${cardCount} ${cardCount > 10 || cardCount < 3 ? 'كارت' : 'كروت'} في ${subject}`, 'success');
+  };
+
+  const handleManualCreateDeck = async (subject: string = flashcardSubject) => {
+    if (!token || !subject || !manualDeckTitle.trim()) return;
     const validCards = manualCardsList.filter(c => c.question.trim() && c.answer.trim());
     if (validCards.length === 0) {
       notify('يرجى إضافة كارت واحد على الأقل يحتوي على سؤال وإجابة', 'info');
@@ -5154,9 +5126,9 @@ export default function App({ initialTab }: AppProps = {}) {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          subject_name: flashcardSubject,
+          subject_name: subject,
           grade_level: user?.grade_level || '1_high',
-          title: manualDeckTitle,
+          title: manualDeckTitle.trim(),
           cards: validCards
         })
       });
@@ -5167,18 +5139,15 @@ export default function App({ initialTab }: AppProps = {}) {
         return;
       }
       if (data.success) {
-        setShowFlashcardCreateModal(false);
         setManualDeckTitle('');
         setManualCardsList([{ question: '', answer: '' }]);
-        fetchFlashcardDecks();
-        if (selectedFlashcardSubject === flashcardSubject) {
-          fetchSubjectCards(flashcardSubject);
-        }
+        await openCreatedDeck(subject, data.deck?.id ?? null, validCards.length);
       } else {
         notify(data.error || 'فشل إنشاء الكروت', 'error');
       }
     } catch (e) {
       console.error(e);
+      notify('تعذر الاتصال بالخادم، حاول مرة أخرى', 'error');
     } finally {
       setGeneratingDecks(false);
     }
@@ -5226,9 +5195,9 @@ export default function App({ initialTab }: AppProps = {}) {
     return null;
   };
 
-  const generateFlashcardDeck = async () => {
+  const generateFlashcardDeck = async (subject: string = flashcardSubject) => {
     const activeTopic = flashcardTopic.trim() || (selectedFlashcardLesson ? selectedFlashcardLesson.title : '');
-    if (!token || !flashcardSubject || !activeTopic) return;
+    if (!token || !subject || !activeTopic) return;
     setGeneratingDecks(true);
     try {
       const currentGrade = user?.grade_level || chatGrade || '1_high';
@@ -5239,7 +5208,7 @@ export default function App({ initialTab }: AppProps = {}) {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          subject_name: flashcardSubject,
+          subject_name: subject,
           grade_level: currentGrade,
           topic: activeTopic,
           count: flashcardCount
@@ -5263,16 +5232,13 @@ export default function App({ initialTab }: AppProps = {}) {
         syncRemainingCoins(data.remaining_coins);
         setFlashcardTopic('');
         setSelectedFlashcardLesson(null);
-        setShowFlashcardCreateModal(false);
-        fetchFlashcardDecks();
-        if (selectedFlashcardSubject === flashcardSubject) {
-          fetchSubjectCards(flashcardSubject);
-        }
+        await openCreatedDeck(subject, data.deck?.id ?? null, data.cards?.length || flashcardCount);
       } else {
         notify(data.error || 'فشل توليد الكروت', 'error');
       }
     } catch (e) {
       console.error(e);
+      notify('تعذر الاتصال بالخادم، حاول مرة أخرى', 'error');
     } finally {
       setGeneratingDecks(false);
     }
@@ -5396,7 +5362,6 @@ export default function App({ initialTab }: AppProps = {}) {
   const targetChatMsgRef = useRef<{ messageId?: string | null; content?: string | null } | null>(null);
 
   // Ministry Exam Booklet Simulator Mode
-  const [isBookletMode, setIsBookletMode] = useState(false);
 
   // Sessions State
   const [sessions, setSessions] = useState<any[]>([]);
@@ -5627,6 +5592,7 @@ export default function App({ initialTab }: AppProps = {}) {
   };
 
   const handleGenerateExam = async (customParams?: {
+    subject_name?: string;
     topic: string;
     mode: 'auto' | 'total_only' | 'custom_types';
     total_count?: number;
@@ -5654,7 +5620,7 @@ export default function App({ initialTab }: AppProps = {}) {
       if (deviceId) headers['x-device-id'] = deviceId;
 
       const currentGrade = user ? user.grade_level : chatGrade;
-      const targetSubject = (customParams as any)?.subject_name || examSubject || chatSubject;
+      const targetSubject = customParams?.subject_name || examSubject || chatSubject;
       const res = await fetch('/api/exams/generate', {
         method: 'POST',
         headers,
@@ -5685,7 +5651,9 @@ export default function App({ initialTab }: AppProps = {}) {
       setActiveExamAnswers({});
       setExamResult(null);
       setSelectedExamLesson(null);
-      setShowExamCreateModal(false); // Close custom creator modal
+      setExamTopic('');
+      setShowExamCreateModal(false);
+      setActiveTab('exams');
       const durationSeconds = (examObj.questions?.length || 5) * 120;
       if (examObj.id) {
         localStorage.setItem('egs_active_exam_id', examObj.id);
@@ -18258,81 +18226,100 @@ export default function App({ initialTab }: AppProps = {}) {
         )}
 
         {/* Flashcards Creation Modal (AI or Manual) */}
-        {showFlashcardCreateModal && !isTourOpen && (
-          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(8px)', zIndex: 999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: isMobile ? '12px' : '20px' }}>
-            <div className="glass-strong animate-scale-in" style={{ maxWidth: '680px', width: '100%', borderRadius: '24px', padding: isMobile ? '20px 16px' : '28px 24px', background: 'var(--card-bg)', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '18px', maxHeight: '92vh', overflowY: 'auto' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <Brain size={22} style={{ color: 'var(--primary-color)' }} />
-                  <h3 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 900, color: 'var(--text-main)' }}>إنشاء كروت تعليمية ذكية</h3>
-                </div>
-                <button onClick={() => setShowFlashcardCreateModal(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '6px', borderRadius: '8px' }}>
-                  <X size={18} />
-                </button>
-              </div>
+        {showFlashcardCreateModal && !isTourOpen && (() => {
+          const currentGrade = user ? user.grade_level : chatGrade || '1_high';
+          const subjects = getActiveSubjectsForGrade(currentGrade).filter(s => !s.is_placeholder);
+          const curSubj = flashcardSubject || (subjects[0]?.subject_name || '');
+          const isAi = flashcardCreateMode === 'ai';
+          const scopeTitle = flashcardTopic.trim() || selectedFlashcardLesson?.title || '';
+          const readyManual = manualCardsList.filter(c => c.question.trim() && c.answer.trim()).length;
+          const cardsWord = (n: number) => (n > 10 || n < 3 ? 'كارت' : 'كروت');
+          const canCreate = isAi
+            ? Boolean(curSubj && scopeTitle)
+            : Boolean(curSubj && manualDeckTitle.trim() && readyManual > 0);
+          const pickSubject = (name: string) => {
+            if (name === curSubj) return;
+            setFlashcardSubject(name);
+            setFlashcardTopic('');
+            setSelectedFlashcardLesson(null);
+            setLessonSearchQuery('');
+            setActiveUnitTab('all');
+            fetchCurriculumStructure(currentGrade, name);
+          };
+          const showProgress = isAi && generatingDecks;
+          return (
+            <CreatorSheet
+              icon={<Layers size={22} />}
+              title="كروت مراجعة جديدة"
+              subtitle="كروت سؤال وإجابة تراجع بيها بنظام التكرار الذكي"
+              onClose={() => setShowFlashcardCreateModal(false)}
+              footer={showProgress ? undefined : (
+                <>
+                  <div className={`creator-summary ${canCreate ? '' : 'empty'}`}>
+                    <strong>
+                      {isAi ? (scopeTitle || 'اختار الدرس اللي عايز تراجعه') : (manualDeckTitle.trim() || 'اكتب اسم المجموعة')}
+                    </strong>
+                    <span>
+                      {[curSubj, isAi ? `${flashcardCount} ${cardsWord(flashcardCount)} بالذكاء الاصطناعي` : `كروت مكتملة: ${readyManual}`].filter(Boolean).join(' · ')}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-primary creator-cta"
+                    disabled={!canCreate || generatingDecks}
+                    onClick={() => (isAi ? generateFlashcardDeck(curSubj) : handleManualCreateDeck(curSubj))}
+                  >
+                    {generatingDecks ? <Loader2 size={17} className="animate-spin" /> : isAi ? <Sparkles size={17} /> : <Check size={17} />}
+                    <span>{isAi ? 'إنشاء الكروت' : generatingDecks ? 'جاري الحفظ...' : 'حفظ الكروت'}</span>
+                  </button>
+                </>
+              )}
+            >
+              {showProgress ? (
+                <GenerationProgress
+                  title="بنكتب كروتك دلوقتي"
+                  details={[curSubj, scopeTitle, `${flashcardCount} ${cardsWord(flashcardCount)}`]}
+                  stages={['قراءة الدرس من كتابك', 'استخراج أهم المفاهيم والقوانين', 'كتابة الأسئلة وإجاباتها', 'حفظ الكروت في مجموعتك']}
+                />
+              ) : (
+                <>
+                  <div className="creator-mode-switch" role="tablist" aria-label="طريقة الإنشاء">
+                    <button type="button" role="tab" aria-selected={isAi} className={isAi ? 'active' : ''} onClick={() => setFlashcardCreateMode('ai')}>
+                      <Sparkles size={16} />
+                      <span>بالذكاء الاصطناعي</span>
+                    </button>
+                    <button type="button" role="tab" aria-selected={!isAi} className={!isAi ? 'active' : ''} onClick={() => setFlashcardCreateMode('manual')}>
+                      <Edit2 size={16} />
+                      <span>أكتبها بنفسي</span>
+                    </button>
+                  </div>
 
-              {/* Mode Selector */}
-              <div style={{ display: 'flex', background: 'rgba(255,255,255,0.04)', padding: '4px', borderRadius: '12px', border: '1px solid var(--border-color)', gap: '4px' }}>
-                <button
-                  onClick={() => setFlashcardCreateMode('ai')}
-                  style={{ flex: 1, padding: '9px', border: 'none', borderRadius: '9px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', background: flashcardCreateMode === 'ai' ? 'var(--primary-color)' : 'transparent', color: flashcardCreateMode === 'ai' ? 'var(--text-on-primary)' : 'var(--text-muted)', transition: 'all 0.15s ease' }}
-                >
-                  <Sparkles size={15} />
-                  <span>توليد تلقائي بالذكاء الاصطناعي</span>
-                </button>
-                <button
-                  onClick={() => setFlashcardCreateMode('manual')}
-                  style={{ flex: 1, padding: '9px', border: 'none', borderRadius: '9px', fontWeight: 700, fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', background: flashcardCreateMode === 'manual' ? 'var(--primary-color)' : 'transparent', color: flashcardCreateMode === 'manual' ? 'var(--text-on-primary)' : 'var(--text-muted)', transition: 'all 0.15s ease' }}
-                >
-                  <Edit2 size={15} />
-                  <span>كتابة يدوية للكروت</span>
-                </button>
-              </div>
-
-              {/* Subject Selection */}
-              {(() => {
-                const currentGrade = user ? user.grade_level : chatGrade || '1_high';
-                const activeSubjs = getActiveSubjectsForGrade(currentGrade);
-                const curSubj = flashcardSubject || (activeSubjs[0]?.subject_name || '');
-                const cacheKey = `${currentGrade}_${curSubj}`;
-                const structure = curriculumStructures[cacheKey];
-                const units = structure?.units || [];
-                const hasUnits = structure?.hasCurriculum && units.length > 0;
-                const totalLessonsCount = structure?.totalLessons || units.reduce((acc: number, u: any) => acc + (u.lessons?.length || 0), 0);
-
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    {/* Subject Selection Dropdown */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label className="form-label" style={{ fontSize: '0.82rem', fontWeight: 700 }}>المادة الدراسية:</label>
-                      <select
-                        value={curSubj}
-                        onChange={(e) => {
-                          const newSubj = e.target.value;
-                          setFlashcardSubject(newSubj);
-                          setFlashcardTopic('');
-                          setSelectedFlashcardLesson(null);
-                          setLessonSearchQuery('');
-                          setActiveUnitTab('all');
-                          fetchCurriculumStructure(currentGrade, newSubj);
-                        }}
-                        className="form-input"
-                        style={{ width: '100%', padding: '10px 14px', borderRadius: '10px', fontSize: '0.88rem', cursor: 'pointer' }}
-                      >
-                        {activeSubjs.map(s => (
-                          <option key={s.subject_name} value={s.subject_name}>{s.subject_name}</option>
-                        ))}
-                      </select>
+                  <CreatorStep index={1} title="المادة" done={Boolean(curSubj)}>
+                    <div className="creator-chips scroll" role="radiogroup" aria-label="المادة">
+                      {subjects.map(s => (
+                        <button
+                          key={s.subject_name}
+                          type="button"
+                          role="radio"
+                          aria-checked={s.subject_name === curSubj}
+                          className={`creator-chip ${s.subject_name === curSubj ? 'active' : ''}`}
+                          onClick={() => pickSubject(s.subject_name)}
+                        >
+                          <span className="subject-pill-icon">{getSubjectIcon(s.subject_name, 15)}</span>
+                          <span>{s.subject_name}</span>
+                        </button>
+                      ))}
                     </div>
+                  </CreatorStep>
 
-                    {flashcardCreateMode === 'ai' ? (
-                      /* AI Generation Fields with Lesson Selector */
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  {isAi ? (
+                    <>
+                      <CreatorStep index={2} title="الدرس" hint="الكروت بتتكتب من نفس الدرس في كتابك" done={Boolean(scopeTitle)}>
                         <CurriculumLessonPicker
                           type="flashcard"
                           currentGrade={currentGrade}
                           currentSubject={curSubj}
-                          structure={structure}
+                          structure={curriculumStructures[`${currentGrade}_${curSubj}`]}
                           loading={loadingStructure}
                           activeLessonTab={flashcardLessonTab}
                           setActiveLessonTab={setFlashcardLessonTab}
@@ -18349,119 +18336,83 @@ export default function App({ initialTab }: AppProps = {}) {
                           isMobile={isMobile}
                           onFetchStructure={fetchCurriculumStructure}
                         />
+                      </CreatorStep>
 
-                        {/* Card Count */}
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                          <label className="form-label" style={{ fontSize: '0.82rem' }}>عدد الكروت المطلوب:</label>
-                          <select
-                            value={flashcardCount}
-                            onChange={(e) => setFlashcardCount(Number(e.target.value))}
-                            className="form-input"
-                            style={{ width: '100%', padding: '10px 12px', fontSize: '0.85rem' }}
-                          >
-                            <option value={5}>5 كروت تعليمية</option>
-                            <option value={10}>10 كروت تعليمية</option>
-                            <option value={15}>15 كارت تعليمي</option>
-                          </select>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => {
-                            generateFlashcardDeck();
-                          }}
-                          disabled={generatingDecks || (!flashcardTopic.trim() && !selectedFlashcardLesson)}
-                          className="btn-primary"
-                          style={{ padding: '12px', borderRadius: '10px', fontWeight: 800, border: 'none', cursor: 'pointer', marginTop: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                        >
-                          {generatingDecks ? (
-                            <>
-                              <Loader2 className="animate-spin" size={16} />
-                              <span>جاري توليد الكروت الذكية...</span>
-                            </>
-                          ) : (
-                            <span>توليد الكروت الآن</span>
-                          )}
-                        </button>
-                      </div>
-                    ) : (
-                /* Manual Creation Fields */
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 700, color: 'var(--text-muted)', marginBottom: '6px' }}>عنوان المجموعة</label>
-                    <input
-                      type="text"
-                      placeholder="مثال: ملخص مراجعة الفيزياء الحديثة"
-                      value={manualDeckTitle}
-                      onChange={(e) => setManualDeckTitle(e.target.value)}
-                      style={{ width: '100%', padding: '10px', borderRadius: '8px', background: 'var(--input-bg)', color: 'var(--text-main)', border: '1px solid var(--border-color)', outline: 'none' }}
-                    />
-                  </div>
-
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                    <label style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--text-main)' }}>قائمة الأسئلة والإجابات</label>
-                    {manualCardsList.map((item, idx) => (
-                      <div key={idx} className="glass" style={{ padding: '12px', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '8px', position: 'relative' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <span style={{ fontSize: '0.75rem', fontWeight: 800, color: 'var(--primary-color)' }}>الكارت {idx + 1}</span>
-                          {manualCardsList.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() => setManualCardsList(prev => prev.filter((_, i) => i !== idx))}
-                              style={{ background: 'transparent', border: 'none', color: 'var(--danger-color)', cursor: 'pointer' }}
-                            >
-                              <Trash2 size={14} />
+                      <CreatorStep index={3} title="عدد الكروت" hint="10 كروت مناسبة لمراجعة درس واحد" done={canCreate}>
+                        <div className="creator-chips" role="radiogroup" aria-label="عدد الكروت">
+                          {[5, 10, 15, 20].map(n => (
+                            <button key={n} type="button" role="radio" aria-checked={flashcardCount === n} className={`creator-chip compact ${flashcardCount === n ? 'active' : ''}`} onClick={() => setFlashcardCount(n)}>
+                              {n}
                             </button>
-                          )}
+                          ))}
                         </div>
+                      </CreatorStep>
+                    </>
+                  ) : (
+                    <>
+                      <CreatorStep index={2} title="اسم المجموعة" done={Boolean(manualDeckTitle.trim())}>
                         <input
                           type="text"
-                          placeholder="السؤال..."
-                          value={item.question}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setManualCardsList(prev => prev.map((c, i) => i === idx ? { ...c, question: val } : c));
-                          }}
-                          style={{ width: '100%', padding: '8px', borderRadius: '6px', background: 'var(--input-bg)', color: 'var(--text-main)', border: '1px solid var(--border-color)', fontSize: '0.85rem' }}
+                          className="creator-text-input"
+                          placeholder="مثال: قوانين الحركة - الفصل الأول"
+                          maxLength={120}
+                          value={manualDeckTitle}
+                          onChange={(e) => setManualDeckTitle(e.target.value)}
                         />
-                        <input
-                          type="text"
-                          placeholder="الإجابة..."
-                          value={item.answer}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            setManualCardsList(prev => prev.map((c, i) => i === idx ? { ...c, answer: val } : c));
-                          }}
-                          style={{ width: '100%', padding: '8px', borderRadius: '6px', background: 'var(--input-bg)', color: 'var(--text-main)', border: '1px solid var(--border-color)', fontSize: '0.85rem' }}
-                        />
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() => setManualCardsList(prev => [...prev, { question: '', answer: '' }])}
-                      style={{ background: 'rgba(255,255,255,0.04)', border: '1px dashed var(--border-color)', color: 'var(--primary-color)', padding: '10px', borderRadius: '10px', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
-                    >
-                      <PlusCircle size={16} />
-                      <span>إضافة كارت آخر</span>
-                    </button>
-                  </div>
+                      </CreatorStep>
 
-                  <button
-                    onClick={handleManualCreateDeck}
-                    disabled={generatingDecks || !manualDeckTitle.trim()}
-                    className="btn-primary"
-                    style={{ padding: '12px', borderRadius: '10px', fontWeight: 800, border: 'none', cursor: 'pointer', marginTop: '8px' }}
-                  >
-                    {generatingDecks ? 'جاري الحفظ...' : 'حفظ وإضافة الكروت'}
-                  </button>
-                </div>
+                      <CreatorStep index={3} title="الكروت" hint="اكتب السؤال على الوش والإجابة على الضهر" done={readyManual > 0}>
+                        {manualCardsList.map((item, idx) => (
+                          <div key={idx} className="manual-card">
+                            <div className="manual-card-head">
+                              <span>الكارت {idx + 1}</span>
+                              {manualCardsList.length > 1 && (
+                                <button
+                                  type="button"
+                                  className="card-icon-btn danger"
+                                  onClick={() => setManualCardsList(prev => prev.filter((_, i) => i !== idx))}
+                                  aria-label={`حذف الكارت ${idx + 1}`}
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              )}
+                            </div>
+                            <textarea
+                              rows={2}
+                              placeholder="السؤال"
+                              aria-label={`سؤال الكارت ${idx + 1}`}
+                              value={item.question}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setManualCardsList(prev => prev.map((c, i) => i === idx ? { ...c, question: val } : c));
+                              }}
+                            />
+                            <textarea
+                              rows={2}
+                              placeholder="الإجابة"
+                              aria-label={`إجابة الكارت ${idx + 1}`}
+                              value={item.answer}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setManualCardsList(prev => prev.map((c, i) => i === idx ? { ...c, answer: val } : c));
+                              }}
+                            />
+                          </div>
+                        ))}
+                        {manualCardsList.length < 50 && (
+                          <button type="button" className="creator-add-btn" onClick={() => setManualCardsList(prev => [...prev, { question: '', answer: '' }])}>
+                            <PlusCircle size={17} />
+                            <span>إضافة كارت</span>
+                          </button>
+                        )}
+                      </CreatorStep>
+                    </>
+                  )}
+                </>
               )}
-            </div>
+            </CreatorSheet>
           );
         })()}
-      </div>
-    </div>
-  )}
 
         {/* Edit Card Modal */}
         {editingCard && (
@@ -18734,227 +18685,160 @@ export default function App({ initialTab }: AppProps = {}) {
         </nav>
       )}
 
-      {showExamCreateModal && !isTourOpen && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100vw', height: '100vh', background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', overflowY: 'auto', padding: isMobile ? '12px' : '20px', direction: 'rtl' }}>
-          <div className="glass-strong animate-scale-in" style={{ background: 'var(--card-bg)', width: '100%', maxWidth: '680px', borderRadius: '24px', padding: isMobile ? '20px 16px' : '28px 24px', boxShadow: 'var(--shadow-xl)', border: '1px solid var(--border-color)', color: 'var(--text-main)', fontFamily: 'var(--font-arabic)', margin: isMobile ? '16px auto' : '32px auto', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '18px' }}>
-            
-            {/* Modal Header */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-color)', paddingBottom: '14px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <FileText size={22} style={{ color: 'var(--primary-color)' }} />
-                <h3 style={{ fontSize: '1.25rem', fontWeight: 900, color: 'var(--primary-color)', margin: 0 }}>إنشاء امتحان مخصص بالذكاء الاصطناعي</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowExamCreateModal(false)}
-                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '6px', borderRadius: '8px' }}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            {/* Subject Selector */}
-            {(() => {
-              const currentGrade = user ? user.grade_level : chatGrade;
-              const activeSubjs = getActiveSubjectsForGrade(currentGrade);
-              const curSubj = examSubject || chatSubject || (activeSubjs[0]?.subject_name || '');
-              const cacheKey = `${currentGrade}_${curSubj}`;
-              const structure = curriculumStructures[cacheKey];
-              const units = structure?.units || [];
-              const hasUnits = structure?.hasCurriculum && units.length > 0;
-              const totalLessonsCount = structure?.totalLessons || units.reduce((acc: number, u: any) => acc + (u.lessons?.length || 0), 0);
-
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                    {/* Subject Dropdown */}
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label className="form-label" style={{ fontSize: '0.82rem', fontWeight: 700 }}>المادة الدراسية:</label>
-                      <select
-                        value={curSubj}
-                        onChange={(e) => {
-                          const newSubj = e.target.value;
-                          setExamSubject(newSubj);
-                          setExamTopic('');
-                          setSelectedExamLesson(null);
-                          setLessonSearchQuery('');
-                          setActiveUnitTab('all');
-                          fetchCurriculumStructure(currentGrade, newSubj);
-                        }}
-                        className="form-input"
-                        style={{ cursor: 'pointer', width: '100%', padding: '10px 14px', borderRadius: '10px', fontSize: '0.88rem' }}
+      {showExamCreateModal && !isTourOpen && (() => {
+        const currentGrade = user ? user.grade_level : chatGrade;
+        const subjects = getActiveSubjectsForGrade(currentGrade).filter(s => !s.is_placeholder);
+        const curSubj = examSubject || chatSubject || (subjects[0]?.subject_name || '');
+        const scopeTitle = examTopic.trim() || selectedExamLesson?.title || '';
+        const typedTotal = examMcqCount + examTfCount + examEssayCount;
+        const questionCount = examMode === 'total_only' ? examTotalCount : typedTotal;
+        const countLabel = examMode === 'auto' ? 'عدد الأسئلة يحدده المعلم الذكي' : `${questionCount} ${questionCount > 10 || questionCount < 3 ? 'سؤال' : 'أسئلة'}`;
+        const canCreate = Boolean(curSubj && scopeTitle) && (examMode !== 'custom_types' || typedTotal > 0);
+        const pickSubject = (name: string) => {
+          if (name === curSubj) return;
+          setExamSubject(name);
+          setExamTopic('');
+          setSelectedExamLesson(null);
+          setLessonSearchQuery('');
+          setActiveUnitTab('all');
+          fetchCurriculumStructure(currentGrade, name);
+        };
+        const modeOptions = [
+          { key: 'auto' as const, Icon: Sparkles, title: 'تلقائي', desc: 'امتحان متوازن بمواصفات الوزارة' },
+          { key: 'total_only' as const, Icon: ListChecks, title: 'أحدد العدد', desc: 'تختار عدد الأسئلة والمعلم ينوّعها' },
+          { key: 'custom_types' as const, Icon: SlidersHorizontal, title: 'حسب النوع', desc: 'اختيار من متعدد، صح وخطأ، ومقالي' }
+        ];
+        return (
+          <CreatorSheet
+            icon={<FileText size={22} />}
+            title="امتحان جديد"
+            subtitle="اختار المادة والدروس وشكل الأسئلة، والمعلم الذكي يكتب امتحانك من كتابك"
+            onClose={() => setShowExamCreateModal(false)}
+            footer={generatingExam ? undefined : (
+              <>
+                <div className={`creator-summary ${canCreate ? '' : 'empty'}`}>
+                  <strong>{scopeTitle || 'اختار الدروس اللي هتمتحن فيها'}</strong>
+                  <span>{curSubj ? `${curSubj} · ${countLabel}` : countLabel}</span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-primary creator-cta"
+                  disabled={!canCreate}
+                  onClick={() => handleGenerateExam({
+                    subject_name: curSubj,
+                    topic: scopeTitle,
+                    mode: examMode,
+                    total_count: examTotalCount,
+                    mcq_count: examMcqCount,
+                    tf_count: examTfCount,
+                    essay_count: examEssayCount
+                  })}
+                >
+                  <Sparkles size={17} />
+                  <span>إنشاء الامتحان</span>
+                </button>
+              </>
+            )}
+          >
+            {generatingExam ? (
+              <GenerationProgress
+                title="بنجهّز امتحانك دلوقتي"
+                details={[curSubj, scopeTitle, countLabel]}
+                stages={['قراءة الدروس المختارة من كتابك', 'كتابة الأسئلة بمواصفات الامتحان', 'مراجعة الإجابات النموذجية', 'تجهيز ورقة الامتحان']}
+              />
+            ) : (
+              <>
+                <CreatorStep index={1} title="المادة" done={Boolean(curSubj)}>
+                  <div className="creator-chips scroll" role="radiogroup" aria-label="المادة">
+                    {subjects.map(s => (
+                      <button
+                        key={s.subject_name}
+                        type="button"
+                        role="radio"
+                        aria-checked={s.subject_name === curSubj}
+                        className={`creator-chip ${s.subject_name === curSubj ? 'active' : ''}`}
+                        onClick={() => pickSubject(s.subject_name)}
                       >
-                        {activeSubjs.map(s => (
-                          <option key={s.subject_name} value={s.subject_name}>{s.subject_name}</option>
-                        ))}
-                      </select>
-                    </div>
+                        <span className="subject-pill-icon">{getSubjectIcon(s.subject_name, 15)}</span>
+                        <span>{s.subject_name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </CreatorStep>
 
-                    {/* Curriculum Lessons & Custom Topic Selector */}
-                    <CurriculumLessonPicker
-                      type="exam"
-                      currentGrade={currentGrade}
-                      currentSubject={curSubj}
-                      structure={structure}
-                      loading={loadingStructure}
-                      activeLessonTab={examLessonTab}
-                      setActiveLessonTab={setExamLessonTab}
-                      selectedLesson={selectedExamLesson}
-                      setSelectedLesson={setSelectedExamLesson}
-                      customTopic={examTopic}
-                      setCustomTopic={setExamTopic}
-                      searchQuery={lessonSearchQuery}
-                      setSearchQuery={setLessonSearchQuery}
-                      activeUnitTab={activeUnitTab}
-                      setActiveUnitTab={setActiveUnitTab}
-                      expandedUnits={expandedUnits}
-                      setExpandedUnits={setExpandedUnits}
-                      isMobile={isMobile}
-                      onFetchStructure={fetchCurriculumStructure}
-                    />
+                <CreatorStep index={2} title="الدروس" hint="المنهج كله، وحدة كاملة، درس واحد، أو موضوع تكتبه بنفسك" done={Boolean(scopeTitle)}>
+                  <CurriculumLessonPicker
+                    type="exam"
+                    currentGrade={currentGrade}
+                    currentSubject={curSubj}
+                    structure={curriculumStructures[`${currentGrade}_${curSubj}`]}
+                    loading={loadingStructure}
+                    activeLessonTab={examLessonTab}
+                    setActiveLessonTab={setExamLessonTab}
+                    selectedLesson={selectedExamLesson}
+                    setSelectedLesson={setSelectedExamLesson}
+                    customTopic={examTopic}
+                    setCustomTopic={setExamTopic}
+                    searchQuery={lessonSearchQuery}
+                    setSearchQuery={setLessonSearchQuery}
+                    activeUnitTab={activeUnitTab}
+                    setActiveUnitTab={setActiveUnitTab}
+                    expandedUnits={expandedUnits}
+                    setExpandedUnits={setExpandedUnits}
+                    isMobile={isMobile}
+                    onFetchStructure={fetchCurriculumStructure}
+                  />
+                </CreatorStep>
 
-                  {/* Question Mode Selection */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                    <label className="form-label" style={{ fontSize: '0.82rem' }}>طريقة تحديد الأسئلة:</label>
-                    <select
-                      value={examMode}
-                      onChange={(e) => setExamMode(e.target.value as any)}
-                      className="form-input"
-                      style={{ cursor: 'pointer', width: '100%', padding: '10px 12px', fontSize: '0.85rem' }}
-                    >
-                      <option value="auto">توليد تلقائي شامل (دع الذكاء الاصطناعي يقرر)</option>
-                      <option value="total_only">تحديد إجمالي عدد الأسئلة فقط</option>
-                      <option value="custom_types">تحديد عدد كل نوع من الأسئلة بالتفصيل</option>
-                    </select>
+                <CreatorStep index={3} title="الأسئلة" hint="كل الامتحانات بتتصحح فوراً مع شرح لكل غلطة" done={canCreate}>
+                  <div className="creator-options" role="radiogroup" aria-label="طريقة تحديد الأسئلة">
+                    {modeOptions.map(({ key, Icon, title, desc }) => (
+                      <button
+                        key={key}
+                        type="button"
+                        role="radio"
+                        aria-checked={examMode === key}
+                        className={`creator-option ${examMode === key ? 'active' : ''}`}
+                        onClick={() => setExamMode(key)}
+                      >
+                        <Icon size={20} />
+                        <div>
+                          <strong>{title}</strong>
+                          <span>{desc}</span>
+                        </div>
+                      </button>
+                    ))}
                   </div>
 
                   {examMode === 'total_only' && (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label className="form-label" style={{ fontSize: '0.82rem' }}>إجمالي عدد الأسئلة:</label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={15}
-                        value={examTotalCount}
-                        onChange={(e) => setExamTotalCount(parseInt(e.target.value, 10) || 5)}
-                        className="form-input"
-                        style={{ width: '100%' }}
-                      />
+                    <div className="creator-panel">
+                      <div className="creator-chips" role="radiogroup" aria-label="عدد الأسئلة">
+                        {[5, 10, 15, 20].map(n => (
+                          <button key={n} type="button" role="radio" aria-checked={examTotalCount === n} className={`creator-chip compact ${examTotalCount === n ? 'active' : ''}`} onClick={() => setExamTotalCount(n)}>
+                            {n}
+                          </button>
+                        ))}
+                      </div>
+                      <CountStepper label="أو اختار عدد بالظبط" value={examTotalCount} min={1} max={MAX_EXAM_QUESTIONS} onChange={setExamTotalCount} />
                     </div>
                   )}
 
                   {examMode === 'custom_types' && (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px' }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        <label className="form-label" style={{ fontSize: '0.75rem' }}>اختيار من متعدد:</label>
-                        <input
-                          type="number"
-                          min={0}
-                          value={examMcqCount}
-                          onChange={(e) => setExamMcqCount(parseInt(e.target.value, 10) || 0)}
-                          className="form-input"
-                        />
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        <label className="form-label" style={{ fontSize: '0.75rem' }}>صح أم خطأ:</label>
-                        <input
-                          type="number"
-                          min={0}
-                          value={examTfCount}
-                          onChange={(e) => setExamTfCount(parseInt(e.target.value, 10) || 0)}
-                          className="form-input"
-                        />
-                      </div>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        <label className="form-label" style={{ fontSize: '0.75rem' }}>أسئلة مقالية:</label>
-                        <input
-                          type="number"
-                          min={0}
-                          value={examEssayCount}
-                          onChange={(e) => setExamEssayCount(parseInt(e.target.value, 10) || 0)}
-                          className="form-input"
-                        />
-                      </div>
+                    <div className="creator-panel">
+                      <CountStepper label="اختيار من متعدد" value={examMcqCount} min={0} max={MAX_EXAM_QUESTIONS - examTfCount - examEssayCount} onChange={setExamMcqCount} />
+                      <CountStepper label="صح أو خطأ" value={examTfCount} min={0} max={MAX_EXAM_QUESTIONS - examMcqCount - examEssayCount} onChange={setExamTfCount} />
+                      <CountStepper label="أسئلة مقالية" value={examEssayCount} min={0} max={MAX_EXAM_QUESTIONS - examMcqCount - examTfCount} onChange={setExamEssayCount} />
+                      <span className={`creator-panel-note ${typedTotal === 0 ? 'warn' : ''}`}>
+                        {typedTotal === 0 ? 'اختار سؤال واحد على الأقل' : `الإجمالي ${typedTotal} من ${MAX_EXAM_QUESTIONS} سؤال كحد أقصى`}
+                      </span>
                     </div>
                   )}
-
-                  {/* Ministry Exam Booklet Simulator Option */}
-                  <div
-                    onClick={() => setIsBookletMode(prev => !prev)}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      padding: '12px 14px',
-                      borderRadius: '12px',
-                      background: isBookletMode ? 'rgba(0, 180, 216, 0.1)' : 'var(--alpha-white-2)',
-                      border: isBookletMode ? '1.5px solid var(--primary-color)' : '1px solid var(--border-color)',
-                      cursor: 'pointer',
-                      transition: 'var(--transition-fast)'
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: isBookletMode ? 'var(--primary-color)' : 'var(--alpha-white-4)', color: isBookletMode ? 'var(--text-on-primary)' : 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <Timer size={16} />
-                      </div>
-                      <div>
-                        <div style={{ fontSize: '0.84rem', fontWeight: 800, color: isBookletMode ? 'var(--primary-color)' : 'var(--text-main)' }}>
-                          محاكي بوكليت الوزارة الرسمي
-                        </div>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                          توقيت رسمي تنازلي محكم، شاشة خالية من المشتتات، وتقييم مفاهيمي تفصيلي بعد التسليم
-                        </div>
-                      </div>
-                    </div>
-                    <div style={{ width: '20px', height: '20px', borderRadius: '6px', border: isBookletMode ? 'none' : '1.5px solid var(--border-color)', background: isBookletMode ? 'var(--primary-color)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>
-                      {isBookletMode && <Check size={14} />}
-                    </div>
-                  </div>
-
-                  {/* Generate Button */}
-                  <button
-                    type="button"
-                    disabled={generatingExam || (!examTopic.trim() && !selectedExamLesson)}
-                    onClick={() => {
-                      const finalTopic = examTopic.trim() || (selectedExamLesson ? selectedExamLesson.title : 'المنهج بالكامل');
-                      handleGenerateExam({
-                        topic: finalTopic,
-                        mode: examMode,
-                        total_count: examTotalCount,
-                        mcq_count: examMcqCount,
-                        tf_count: examTfCount,
-                        essay_count: examEssayCount
-                      });
-                    }}
-                    className="btn-primary"
-                    style={{
-                      padding: '12px',
-                      borderRadius: '10px',
-                      fontWeight: 800,
-                      fontSize: '0.95rem',
-                      border: 'none',
-                      cursor: 'pointer',
-                      marginTop: '6px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: '8px'
-                    }}
-                  >
-                    {generatingExam ? (
-                      <>
-                        <Loader2 className="animate-spin" size={16} />
-                        <span>جاري إنشاء امتحانك المخصص...</span>
-                      </>
-                    ) : (
-                      <span>إنشاء الامتحان الآن</span>
-                    )}
-                  </button>
-                </div>
-              );
-            })()}
-          </div>
-        </div>
-      )}
+                </CreatorStep>
+              </>
+            )}
+          </CreatorSheet>
+        );
+      })()}
 
       {/* MODAL: Curriculum Syllabus Roadmap */}
       {renderRoadmapModal()}

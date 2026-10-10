@@ -164,6 +164,7 @@ function gradeProfile(gradeLevel: string, stage: Stage): string {
 const SVG_RULE = 'Diagrams: a fenced ```svg block with a viewBox, only svg/path/circle/rect/line/polygon/polyline/text/g/ellipse elements, colors #00B4D8, #FFB703, #7209B7 or currentColor, Arabic labels, no scripts, foreignObject or external links.';
 
 const LATIN_NOTATION = `- NOTATION: every symbol, formula, unit and number in Latin letters and Western digits, left-to-right in KaTeX exactly as the textbook writes them ($v = \\frac{d}{t}$, $F = ma$, $3 \\times 10^8\\ \\text{m/s}$, $100^\\circ\\text{C}$). Never translate symbols or digits into Arabic.
+- Units: only letters go inside \\text{} and math commands stay outside it ($\\text{kg}\\cdot\\text{m/s}$, $\\text{N}\\cdot\\text{s}$, $5\\ \\Omega$, never \\text{kg\\cdot m/s}). Chemical formulas and equations use mhchem: $\\ce{2H2 + O2 -> 2H2O}$, $\\ce{SO4^2-}$.
 - Example: $$V = \\sqrt{(3.0)^2 + (4.0)^2} = \\sqrt{25} = 5.0\\ \\text{m/s}$$`;
 
 const ARABIC_MATH_NOTATION = `- NOTATION: official Egyptian Arabic mathematics, right-to-left in KaTeX: Arabic variables (س، ص، ع، ن، ر، أ، ب، ج، م، ل، ك) and Eastern Arabic digits (٠-٩; seven is ٧, never V). Combinations $ن \\text{ ق } ر$, permutations $ن \\text{ ل } ر$, terms $ح_ن$, functions \\text{جا}، \\text{جتا}، \\text{ظا}، \\text{نها}_{س \\to ٠}، \\text{د}(س).

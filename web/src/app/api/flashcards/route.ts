@@ -50,8 +50,14 @@ export async function POST(req: NextRequest) {
     if (!subject_name || !grade_level || !title || !Array.isArray(cards) || cards.length === 0) {
       return NextResponse.json({ error: 'جميع بيانات مجموعات الكروت مطلوبة' }, { status: 400 });
     }
+    const cleanCards = cards
+      .filter((c: any) => typeof c?.question === 'string' && typeof c?.answer === 'string' && c.question.trim() && c.answer.trim())
+      .map((c: any) => ({ question: c.question.trim().slice(0, 1000), answer: c.answer.trim().slice(0, 2000) }));
+    if (typeof title !== 'string' || typeof subject_name !== 'string' || cleanCards.length === 0 || cleanCards.length > 50) {
+      return NextResponse.json({ error: 'بيانات الكروت غير صالحة (من 1 إلى 50 كارت)' }, { status: 400 });
+    }
 
-    const deck = await db.createFlashcardDeck(userId, subject_name, grade_level, title, cards);
+    const deck = await db.createFlashcardDeck(userId, subject_name.slice(0, 120), grade_level, title.trim().slice(0, 120), cleanCards);
     return NextResponse.json({ success: true, deck });
   } catch (error: any) {
     console.error('POST Flashcards Deck Error:', error);

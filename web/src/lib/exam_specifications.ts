@@ -12,6 +12,13 @@ export interface ExamGenerationConfig {
   totalCount?: number;
 }
 
+export const MAX_EXAM_QUESTIONS = 20;
+
+const clampCount = (value: unknown, min: number, max: number, fallback: number): number => {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) ? Math.min(Math.max(n, min), Math.max(min, max)) : fallback;
+};
+
 /**
  * Returns the official cognitive distribution and pedagogical standards for the given grade level
  * based on Egyptian Ministry of Education and NCEEE specifications.
@@ -225,14 +232,14 @@ export function buildOfficialExamSystemPrompt(
   if (isRemedial) {
     questionInstructions = `Exam Question Counts: Exactly 3 remedial questions (2 multiple_choice, 1 true_false or short essay) targeting these diagnostic difficulty concepts: ${remedialConcepts?.join(', ')}.`;
   } else if (mode === 'custom_types') {
-    const mcqs = mcqCount !== undefined ? Number(mcqCount) : 0;
-    const tfs = tfCount !== undefined ? Number(tfCount) : 0;
-    const essays = essayCount !== undefined ? Number(essayCount) : 0;
+    const mcqs = clampCount(mcqCount, 0, MAX_EXAM_QUESTIONS, 0);
+    const tfs = clampCount(tfCount, 0, MAX_EXAM_QUESTIONS - mcqs, 0);
+    const essays = clampCount(essayCount, 0, MAX_EXAM_QUESTIONS - mcqs - tfs, mcqs + tfs > 0 ? 0 : 5);
     const total = mcqs + tfs + essays;
     questionInstructions = `Exam Question Counts: Exactly ${total} questions:
 ${mcqs > 0 ? `- Exactly ${mcqs} multiple-choice questions (multiple_choice) with 4 plausible options in ${isEnglish ? 'English' : 'Arabic'}.\n` : ''}${tfs > 0 ? `- Exactly ${tfs} true/false questions (true_false) where correct_answer is strictly "true" or "false".\n` : ''}${essays > 0 ? `- Exactly ${essays} short essay questions (essay) where correct_answer is the concise model answer in ${isEnglish ? 'English' : 'Arabic'}.\n` : ''}`;
   } else if (mode === 'total_only') {
-    const total = totalCount !== undefined ? Number(totalCount) : (isBaccalaureate ? 6 : 5);
+    const total = clampCount(totalCount, 1, MAX_EXAM_QUESTIONS, isBaccalaureate ? 6 : 5);
     if (isBaccalaureate) {
       const half = Math.floor(total / 2);
       const essayHalf = total - half;
