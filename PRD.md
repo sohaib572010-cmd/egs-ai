@@ -68,7 +68,7 @@
 ## 2. Repository Structure
 
 ```
-c:\myapp\                      Git repo (github.com/sohip1961-dotcom/EGA-AI, branch: main)
+c:\myapp\                      Git repo (github.com/sohaib572010-cmd/egs-ai, branch: main)
 ├── PRD.md                     THIS FILE — read first
 ├── CODING_GUIDELINES.md       Mandatory coding rules — read second
 ├── CLAUDE.md / AGENTS.md      Pointers for AI agents to the two files above
