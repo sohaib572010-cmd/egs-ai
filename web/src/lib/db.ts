@@ -3305,11 +3305,30 @@ export const db = {
       }
       if (err1) return false;
       
-      const { error: err2 } = await supabase
-        .from('curriculum_chunks')
-        .delete()
-        .eq('curriculum_id', id);
-      if (err2) return false;
+      // The new chunks are written before the old ones are removed, so the curriculum (including its
+      // __RAW_MARKDOWN__ source) is never empty: a failure at any step leaves a complete version in place.
+      const oldRows: { id: string; chunk_level: string }[] = [];
+      for (let from = 0; ; from += 1000) {
+        const { data: page, error: listError } = await supabase
+          .from('curriculum_chunks').select('id, chunk_level').eq('curriculum_id', id).range(from, from + 999);
+        if (listError) return false;
+        oldRows.push(...(page || []));
+        if (!page || page.length < 1000) break;
+      }
+      // Children first, so removing a parent never has to cascade
+      const oldIds = [...oldRows.filter(r => r.chunk_level === 'child'), ...oldRows.filter(r => r.chunk_level !== 'child')].map(r => r.id);
+      const deleteIds = async (ids: string[]): Promise<boolean> => {
+        for (let i = 0; i < ids.length; i += 200) {
+          const slice = ids.slice(i, i + 200);
+          let ok = false;
+          for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+            ok = !(await supabase!.from('curriculum_chunks').delete().in('id', slice)).error;
+            if (!ok) await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+          }
+          if (!ok) return false;
+        }
+        return true;
+      };
 
       // Assign IDs to parent chunks first so children can reference them, preserving existing IDs
       const parentMap = new Map<string, string>();
@@ -3354,7 +3373,15 @@ export const db = {
       };
       const BATCH = 100;
       for (let i = 0; i < formattedChunks.length; i += BATCH) {
-        if (!(await insertRows(formattedChunks.slice(i, i + BATCH)))) return false;
+        if (!(await insertRows(formattedChunks.slice(i, i + BATCH)))) {
+          await deleteIds(formattedChunks.slice(0, i + BATCH).map(c => c.id));
+          return false;
+        }
+      }
+      const newIds = new Set(formattedChunks.map(c => c.id));
+      if (!(await deleteIds(oldIds.filter(oldId => !newIds.has(oldId))))) {
+        console.error('Old curriculum chunks could not all be removed:', id);
+        return false;
       }
       
       await this.syncCurriculumStateMutation(id, false, false);

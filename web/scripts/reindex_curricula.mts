@@ -6,9 +6,11 @@
  *   npx tsx --env-file=.env.local scripts/reindex_curricula.mts            dry run (counts only)
  *   npx tsx --env-file=.env.local scripts/reindex_curricula.mts --apply    write to the database
  *   ... --apply --only=<curriculum id>                                       one curriculum
+ *   ... --apply --only=<curriculum id> --file=<path.md>                      one curriculum from its source file
  *   ... --apply --shard=0/4                                                  every 4th curriculum (run 4 in parallel)
  * Curricula whose stored chunks already match the current chunker are skipped unless --force is given.
  */
+import { readFileSync } from 'fs';
 import { db, supabaseAdmin } from '../src/lib/db';
 import { chunkMarkdownHierarchical, processCurriculumChunks } from '../src/lib/curriculum_processor';
 import { generateEmbeddingBatch } from '../src/lib/gemini';
@@ -16,6 +18,8 @@ import { generateEmbeddingBatch } from '../src/lib/gemini';
 const apply = process.argv.includes('--apply');
 const force = process.argv.includes('--force');
 const only = process.argv.find(a => a.startsWith('--only='))?.slice(7);
+const sourceFile = process.argv.find(a => a.startsWith('--file='))?.slice(7);
+if (sourceFile && !only) throw new Error('--file needs --only');
 const [shard, shards] = (process.argv.find(a => a.startsWith('--shard='))?.slice(8) || '0/1').split('/').map(Number);
 const curricula = (await db.getCurriculums())
   .filter(c => !c.is_placeholder && (!only || c.id === only))
@@ -36,7 +40,7 @@ async function storedCounts(curriculumId: string): Promise<{ parents: number; ch
 let failed = 0;
 for (const c of curricula) {
   const label = `${c.grade_level} / ${c.subject_name}`;
-  const detail = await db.getCurriculumDetail(c.id);
+  const detail = sourceFile ? { content: readFileSync(sourceFile, 'utf8') } : await db.getCurriculumDetail(c.id);
   if (!detail?.content?.trim()) {
     console.log(`SKIP ${label}: no stored Markdown`);
     continue;
