@@ -6573,6 +6573,7 @@ html[data-theme='light'] .gpt-offer-btn { color: #0077B6; }
   overflow-y: auto; overscroll-behavior: contain;
 }
 .plus-menu { position: absolute; bottom: calc(100% + 10px); right: 0; width: min(310px, calc(100vw - 24px)); max-height: min(70vh, 540px); }
+.plus-menu.down { bottom: auto; top: calc(100% + 10px); }
 .account-menu { position: absolute; bottom: calc(100% + 4px); right: 8px; left: 8px; max-height: min(72vh, 560px); }
 .plus-menu-item {
   display: flex; align-items: center; gap: 12px; width: 100%; min-height: 46px; padding: 5px 8px; border: none; border-radius: 14px; background: transparent;

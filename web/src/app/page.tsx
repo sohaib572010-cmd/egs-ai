@@ -709,7 +709,7 @@ RenewalCountdownDisplay.displayName = 'RenewalCountdownDisplay';
             className="voice-waveform-wrap"
             onClick={(e) => {
               if (!audioRef.current || !effectiveDuration) return;
-              const rect = e.currentTarget.getBoundingClientRect();
+              const rect = (e.currentTarget.closest('form') || e.currentTarget).getBoundingClientRect();
               const clickX = e.clientX - rect.left;
               const ratio = clickX / rect.width;
               const targetTime = ratio * effectiveDuration;
@@ -4530,6 +4530,7 @@ export default function App({ initialTab }: AppProps = {}) {
 
   // Decluttered Composer Auxiliary Tools Tray State
   const [showComposerTools, setShowComposerTools] = useState<boolean>(false);
+  const [plusMenuPlacement, setPlusMenuPlacement] = useState<{ up: boolean; maxHeight: number }>({ up: true, maxHeight: 540 });
 
   // Smart Study Notebook Search & Category Filters
   const [notebookSearchQuery, setNotebookSearchQuery] = useState<string>('');
@@ -7672,7 +7673,7 @@ export default function App({ initialTab }: AppProps = {}) {
         {showComposerTools && (
           <>
             <div className="plus-menu-backdrop" onClick={() => setShowComposerTools(false)} />
-            <div className="plus-menu animate-fade-in" role="menu" aria-label="أدوات الرسالة">
+            <div className={`plus-menu animate-fade-in ${plusMenuPlacement.up ? '' : 'down'}`} style={{ maxHeight: plusMenuPlacement.maxHeight }} role="menu" aria-label="أدوات الرسالة">
               <button type="button" role="menuitem" className="plus-menu-item" disabled={isDisabled} onClick={() => { setShowComposerTools(false); if (!user) { openRegister(); return; } setShowCameraModal(true); }}>
                 <span className="plus-menu-icon"><Camera size={19} /></span>
                 <span>كاميرا</span>
@@ -7840,7 +7841,17 @@ export default function App({ initialTab }: AppProps = {}) {
                 <button
                   id="tour-thinking-controls"
                   type="button"
-                  onClick={() => { if (!isTourOpen) setShowComposerTools(prev => !prev); }}
+                  onClick={(e) => {
+                    if (isTourOpen) return;
+                    if (!showComposerTools) {
+                      const rect = (e.currentTarget.closest('form') || e.currentTarget).getBoundingClientRect();
+                      const above = rect.top - 76;
+                      const below = window.innerHeight - rect.bottom - 24;
+                      const up = above >= 420 || above >= below;
+                      setPlusMenuPlacement({ up, maxHeight: Math.min(540, Math.max(220, up ? above : below)) });
+                    }
+                    setShowComposerTools(prev => !prev);
+                  }}
                   className={`composer-icon-btn composer-plus ${showComposerTools || pendingImage ? 'active' : ''}`}
                   title="صورة، تفكير عميق، طريقة الشرح"
                   aria-label="أدوات إضافية"
