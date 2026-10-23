@@ -3,8 +3,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { FunctionCall, LiveServerMessage, Session } from '@google/genai';
 import {
-  ArrowRight, AudioLines, BookOpen, Check, CircleStop, Clock, FileText, FlaskConical, Headphones, Keyboard, Loader2,
-  Mic, MicOff, Phone, PhoneOff, Search, Send, Sparkles, Star, Wallet, Zap
+  ArrowRight, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, CircleStop, Clock, FileText, FlaskConical,
+  Headphones, Languages, Loader2, Mic, MicOff, Phone, Search, Send, SlidersHorizontal, Star, Wallet, X, Zap
 } from 'lucide-react';
 import { VOICE_FEEDBACK_TAGS, VOICE_LIMITS, voiceForeignLanguage, type VoiceUsageSummary } from '@/lib/voice_policy';
 
@@ -14,6 +14,7 @@ type Teacher = 'male' | 'female';
 type Entry = { id: number; role: 'student' | 'teacher' | 'search'; text: string; at: string; done?: boolean; interrupted?: boolean; sources?: string[] };
 type ConnectOptions = { handle: string | null; reconnect: boolean; dropReason?: string };
 type FeedbackStep = 'rate' | 'sent';
+type SettingsRow = 'subject' | 'dialect' | 'about';
 
 interface VoiceTutorProps {
   authToken: string | null;
@@ -38,6 +39,10 @@ const SILENCE_NUDGES_MS = [15_000, 30_000];
 const SPEECH_LEVEL = 0.03;
 const OUTPUT_RATE = 24000;
 const STARTERS = ['اشرحلي الدرس الأول', 'اسألني سؤال على آخر درس', 'عندي مسألة مش فاهمها', 'لخصلي أهم النقط'];
+const VOICES: { key: Teacher; name: string; tone: string }[] = [
+  { key: 'male', name: 'الأستاذ', tone: 'هادي وواضح' },
+  { key: 'female', name: 'الأستاذة', tone: 'مبهجة وصبورة' }
+];
 const LANGUAGE_STARTERS = ['اشرحلي الدرس الأول', 'ترجملي جملة', 'صحّحلي نطقي', 'اسألني على كلمات الدرس'];
 
 // Downmixes the mic to 16 kHz mono PCM16 and posts 50 ms chunks with their RMS level.
@@ -135,11 +140,11 @@ export default function VoiceTutor({ authToken, subjects, initialSubject, gradeN
   const [notice, setNotice] = useState<{ tone: 'info' | 'danger'; text: string } | null>(null);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [muted, setMuted] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
   const [callLeft, setCallLeft] = useState(0);
   const [typed, setTyped] = useState('');
-  const [showKeyboard, setShowKeyboard] = useState(false);
-  const [showTranscript, setShowTranscript] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 769px)').matches);
+  const [showSettings, setShowSettings] = useState(false);
+  const [openRow, setOpenRow] = useState<SettingsRow | null>(null);
+  const [showTranscript, setShowTranscript] = useState(false);
   const [usage, setUsage] = useState<VoiceUsageSummary | null>(null);
   const [feedback, setFeedback] = useState<{ step: FeedbackStep; seconds: number } | null>(null);
   const [rating, setRating] = useState(0);
@@ -235,7 +240,6 @@ export default function VoiceTutor({ authToken, subjects, initialSubject, gradeN
     const t = setInterval(() => {
       checkSilence();
       elapsedRef.current += 1;
-      setElapsed(elapsedRef.current);
       const left = Math.ceil((callEndsAtRef.current - Date.now()) / 1000);
       setCallLeft(left);
       if (left <= 0) finishRef.current('time');
@@ -579,11 +583,10 @@ export default function VoiceTutor({ authToken, subjects, initialSubject, gradeN
     skipTurnRef.current = false;
     nudgesRef.current = 0;
     setEntries([]);
-    setElapsed(0);
     setNotice(null);
     setFeedback(null);
     setMuted(false);
-    setShowKeyboard(false);
+    setShowSettings(false);
     mutedRef.current = false;
     setCallState('connecting');
 
@@ -707,21 +710,13 @@ export default function VoiceTutor({ authToken, subjects, initialSubject, gradeN
   const lastTeacher = [...entries].reverse().find(e => e.role === 'teacher');
   const caption = lastTeacher ? (lastTeacher.text.length > 220 ? `...${lastTeacher.text.slice(-220)}` : lastTeacher.text) : '';
   const studentSpoke = entries.some(e => e.role === 'student');
-  const usedPercent = usage ? Math.min(100, Math.round((usage.used_seconds / usage.limit_seconds) * 100)) : 0;
   const remainingMinutes = usage ? Math.floor(usage.remaining_seconds / 60) : 0;
   const tagOptions = rating >= 4 ? VOICE_FEEDBACK_TAGS.good : VOICE_FEEDBACK_TAGS.bad;
 
-  const experimentalNote = (
-    <div className="voice-trial-card">
-      <div className="voice-trial-title"><FlaskConical size={17} /> ميزة تجريبية</div>
-      <ul>
-        <li><Clock size={14} /> ليها حد يومي: {minutesAr(VOICE_LIMITS.free.dailyMinutes)} للحساب المجاني و{minutesAr(VOICE_LIMITS.subscriber.dailyMinutes)} للمشتركين.</li>
-        <li><Wallet size={14} /> مش بتخصم أي نقاط من رصيدك.</li>
-        <li><Zap size={14} /> ممكن تقف أو تتغير في أي وقت خلال فترة التجربة.</li>
-        <li><FileText size={14} /> نص المكالمة بيتحفظ في سجلك زي المحادثات الكتابية، ويُستخدم لتحسين الخدمة حسب إعدادات الخصوصية في ملفك.</li>
-      </ul>
-    </div>
-  );
+  const voiceIndex = VOICES.findIndex(v => v.key === teacher);
+  const activeVoice = VOICES[voiceIndex];
+  const shiftVoice = (step: number) => setTeacher(VOICES[(voiceIndex + step + VOICES.length) % VOICES.length].key);
+  const toggleRow = (row: SettingsRow) => setOpenRow(r => (r === row ? null : row));
 
   const renderFeedback = () => feedback && (
     <div className="voice-feedback" role="region" aria-label="تقييم المكالمة">
@@ -789,194 +784,196 @@ export default function VoiceTutor({ authToken, subjects, initialSubject, gradeN
     </div>
   );
 
-  return (
-    <div className="voice-page mobile-main-with-nav">
-      <div className="voice-shell">
-        <div className="voice-head">
-          <button type="button" className="page-back-link" onClick={inCall ? () => finishCall('user') : onBack}>
-            <ArrowRight size={16} /> {inCall ? 'إنهاء والرجوع' : 'الرجوع للدردشة'}
-          </button>
-          <div className="voice-head-title">
-            <h1>المعلم الصوتي</h1>
-            <span className="voice-beta-chip">تجريبي</span>
+  const renderSettings = () => (
+    <div className="vx-sheet-overlay" onClick={() => setShowSettings(false)}>
+      <div className="vx-sheet" role="dialog" aria-modal="true" aria-label="إعدادات المكالمة" onClick={e => e.stopPropagation()}>
+        <button type="button" className="vx-sheet-handle" onClick={() => setShowSettings(false)} aria-label="إغلاق الإعدادات" />
+        <div className="vx-voice-pick">
+          <button type="button" className="vx-arrow" onClick={() => shiftVoice(-1)} disabled={inCall} aria-label="الصوت السابق"><ChevronRight size={20} /></button>
+          <div className="vx-voice-name">
+            <strong>{activeVoice.name}</strong>
+            <span>{activeVoice.tone}</span>
           </div>
-          {inCall && (
-            <span className={`voice-timer num ${callLeft <= 60 ? 'warn' : ''}`} title="الوقت المتبقي في المكالمة">
-              <Clock size={14} /> <bdi dir="ltr">{formatTime(callLeft)}</bdi>
-            </span>
-          )}
+          <button type="button" className="vx-arrow" onClick={() => shiftVoice(1)} disabled={inCall} aria-label="الصوت التالي"><ChevronLeft size={20} /></button>
         </div>
+        <div className="vx-dots" aria-hidden="true">
+          {VOICES.map(v => <span key={v.key} className={v.key === teacher ? 'on' : ''} />)}
+        </div>
+        {inCall && <p className="vx-sheet-note">التغييرات بتتطبق من المكالمة الجاية.</p>}
 
-        {!inCall ? (
-          <div className="voice-setup">
-            {feedback ? renderFeedback() : (
-              <>
-                <div className="voice-hero">
-                  <span className="voice-hero-icon"><AudioLines size={30} /></span>
-                  <h2>كلّم معلمك بصوتك واسأله زي ما تحب</h2>
-                  <p>اسأل، ناقش، واطلب شرح أي درس. المعلم بيدور في كتابك المدرسي قبل ما يشرح، وتقدر تقاطعه في أي لحظة.</p>
-                </div>
-
-                {notice && <div className={`voice-notice ${notice.tone === 'danger' ? 'danger' : ''}`} role="status">{notice.text}</div>}
-
-                {experimentalNote}
-
-                {usage && (
-                  <div className="voice-usage">
-                    <div className="voice-usage-row">
-                      <span>متبقي لك النهارده</span>
-                      <strong>{usage.remaining_seconds < 60 ? 'أقل من دقيقة' : minutesAr(remainingMinutes)} من {minutesAr(Math.round(usage.limit_seconds / 60))}</strong>
-                    </div>
-                    <div className="voice-usage-bar" aria-hidden="true"><span style={{ width: `${100 - usedPercent}%` }} /></div>
-                    {usage.tier === 'free' && (
-                      <button type="button" className="voice-link-btn" onClick={onUpgrade}>
-                        المشتركين ليهم {minutesAr(VOICE_LIMITS.subscriber.dailyMinutes)} يومياً، اعرف الباقات
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                <div className="voice-field">
-                  <span className="voice-field-label">المادة · {gradeName}</span>
-                  {subjects.length ? (
-                    <div className="voice-chips">
-                      {subjects.map(s => (
-                        <button key={s} type="button" className={`voice-chip ${s === subject ? 'active' : ''}`} onClick={() => { setSubject(s); onSubjectChange(s); }} aria-pressed={s === subject}>
-                          <BookOpen size={15} /> {s}
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <span className="voice-muted">لا توجد مواد متاحة لصفك حالياً.</span>
-                  )}
-                </div>
-
-                <div className="voice-options">
-                  <div className="voice-field">
-                    <span className="voice-field-label">أسلوب الكلام</span>
-                    <div className="voice-segment" role="radiogroup">
-                      <button type="button" role="radio" aria-checked={dialect === 'egyptian'} className={dialect === 'egyptian' ? 'active' : ''} onClick={() => setDialect('egyptian')}>عامية مصرية</button>
-                      <button type="button" role="radio" aria-checked={dialect === 'msa'} className={dialect === 'msa' ? 'active' : ''} onClick={() => setDialect('msa')}>فصحى مبسطة</button>
-                    </div>
-                  </div>
-                  <div className="voice-field">
-                    <span className="voice-field-label">صوت المعلم</span>
-                    <div className="voice-segment" role="radiogroup">
-                      <button type="button" role="radio" aria-checked={teacher === 'male'} className={teacher === 'male' ? 'active' : ''} onClick={() => setTeacher('male')}>أستاذ</button>
-                      <button type="button" role="radio" aria-checked={teacher === 'female'} className={teacher === 'female' ? 'active' : ''} onClick={() => setTeacher('female')}>أستاذة</button>
-                    </div>
-                  </div>
-                </div>
-
-                <button type="button" className="btn-primary voice-start-btn" onClick={startCall} disabled={!subject || limitReached}>
-                  <Phone size={18} /> {!authToken ? 'سجّل دخولك وابدأ المكالمة' : limitReached ? 'خلصت دقائق النهارده' : 'ابدأ المكالمة'}
-                </button>
-                {limitReached && usage?.tier === 'free' && (
-                  <button type="button" className="voice-link-btn center" onClick={onUpgrade}>اشترك وخد {minutesAr(VOICE_LIMITS.subscriber.dailyMinutes)} يومياً</button>
-                )}
-
-                <ul className="voice-tips">
-                  <li><Mic size={15} /> اتكلم في أي وقت، حتى والمعلم بيشرح، وهو هيسكت ويسمعك.</li>
-                  <li><Headphones size={15} /> السماعة بتدي أوضح صوت وبتمنع الصدى.</li>
-                  <li><Search size={15} /> كل شرح مبني على كتابك المدرسي.</li>
-                </ul>
-              </>
+        <div className="vx-rows">
+          <div className={`vx-row ${openRow === 'subject' ? 'open' : ''}`}>
+            <button type="button" className="vx-row-head" onClick={() => toggleRow('subject')} aria-expanded={openRow === 'subject'}>
+              <BookOpen size={20} />
+              <span className="vx-row-text"><strong>المادة</strong><span>{subject || 'اختار المادة'} · {gradeName}</span></span>
+              <ChevronDown size={18} className="vx-row-chevron" />
+            </button>
+            {openRow === 'subject' && (
+              <div className="vx-row-body">
+                {subjects.length ? subjects.map(s => (
+                  <button key={s} type="button" disabled={inCall} className={`vx-option ${s === subject ? 'active' : ''}`} onClick={() => { setSubject(s); onSubjectChange(s); }} aria-pressed={s === subject}>
+                    <span>{s}</span>
+                    {s === subject && <Check size={16} />}
+                  </button>
+                )) : <span className="voice-muted">لا توجد مواد متاحة لصفك حالياً.</span>}
+              </div>
             )}
           </div>
-        ) : (
-          <div className="voice-call">
-            <div className="voice-stage">
-              <div ref={orbRef} className={`voice-orb state-${callState}`} aria-hidden="true">
-                <span className="voice-orb-core">
-                  {callState === 'connecting' || callState === 'reconnecting' || callState === 'thinking'
-                    ? <Loader2 size={34} className="animate-spin" />
-                    : callState === 'searching' ? <Search size={34} /> : teacherSpeaking ? <AudioLines size={34} /> : <Mic size={34} />}
-                </span>
-              </div>
-              <div className="voice-stage-meta">
-                <strong>{teacherName} · {subject}</strong>
-                <p className="voice-state-label" aria-live="polite">{muted && !teacherSpeaking ? 'المايك مقفول، اضغط عليه علشان تتكلم' : STATE_LABELS[callState]}</p>
-              </div>
-              {caption && <p className="voice-caption" dir="auto">{caption}</p>}
-              {callLeft > 0 && callLeft <= 60 && <span className="voice-time-warn">باقي أقل من دقيقة في المكالمة</span>}
-            </div>
-
-            {!studentSpoke && callState !== 'connecting' && (
-              <div className="voice-starters">
-                <span><Sparkles size={13} /> ابدأ بسؤال زي:</span>
-                <div className="voice-chips center">
-                  {starters.map(s => <button key={s} type="button" className="voice-chip small" onClick={() => sendText(s)}>{s}</button>)}
-                </div>
-              </div>
-            )}
-
-            <button type="button" className="voice-transcript-toggle" onClick={() => setShowTranscript(v => !v)} aria-expanded={showTranscript}>
-              {showTranscript ? 'إخفاء نص المكالمة' : `عرض نص المكالمة${entries.length ? ` (${entries.filter(e => e.role !== 'search').length})` : ''}`}
+          <div className={`vx-row ${openRow === 'dialect' ? 'open' : ''}`}>
+            <button type="button" className="vx-row-head" onClick={() => toggleRow('dialect')} aria-expanded={openRow === 'dialect'}>
+              <Languages size={20} />
+              <span className="vx-row-text"><strong>أسلوب الكلام</strong><span>{dialect === 'msa' ? 'فصحى مبسطة' : 'عامية مصرية'}</span></span>
+              <ChevronDown size={18} className="vx-row-chevron" />
             </button>
-            {showTranscript && (
-              <div ref={transcriptRef} className="voice-transcript custom-scrollbar" aria-live="polite">
-                {entries.length === 0 && <p className="voice-muted center">هنا هيظهر نص المكالمة أول بأول.</p>}
-                {entries.map(e => e.role === 'search' ? (
-                  <div key={e.id} className="voice-search-entry">
-                    {e.done ? <Search size={14} /> : <Loader2 size={14} className="animate-spin" />}
-                    <span className="voice-search-text">{e.done ? 'بحث في الكتاب' : 'بيدور في الكتاب'}: {e.text}</span>
-                    {!!e.sources?.length && <span className="voice-sources">{e.sources.map(s => <span key={s}>{s}</span>)}</span>}
-                  </div>
-                ) : (
-                  <div key={e.id} className={`voice-line ${e.role}`}>
-                    <span className="voice-line-who">{e.role === 'student' ? 'أنت' : teacherName}</span>
-                    <p dir="auto">{e.text}{e.interrupted && <span className="voice-cut"> (اتقاطع)</span>}</p>
-                  </div>
+            {openRow === 'dialect' && (
+              <div className="vx-row-body">
+                {([['egyptian', 'عامية مصرية'], ['msa', 'فصحى مبسطة']] as const).map(([key, label]) => (
+                  <button key={key} type="button" disabled={inCall} className={`vx-option ${dialect === key ? 'active' : ''}`} onClick={() => setDialect(key)} aria-pressed={dialect === key}>
+                    <span>{label}</span>
+                    {dialect === key && <Check size={16} />}
+                  </button>
                 ))}
               </div>
             )}
-
-            {showKeyboard && (
-              <form className="voice-type-row" onSubmit={submitTyped}>
-                <input
-                  value={typed}
-                  onChange={e => { setTyped(e.target.value); markStudentActive(); }}
-                  placeholder="اكتب سؤالك أو معادلة"
-                  maxLength={1000}
-                  aria-label="اكتب سؤالك للمعلم"
-                  autoFocus
-                />
-                <button type="submit" className="voice-icon-btn" disabled={!typed.trim()} aria-label="إرسال">
-                  <Send size={18} />
-                </button>
-              </form>
-            )}
-
-            <div className="voice-controls" role="toolbar" aria-label="التحكم في المكالمة">
-              <div className="voice-ctrl-item">
-                <button type="button" className={`voice-round ${muted ? 'on' : ''}`} onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'افتح المايك' : 'اقفل المايك'} title="اختصار: حرف M">
-                  {muted ? <MicOff size={22} /> : <Mic size={22} />}
-                </button>
-                <span>{muted ? 'افتح المايك' : 'المايك'}</span>
-              </div>
-              <div className="voice-ctrl-item">
-                <button type="button" className="voice-round" onClick={stopTeacher} disabled={!teacherSpeaking} aria-label="وقّف الشرح">
-                  <CircleStop size={22} />
-                </button>
-                <span>وقّف الشرح</span>
-              </div>
-              <div className="voice-ctrl-item">
-                <button type="button" className={`voice-round ${showKeyboard ? 'active' : ''}`} onClick={() => setShowKeyboard(v => !v)} aria-pressed={showKeyboard} aria-label="اكتب سؤال">
-                  <Keyboard size={22} />
-                </button>
-                <span>اكتب</span>
-              </div>
-              <div className="voice-ctrl-item">
-                <button type="button" className="voice-round end" onClick={() => finishCall('user')} aria-label="إنهاء المكالمة">
-                  <PhoneOff size={24} />
-                </button>
-                <span>إنهاء</span>
-              </div>
-            </div>
-            <p className="voice-footnote"><FlaskConical size={13} /> تجريبية: مش بتخصم نقاط، وممكن تقف في أي وقت. المدة <bdi dir="ltr">{formatTime(elapsed)}</bdi></p>
           </div>
+          <div className={`vx-row ${openRow === 'about' ? 'open' : ''}`}>
+            <button type="button" className="vx-row-head" onClick={() => toggleRow('about')} aria-expanded={openRow === 'about'}>
+              <FlaskConical size={20} />
+              <span className="vx-row-text"><strong>ميزة تجريبية</strong><span>{usage ? `متبقي ${usage.remaining_seconds < 60 ? 'أقل من دقيقة' : minutesAr(remainingMinutes)} النهارده` : `${minutesAr(VOICE_LIMITS.free.dailyMinutes)} يومياً مجاناً`}</span></span>
+              <ChevronDown size={18} className="vx-row-chevron" />
+            </button>
+            {openRow === 'about' && (
+              <ul className="vx-about">
+                <li><Clock size={15} /> {minutesAr(VOICE_LIMITS.free.dailyMinutes)} يومياً للحساب المجاني و{minutesAr(VOICE_LIMITS.subscriber.dailyMinutes)} للمشتركين.</li>
+                <li><Wallet size={15} /> مش بتخصم أي نقاط من رصيدك.</li>
+                <li><Search size={15} /> كل شرح مبني على كتابك المدرسي، وتقدر تقاطع المعلم في أي وقت.</li>
+                <li><Headphones size={15} /> السماعة بتدي أوضح صوت وبتمنع الصدى.</li>
+                <li><FileText size={15} /> نص المكالمة بيتحفظ في سجلك ويُستخدم لتحسين الخدمة حسب إعدادات الخصوصية.</li>
+                <li><Zap size={15} /> ممكن تقف أو تتغير في أي وقت خلال فترة التجربة.</li>
+                {usage?.tier === 'free' && (
+                  <li><button type="button" className="voice-link-btn" onClick={onUpgrade}>المشتركين ليهم {minutesAr(VOICE_LIMITS.subscriber.dailyMinutes)} يومياً، اعرف الباقات</button></li>
+                )}
+              </ul>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className={`voice-page vx ${inCall ? 'in-call' : ''}`}>
+      <div className="vx-top">
+        <button type="button" className="vx-round" onClick={inCall ? () => finishCall('user') : onBack} aria-label={inCall ? 'إنهاء المكالمة والرجوع' : 'الرجوع للدردشة'}>
+          <ArrowRight size={20} />
+        </button>
+        <div className="vx-top-center">
+          <span className="vx-title">{inCall ? `${teacherName} · ${subject}` : 'المعلم الصوتي'}</span>
+          {inCall
+            ? <span className={`vx-timer num ${callLeft <= 60 ? 'warn' : ''}`} title="الوقت المتبقي في المكالمة"><bdi dir="ltr">{formatTime(callLeft)}</bdi></span>
+            : <span className="vx-beta">تجريبي</span>}
+        </div>
+        <div className="vx-top-end">
+          {inCall && (
+            <button type="button" className={`vx-round ${showTranscript ? 'active' : ''}`} onClick={() => setShowTranscript(v => !v)} aria-pressed={showTranscript} aria-label="نص المكالمة">
+              <FileText size={19} />
+            </button>
+          )}
+          <button type="button" className="vx-round" onClick={() => setShowSettings(true)} aria-label="إعدادات المكالمة">
+            <SlidersHorizontal size={19} />
+          </button>
+        </div>
+      </div>
+
+      <div className="vx-stage">
+        {feedback && !inCall ? renderFeedback() : (
+          <>
+            <div ref={orbRef} className={`vx-orb state-${callState} voice-${teacher}`} aria-hidden="true">
+              <span className="vx-orb-cloud" />
+              {(callState === 'connecting' || callState === 'reconnecting') && <Loader2 size={30} className="animate-spin vx-orb-icon" />}
+              {callState === 'searching' && <Search size={30} className="vx-orb-icon" />}
+            </div>
+            <div className="vx-status" aria-live="polite">
+              {inCall ? (
+                <>
+                  <strong>{muted && !teacherSpeaking ? 'المايك مقفول، اضغط عليه علشان تتكلم' : STATE_LABELS[callState]}</strong>
+                  {caption && !showTranscript && <p className="vx-caption" dir="auto">{caption}</p>}
+                  {callLeft > 0 && callLeft <= 60 && <span className="vx-warn">باقي أقل من دقيقة في المكالمة</span>}
+                </>
+              ) : (
+                <>
+                  <strong>{activeVoice.name} جاهز يذاكر معاك {subject}</strong>
+                  <p>اتكلم براحتك واسأل عن أي درس، والمعلم بيرجع لكتابك المدرسي قبل ما يشرح.</p>
+                  {notice && <div className={`voice-notice ${notice.tone === 'danger' ? 'danger' : ''}`} role="status">{notice.text}</div>}
+                </>
+              )}
+            </div>
+          </>
         )}
       </div>
+
+      {inCall && showTranscript && (
+        <div ref={transcriptRef} className="voice-transcript vx-transcript custom-scrollbar" aria-live="polite">
+          {entries.length === 0 && <p className="voice-muted center">هنا هيظهر نص المكالمة أول بأول.</p>}
+          {entries.map(e => e.role === 'search' ? (
+            <div key={e.id} className="voice-search-entry">
+              {e.done ? <Search size={14} /> : <Loader2 size={14} className="animate-spin" />}
+              <span className="voice-search-text">{e.done ? 'بحث في الكتاب' : 'بيدور في الكتاب'}: {e.text}</span>
+              {!!e.sources?.length && <span className="voice-sources">{e.sources.map(s => <span key={s}>{s}</span>)}</span>}
+            </div>
+          ) : (
+            <div key={e.id} className={`voice-line ${e.role}`}>
+              <span className="voice-line-who">{e.role === 'student' ? 'أنت' : teacherName}</span>
+              <p dir="auto">{e.text}{e.interrupted && <span className="voice-cut"> (اتقاطع)</span>}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {inCall && !studentSpoke && callState !== 'connecting' && (
+        <div className="vx-starters">
+          {starters.map(s => <button key={s} type="button" className="voice-chip small" onClick={() => sendText(s)}>{s}</button>)}
+        </div>
+      )}
+
+      <div className="vx-bottom">
+        {inCall ? (
+          <>
+            <button type="button" className="vx-end" onClick={() => finishCall('user')} aria-label="إنهاء المكالمة"><X size={24} /></button>
+            <button type="button" className={`vx-round lg ${muted ? 'on' : ''}`} onClick={toggleMute} aria-pressed={muted} aria-label={muted ? 'افتح المايك' : 'اقفل المايك'} title="اختصار: حرف M">
+              {muted ? <MicOff size={22} /> : <Mic size={22} />}
+            </button>
+            {teacherSpeaking && (
+              <button type="button" className="vx-round lg" onClick={stopTeacher} aria-label="وقّف الشرح" title="وقّف الشرح">
+                <CircleStop size={22} />
+              </button>
+            )}
+            <form className="vx-ask" onSubmit={submitTyped}>
+              <input
+                value={typed}
+                onChange={e => { setTyped(e.target.value); markStudentActive(); }}
+                placeholder="اسأل EGS AI"
+                maxLength={1000}
+                aria-label="اكتب سؤالك للمعلم"
+              />
+              <button type="submit" disabled={!typed.trim()} aria-label="إرسال"><ArrowUp size={18} /></button>
+            </form>
+          </>
+        ) : (
+          <>
+            <button type="button" className="vx-end" onClick={onBack} aria-label="الرجوع للدردشة"><X size={24} /></button>
+            <button type="button" className="vx-start" onClick={startCall} disabled={!subject || limitReached}>
+              <Phone size={19} />
+              <span>{!authToken ? 'سجّل دخولك وابدأ المكالمة' : limitReached ? 'خلصت دقائق النهارده' : 'ابدأ المكالمة'}</span>
+            </button>
+          </>
+        )}
+      </div>
+      {!inCall && limitReached && usage?.tier === 'free' && (
+        <button type="button" className="voice-link-btn vx-upgrade" onClick={onUpgrade}>اشترك وخد {minutesAr(VOICE_LIMITS.subscriber.dailyMinutes)} يومياً</button>
+      )}
+
+      {showSettings && renderSettings()}
     </div>
   );
 }

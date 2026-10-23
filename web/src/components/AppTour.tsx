@@ -126,7 +126,7 @@ export function AppTour({
             content: (
               <div className="tour-content-body">
                 <p>
-                  أول وأهم خطوة لازم تعملها: <strong>حدد المادة اللي عايز تذاكرها دلوقتي</strong> من شريط المواد قدامك!
+                  أول وأهم خطوة لازم تعملها: <strong>حدد المادة اللي عايز تذاكرها دلوقتي</strong> من زر المادة اللي فوق في نص الشاشة!
                 </p>
                 <p>
                   بمجرد ما تختار المادة، الذكاء الاصطناعي بيظبط كل إجاباته وشروحه على منهج وقوانين المادة دي بالظبط.
@@ -176,7 +176,7 @@ export function AppTour({
                 content: (
                   <div className="tour-content-body">
                     <p>
-                      تحت مربع السؤال عندك تحكّم قوي جداً:
+                      زر <strong>+</strong> جوه مربع السؤال بيفتح لك الصور والتفكير العميق وطريقة الشرح:
                     </p>
                     <ul className="tour-features-list">
                       <li>
