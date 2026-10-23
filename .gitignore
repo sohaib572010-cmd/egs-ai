@@ -48,3 +48,6 @@ Curriculum Generator/page_images_cache/
 *load_test_results.json
 
 web/db_data.json
+
+# Local Supabase monitor state (contains real subscriber IDs)
+web/monitor_state.json
