@@ -11,6 +11,7 @@ const PAGES: Entry[] = [
   ['/flashcards', 0.9, 'weekly'],
   ['/subscriptions', 0.9, 'weekly'],
   ['/features', 0.9, 'weekly'],
+  ['/about', 0.9, 'monthly'],
   ['/tasks', 0.75, 'weekly'],
   ['/leaderboard', 0.75, 'daily'],
   ['/download', 0.8, 'monthly'],
@@ -21,7 +22,7 @@ const PAGES: Entry[] = [
   ['/delete-account', 0.3, 'monthly']
 ];
 
-const LAST_CONTENT_UPDATE = new Date('2026-10-05');
+const LAST_CONTENT_UPDATE = new Date('2026-10-13');
 
 export default function sitemap(): MetadataRoute.Sitemap {
   const pages = PAGES.map(([path, priority, changeFrequency]) => ({

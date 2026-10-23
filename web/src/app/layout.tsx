@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import Link from 'next/link';
 import { Readex_Pro } from 'next/font/google';
-import { DEFAULT_DESCRIPTION, DEFAULT_TITLE, FEATURES, SITE_URL } from '@/lib/seo';
+import { CONTACT, DEFAULT_DESCRIPTION, DEFAULT_TITLE, FEATURES, SITE_FAQ, SITE_URL } from '@/lib/seo';
 import { OG_IMAGE } from '@/lib/seo_metadata';
 import './globals.css';
 
@@ -223,6 +223,9 @@ export const metadata: Metadata = {
     languages: {
       'ar-EG': '/',
     },
+    types: {
+      'text/plain': [{ url: '/llms.txt', title: 'EGS AI summary for AI assistants (llms.txt)' }],
+    },
   },
   manifest: '/manifest.webmanifest',
   icons: {
@@ -344,9 +347,9 @@ export default function RootLayout({
         ],
         'contactPoint': {
           '@type': 'ContactPoint',
-          'telephone': '+201037220587',
+          'telephone': CONTACT.phone,
           'contactType': 'customer support',
-          'email': 'business@egsaiedu.com',
+          'email': CONTACT.email,
           'areaServed': 'EG',
           'availableLanguage': ['Arabic', 'English']
         }
@@ -375,43 +378,7 @@ export default function RootLayout({
       {
         '@type': 'FAQPage',
         '@id': `${siteUrl}/#faq`,
-        'mainEntity': [
-          {
-            '@type': 'Question',
-            'name': 'ما هو EGS AI؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'EGS AI معلم ذكي بالذكاء الاصطناعي لطلاب الإعدادية والثانوية والبكالوريا المصرية، مرتبط بكتب المنهج المصري: يشرح الدروس، يحل المسائل من الصور، يولّد امتحانات وكويزات ويصححها، ينشئ بطاقات مراجعة ذكية، ويذاكر معك صوتياً.' }
-          },
-          {
-            '@type': 'Question',
-            'name': 'هل يجيب EGS AI من المنهج المصري؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، يبحث في كتاب مادتك لصفك الدراسي قبل الإجابة، ويوضح إذا كانت نقطة ما خارج المطلوب في الامتحان.' }
-          },
-          {
-            '@type': 'Question',
-            'name': 'هل يوجد مساعد صوتي للمذاكرة في EGS AI؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، المعلم الصوتي يتيح مكالمة صوتية مباشرة بالعامية المصرية أو الفصحى المبسطة مع معلم ذكي يبحث في كتابك أثناء المكالمة، ويمكنك مقاطعته في أي وقت.' }
-          },
-          {
-            '@type': 'Question',
-            'name': 'هل يمكنني عمل امتحانات وكويزات على المنهج؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، ولّد امتحاناً من أي درس بأسئلة اختيار من متعدد وصح وخطأ ومقالية، واستلم تصحيحاً فورياً مع شرح كل خطأ وامتحاناً علاجياً لنقاط ضعفك.' }
-          },
-          {
-            '@type': 'Question',
-            'name': 'هل يوجد فلاش كارد للمراجعة؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، يولّد EGS AI بطاقات مراجعة من دروسك ويجدولها بنظام التكرار المتباعد.' }
-          },
-          {
-            '@type': 'Question',
-            'name': 'هل يمكن حل المسائل بتصويرها؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'نعم، صوّر المسألة بكاميرا الموقع أو ارفع صورتها، وقصها، ويشرح المعلم الذكي الحل خطوة بخطوة.' }
-          },
-          {
-            '@type': 'Question',
-            'name': 'كم سعر الاشتراك في EGS AI؟',
-            'acceptedAnswer': { '@type': 'Answer', 'text': 'تبدأ مجاناً بنقاط تجريبية، والباقات: شهر 60 جنيه، شهرين 110 جنيه، 3 أشهر 140 جنيه، والدفع بالفيزا والمحافظ الإلكترونية وإنستاباي.' }
-          }
-        ]
+        'mainEntity': SITE_FAQ.map(q => ({ '@type': 'Question', 'name': q.q, 'acceptedAnswer': { '@type': 'Answer', 'text': q.a } }))
       }
     ]
   };
@@ -520,6 +487,7 @@ export default function RootLayout({
             {FEATURES.map(f => (
               <li key={f.slug}><Link href={`/features/${f.slug}`}>{f.navLabel}</Link></li>
             ))}
+            <li><Link href="/about">عن EGS AI</Link></li>
           </ul>
         </nav>
         {children}

@@ -16,6 +16,7 @@ export function FeatureFooter() {
       {FEATURES.map(f => (
         <Link key={f.slug} href={`/features/${f.slug}`}>{f.navLabel}</Link>
       ))}
+      <Link href="/about">عن EGS AI</Link>
       <Link href="/download">تحميل التطبيق</Link>
       <Link href="/contact">تواصل معنا</Link>
       <Link href="/privacy">سياسة الخصوصية</Link>

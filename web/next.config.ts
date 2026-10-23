@@ -14,6 +14,10 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       { source: "/:path*", headers: securityHeaders },
+      { source: "/", headers: [{
+          key: "Link",
+          value: '</llms.txt>; rel="help"; type="text/plain", </llms-full.txt>; rel="describedby"; type="text/plain", </about>; rel="about", </>; rel="alternate"; type="text/markdown"'
+        }] },
       {
         source: "/:file(logo.png|icon.png|favicon.ico)",
         headers: [{ key: "Cache-Control", value: "public, max-age=86400, stale-while-revalidate=604800" }]

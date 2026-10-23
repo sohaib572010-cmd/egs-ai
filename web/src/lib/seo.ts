@@ -227,6 +227,26 @@ export const FEATURES: FeaturePage[] = [
   }
 ];
 
+export const CONTACT = { email: 'business@egsaiedu.com', phone: '+201037220587' };
+
+// Site-wide FAQ: root FAQPage JSON-LD, the /about page and llms.txt.
+export const SITE_FAQ: FeatureFaq[] = [
+  { q: 'ما هو EGS AI؟', a: 'EGS AI معلم ذكي بالذكاء الاصطناعي لطلاب الإعدادية والثانوية والبكالوريا المصرية، مرتبط بكتب المنهج المصري: يشرح الدروس، يحل المسائل من الصور، يولّد امتحانات وكويزات ويصححها، ينشئ بطاقات مراجعة ذكية، ويذاكر معك صوتياً.' },
+  { q: 'هل يجيب EGS AI من المنهج المصري؟', a: 'نعم، يبحث في كتاب مادتك لصفك الدراسي قبل الإجابة، ويوضح إذا كانت نقطة ما خارج المطلوب في الامتحان.' },
+  { q: 'هل يوجد مساعد صوتي للمذاكرة في EGS AI؟', a: 'نعم، المعلم الصوتي يتيح مكالمة صوتية مباشرة بالعامية المصرية أو الفصحى المبسطة مع معلم ذكي يبحث في كتابك أثناء المكالمة، ويمكنك مقاطعته في أي وقت.' },
+  { q: 'هل يمكنني عمل امتحانات وكويزات على المنهج؟', a: 'نعم، ولّد امتحاناً من أي درس بأسئلة اختيار من متعدد وصح وخطأ ومقالية، واستلم تصحيحاً فورياً مع شرح كل خطأ وامتحاناً علاجياً لنقاط ضعفك.' },
+  { q: 'هل يوجد فلاش كارد للمراجعة؟', a: 'نعم، يولّد EGS AI بطاقات مراجعة من دروسك ويجدولها بنظام التكرار المتباعد.' },
+  { q: 'هل يمكن حل المسائل بتصويرها؟', a: 'نعم، صوّر المسألة بكاميرا الموقع أو ارفع صورتها، وقصها، ويشرح المعلم الذكي الحل خطوة بخطوة.' },
+  { q: 'كم سعر الاشتراك في EGS AI؟', a: 'تبدأ مجاناً بنقاط تجريبية، والباقات: شهر 60 جنيه، شهرين 110 جنيه، 3 أشهر 140 جنيه، والدفع بالفيزا والمحافظ الإلكترونية وإنستاباي.' }
+];
+
+// English summary for AI assistants and English-language queries (about page, llms.txt).
+export const ENGLISH_SUMMARY =
+  'EGS AI (egsaiedu.com) is an Arabic-first AI tutor built on the official Egyptian national curriculum for preparatory (middle school) and secondary / Egyptian Baccalaureate students. ' +
+  'Before answering, it searches the student\'s own textbook for their grade and subject, then explains lessons step by step with equations and diagrams. ' +
+  'It solves problems from photos, generates curriculum-based exams and quizzes with instant AI grading, creates spaced-repetition flashcards, ' +
+  'and offers a live voice tutor that speaks Egyptian Arabic. Students start free; paid plans cost 60 EGP (1 month), 110 EGP (2 months) and 140 EGP (3 months).';
+
 export function getFeature(slug: string): FeaturePage | undefined {
   return FEATURES.find(f => f.slug === slug);
 }
