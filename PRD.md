@@ -112,6 +112,7 @@ c:\myapp\                      Git repo (github.com/sohaib572010-cmd/egs-ai, bra
     ├── supabase_migration_voice_usage.sql    voice_usage (daily minutes, key_slot) + voice_calls (call logs) tables, RLS on, service role only
     ├── supabase_migration_performance.sql    Hot-path indexes, exact per-curriculum vector scan (HNSW dropped), redundant index cleanup, leaderboard + admin_user_activity RPCs, RPC/RLS hardening, private `chat-media` bucket (section 6.21)
     ├── vercel.json            Function region `dub1` (Dublin, next to Supabase eu-west-1)
+    ├── scripts/monitor_stats.mjs  Local Supabase monitor: account / message / subscriber counts with Windows toast alerts via scripts/notify.ps1 (keys from .env.local; state in the git-ignored monitor_state.json, which holds real subscriber IDs)
     ├── scripts/indexnow.mjs  Submits every sitemap URL plus the llms files to IndexNow; run after each production deploy (section 12.1)
     ├── scripts/offload_chat_media.mjs  One-time move of inline base64 chat media into storage (dry run by default, `--apply`)
     ├── db_data.json           Local-dev JSON database (fallback when no Supabase env); untracked since 2026-10-10 (it held real user emails) and recreated with seed data when missing
